@@ -1,0 +1,3 @@
+DEVICES=${1}
+
+CUDA_VISIBLE_DEVICES=${DEVICES} python eval.py

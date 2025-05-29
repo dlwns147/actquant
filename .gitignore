@@ -172,3 +172,36 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+
+*.pt
+*.pkl
+.vscode*
+.pkl_memoize_py3
+Atom/
+bitblas-benchmark/
+common_code*/
+DuQuant/
+GPTQv2/
+
+poc/
+# QuaRot_act
+QuaRot_awq/
+QuaRot_KIVI/
+SpinQuant/
+*egg-info*/
+setup.py
+
+*/.ninja_deps
+*.o
+# *.json
+*.log
+*.pyc
+*.so
+build/*
+*.cmake
+*.in
+*/CMakeFiles/
+*/CMakeCache.txt
+*.egg
+*/Makefile
