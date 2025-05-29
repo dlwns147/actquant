@@ -205,3 +205,4 @@ build/*
 */CMakeCache.txt
 *.egg
 */Makefile
+*.nsys-rep
