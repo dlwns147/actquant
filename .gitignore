@@ -190,7 +190,7 @@ QuaRot_awq/
 QuaRot_KIVI/
 SpinQuant/
 *egg-info*/
-setup.py
+# setup.py
 
 */.ninja_deps
 *.o
