@@ -21,7 +21,7 @@ sdist/
 var/
 wheels/
 share/python-wheels/
-*.egg-info/
+# *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
@@ -181,6 +181,7 @@ cython_debug/
 Atom/
 bitblas-benchmark/
 common_code*/
+utils.egg-info
 DuQuant/
 GPTQv2/
 
@@ -189,6 +190,7 @@ poc/
 QuaRot_awq/
 QuaRot_KIVI/
 SpinQuant/
+# *egg-info*/
 # setup.py
 
 */.ninja_deps
