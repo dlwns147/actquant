@@ -3,8 +3,8 @@ TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
 MODEL_PATH=/SSD/huggingface/meta-llama
-# MODEL_NAME=Llama-2-7b-hf
-MODEL_NAME=Llama-2-13b-hf
+MODEL_NAME=Llama-2-7b-hf
+# MODEL_NAME=Llama-2-13b-hf
 CONFIG=config/llama.json
 
 Q_BITS="2 3 4"
@@ -35,7 +35,6 @@ W_BITS=16
 W_GROUP_SIZE=128
 
 K_BITS=2
-
 V_BITS=2
 
 # KV_GROUP_SIZE=32
@@ -49,6 +48,9 @@ V_QUANT_PER=token
 
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${METHOD}_${BITS}
 SAVE=save/result/${TODAY}_test
+
+LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_pure_${METHOD}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE}gs_${K_QUANT_PER}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE}gs_${V_QUANT_PER}_r${RESIDUAL_LENGTH}
+LONG_BENCH_CONFIG=utils/long_bench_config
 
 N_PROC=1
 
@@ -69,10 +71,14 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --use_flash \
 -n ${N} \
 --save ${SAVE} \
---datasets ${DATASETS} \
---zeroshot \
---tasks ${TASKS} \
+--long_bench \
+--long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
+--long_bench_config ${LONG_BENCH_CONFIG} \
 --clip_asym
+
+# --datasets ${DATASETS} \
+# --zeroshot \
+# --tasks ${TASKS} \
 
 # --method ${METHOD} \
 # --group_size ${GROUP_SIZE} \

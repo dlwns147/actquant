@@ -12,10 +12,12 @@ from pymoo.util.normalization import normalize
 
 from evaluator import LlamaEvaluator
 from tqdm import tqdm
+from time import time
 import csv
 from matplotlib import pyplot as plt
 from utils.func import init_accelerator, get_net_info, clean_up
 from utils.eval import measure_latency, eval_zeroshot
+from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
 from quant.model import get_quantized_model
 import gc
@@ -168,9 +170,9 @@ def main(args):
         print(f'Selected arch[{idx}] {args.comp_obj}: {pf[idx, 1:].tolist()}, metric: {pf[idx, 0].item():.4f}')
 
     model_id = f'{args.model_path}/{args.model_name}'
-    awq_gptq_owq = 'awq' in args.method or 'gptq' in args.method or 'owq' in args.method
+    use_awq_gptq_owq = 'awq' in args.method or 'gptq' in args.method or 'owq' in args.method
     
-    if awq_gptq_owq:
+    if use_awq_gptq_owq:
         args.quant_model_bits = []
         args.quant_model_paths = []
 
@@ -202,8 +204,8 @@ def main(args):
         
         weight_bits = np.concatenate(list(arch['w'].values()))
         do_owq = ((weight_bits - weight_bits.astype(int)).sum() != 0)
-        print(f'do_owq : {do_owq}, awq_gptq_owq : {awq_gptq_owq}')
-        if awq_gptq_owq:
+        print(f'do_owq : {do_owq}, use_awq_gptq_owq : {use_awq_gptq_owq}')
+        if use_awq_gptq_owq:
             method = 'awq' if 'awq' in args.method else 'gptq' if 'gptq' in args.method else 'owq' if 'owq' in args.method else None
             model = get_quantized_model(method, arch, model_id, device_map, config=config, prune='layer_prune' in args.method, do_owq=do_owq, owq_path=args.outlier_path)
         else:
@@ -222,29 +224,33 @@ def main(args):
         
         if args.zeroshot:
             clean_up()
-            # model.use_cache = False
             model.config.residual_length = args.residual_length
             model.config.quant_kv_output = False
             
             results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks)
-            # acc_norm = [task_result['acc_norm,none'] if 'acc_norm,none' in task_result else task_result['acc,none'] for task_result in results.values()]
-            # acc = [task_result['acc,none'] for task_result in results.values()]
             
             task = list(results.keys())            
             print(f'task : {task}')
             for task, result in results.items():
                 print(f'task: {task}, result: {result}')
-            # avg_acc_norm = np.mean(acc_norm)
-            # avg_acc = np.mean(acc)
-            # print(f'avg_acc_norm : {avg_acc_norm}, avg_acc : {avg_acc}')
-            # print(f'task : {task}')
-            # print(f'acc_norm : {acc_norm}')
-            # print(f'acc : {acc}')
         
         if args.long_bench:
-            pass
+            long_bench_start = time()
+            pred_long_bench(model, tokenizer=get_tokenizer(model_id), save_path=args.long_bench_result_path, long_bench_config=args.long_bench_config, e=args.long_bench_e)
+            eval_long_bench(args.long_bench_result_path, args.long_bench_e)
+            long_bench_time = time() - long_bench_start
+            
+            sentences = []
+            for k, v in vars(args).items():
+                sentences.append(f"{k}: {v}\n")
+            sentences.append(f'Longbench Time: {long_bench_time:.2f}s')
+            sentences.append("\n")
+
+            with open(os.path.join(args.long_bench_result_path, "pred_e" if args.long_bench_e else "pred", 'result.txt'), 'w') as f:
+                for sentence in sentences:
+                    f.write(sentence)
         
-        if awq_gptq_owq:
+        if use_awq_gptq_owq:
             del model
             clean_up()
 
@@ -376,6 +382,12 @@ if __name__ == '__main__':
     parser.add_argument('--zeroshot', action='store_true', help='')
     parser.add_argument('--tasks', type=str, nargs='+', default=['coqa', 'gsm8k', 'truthfulqa'])
     parser.add_argument('--long_bench', action='store_true', help='')
+    parser.add_argument('--long_bench_e', action='store_true',
+                        help='number of architectures desired')
+    parser.add_argument('--long_bench_result_path', type=str, default='',
+                        help='')
+    parser.add_argument('--long_bench_config', type=str, default='',
+                        help='')
 
 
     cfgs = parser.parse_args()

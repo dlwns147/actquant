@@ -3,8 +3,8 @@ TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
 MODEL_PATH=/SSD/huggingface/meta-llama
-MODEL_NAME=Llama-2-7b-hf
-# MODEL_NAME=Llama-2-13b-hf
+# MODEL_NAME=Llama-2-7b-hf
+MODEL_NAME=Llama-2-13b-hf
 CONFIG=config/llama.json
 DTYPE=float16
 
@@ -14,11 +14,15 @@ DTYPE=float16
 # METHOD=hqq
 # METHOD_TEXT=hqq
 
-METHOD=awq
-METHOD_TEXT=awq
+# METHOD=awq
+# METHOD_TEXT=awq
 
 # METHOD="awq layer_prune"
 # METHOD_TEXT=awq_layer_prune
+
+METHOD=fp16
+METHOD_TEXT=fp16
+
 
 W_BITS="2 3 4"
 W_BITS_TEXT="234"
@@ -29,7 +33,6 @@ W_BITS_TEXT="16"
 AXIS=1
 W_GROUP_SIZE=128
 QSCALE=false
-QZERO=false
 
 K_BITS="2 4"
 K_BITS_TEXT="24"
@@ -63,11 +66,11 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 
 # COMP_OBJ="kvbits"
 COMP_OBJ=(kvbits)
-COMP_OBJ_TEXT="kv"
+COMP_OBJ_TEXT=kv
 # COMP_OBJ_VAL="3.0 3.0"
-# COMP_OBJ_VAL=(3.0)
+COMP_OBJ_VAL=(3.0)
 # COMP_OBJ_VAL=(2.5)
-COMP_OBJ_VAL=(2.31)
+# COMP_OBJ_VAL=(2.31)
 # COMP_OBJ_VAL=(2.35)
 
 
@@ -91,12 +94,18 @@ COMP_OBJ_VAL=$(IFS=" " ; echo "${COMP_OBJ_VAL[*]}")
 PREFER=$(IFS=" " ; echo "${PREFER_LIST[*]}")
 MIN_COMP_OBJ=$(IFS=" " ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
+MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
+MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
+
 
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
 TASKS="coqa gsm8k truthfulqa"
 # TASKS="coqa truthfulqa"
 
 EXPR_FOLDER=save/search/quant
+
+# EXPR_FILE=2505290559_Llama-2-13b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_50.stats
+# EXPR_FILE=2505290559_Llama-2-13b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_80.stats
 
 EXPR_FILE=2505281228_Llama-2-7b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_50.stats
 # EXPR_FILE=2505281228_Llama-2-7b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_80.stats
@@ -112,6 +121,8 @@ EXPR_FILE=2505281228_Llama-2-7b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_
 # EXPR_FILE=2411211754_Llama-2-7b-hf_bits_loss_hqq_iter_300_nsga2_234_obj_2_4_jsd_mut_0.05_layer_prune_1.0_1.0/iter_299.stats
 
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}
+LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE}gs_${K_QUANT_PER}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE}gs_${V_QUANT_PER}_r${RESIDUAL_LENGTH}
+LONG_BENCH_CONFIG=utils/long_bench_config
 N=1
 DATASETS="wikitext2 c4"
 
@@ -139,10 +150,15 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --debug \
 --expr ${EXPR_FOLDER}/${EXPR_FILE} \
 --prefer ${PREFER} \
---datasets ${DATASETS} \
---zeroshot \
---tasks ${TASKS} \
---use_flash
+--use_flash \
+--long_bench \
+--long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
+--long_bench_config ${LONG_BENCH_CONFIG}
+# --long_bench_e
+
+# --datasets ${DATASETS} \
+# --zeroshot \
+# --tasks ${TASKS} \
 
 # --method ${METHOD} \
 # --quant_model_paths ${QMODEL_PATHS} \

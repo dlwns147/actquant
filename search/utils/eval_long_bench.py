@@ -14,7 +14,7 @@ warnings.filterwarnings("ignore")
 from transformers import LlamaConfig, MistralConfig, AutoTokenizer, AutoConfig, AutoModelForCausalLM
 # from models.replace import replace_model
 
-from metrics import (
+from .metrics import (
     qa_f1_score,
     rouge_zh_score,
     qa_f1_zh_score,
@@ -86,7 +86,7 @@ def post_process(response, model_name):
 
 def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset, device, model_name):
     preds = []
-    for json_obj in tqdm(data):
+    for json_obj in tqdm(data, desc=dataset):
         prompt = prompt_format.format(**json_obj)
         # truncate to fit max_length (we suggest truncate in the middle, since the left and right side may contain crucial instructions)
         tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
@@ -122,29 +122,33 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset
         preds.append({"pred": pred, "answers": json_obj["answers"], "all_classes": json_obj["all_classes"], "length": json_obj["length"]})
     return preds
 
-def pred_long_bench(model, tokenizer, save_path, e):
-    import sys
-    sys.path.join('.')
+def pred_long_bench(model, tokenizer, save_path, long_bench_config, e):
     # print(args)
     # seed_everything(args.seed)
     # args = parse_args()
     # model2path = json.load(open("config/model2path.json", "r"))
-    model2maxlen = json.load(open("long_bench_config/model2maxlen.json", "r"))
+    # model2maxlen = json.load(open("long_bench_config/model2maxlen.json", "r"))
+    model2maxlen = json.load(open(os.path.join(long_bench_config, "model2maxlen.json"), "r"))
     # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # model_name = args.model
 
-    model_name = model.config._name_or_path
+    model_name = model.config._name_or_path.split('/')[-1]
     max_length = model2maxlen[model_name]
     device = model.device
     
     if e:
+        # datasets = ["qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "gov_report", "multi_news", 
+        #             "trec", "triviaqa", "samsum", "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
         datasets = ["qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "gov_report", "multi_news", 
-                    "trec", "triviaqa", "samsum", "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
+                    "trec", "triviaqa", "samsum", "passage_count", "passage_retrieval_en", "lcc", "repobench-p", "qmsum"]
     else:
         datasets = ["triviaqa", "qasper", "trec", "samsum", "lcc", "repobench-p", "qmsum", "multi_news"]
     # we design specific prompt format and max generation length for each task, feel free to modify them to optimize model output
-    dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
-    dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
+    # dataset2prompt = json.load(open("long_bench_config/dataset2prompt.json", "r"))
+    # dataset2maxlen = json.load(open("long_bench_config/dataset2maxlen.json", "r"))
+    
+    dataset2prompt = json.load(open(os.path.join(long_bench_config, "dataset2prompt.json"), "r"))
+    dataset2maxlen = json.load(open(os.path.join(long_bench_config, "dataset2maxlen.json"), "r"))
     # predict on each dataset
 
     if e:
@@ -155,18 +159,21 @@ def pred_long_bench(model, tokenizer, save_path, e):
     #     os.makedirs("pred")
     # if not os.path.exists("pred_e"):
     #     os.makedirs("pred_e")
+    
     for dataset in datasets:
         if e:
             data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
-            path = f"pred_e/{args.model_name}_{max_length}_k{args.k_bits}v${args.v_bits}bits_group{args.group_size}_residual{args.residual_length}"
-            if not os.path.exists(path):
-                os.makedirs(path)
+            # path = f"pred_e/{args.model_name}_{max_length}_k{args.k_bits}v${args.v_bits}bits_group{args.group_size}_residual{args.residual_length}"
+            path = os.path.join(save_path, "pred_e")
+            # if not os.path.exists(path):
+            #     os.makedirs(path)
             out_path = os.path.join(path, f'{dataset}.jsonl')
         else:
             data = load_dataset('THUDM/LongBench', dataset, split='test')
-            path = f"pred/{args.model_name}_{max_length}_k{args.k_bits}v${args.v_bits}bits_group{args.group_size}_residual{args.residual_length}"
-            if not os.path.exists(path):
-                os.makedirs(path)
+            # path = f"pred/{args.model_name}_{max_length}_k{args.k_bits}v${args.v_bits}bits_group{args.group_size}_residual{args.residual_length}"
+            path = os.path.join(save_path, "pred")
+            # if not os.path.exists(path):
+            #     os.makedirs(path)
             out_path = os.path.join(path, f'{dataset}.jsonl')
         prompt_format = dataset2prompt[dataset]
         max_gen = dataset2maxlen[dataset]
@@ -207,11 +214,11 @@ def scorer(dataset, predictions, answers, all_classes):
 
 def eval_long_bench(path, e):
     # args = parse_args()
-    # scores = dict()
-    # if args.e:
-    #     path = f"pred_e/{args.model}/"
-    # else:
-    #     path = f"pred/{args.model}/"
+    if e:
+        path = os.path.join(path, "pred_e")
+    else:
+        path = os.path.join(path, "pred")
+    scores = dict()
     all_files = os.listdir(path)
     print("Evaluating on:", all_files)
     for filename in all_files:
@@ -219,7 +226,7 @@ def eval_long_bench(path, e):
             continue
         predictions, answers, lengths = [], [], []
         dataset = filename.split('.')[0]
-        with open(f"{path}{filename}", "r", encoding="utf-8") as f:
+        with open(os.path.join(path, filename), "r", encoding="utf-8") as f:
             for line in f:
                 data = json.loads(line)
                 predictions.append(data["pred"])
@@ -227,14 +234,20 @@ def eval_long_bench(path, e):
                 all_classes = data["all_classes"]
                 if "length" in data:
                     lengths.append(data["length"])
-        if args.e:
+        if e:
             score = scorer_e(dataset, predictions, answers, lengths, all_classes)
         else:
             score = scorer(dataset, predictions, answers, all_classes)
         scores[dataset] = score
-    if args.e:
-        out_path = f"pred_e/{args.model}/result.json"
-    else:
-        out_path = f"pred/{args.model}/result.json"
+    # if e:
+    #     # out_path = f"pred_e/{args.model}/result.json"
+    #     out_path = os.path.join(path, 'pred_e', 'result.json')
+    # else:
+    #     # out_path = f"pred/{args.model}/result.json"
+    #     out_path = os.path.join(path, 'pred', 'result.json')
+    out_path = os.path.join(path, 'result.json')
+    print(f'task: {list(scores.keys())}')
+    print(f'score: {list(scores.values())}')
+
     with open(out_path, "w") as f:
         json.dump(scores, f, ensure_ascii=False, indent=4)

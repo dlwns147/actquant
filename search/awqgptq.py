@@ -16,10 +16,11 @@ import csv
 from matplotlib import pyplot as plt
 from utils.func import init_accelerator, clean_up, get_net_info
 from utils.eval import measure_latency, eval_zeroshot
+from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
 from quant.model import get_quantized_model
-import gc
 import warnings
+from time import time
 warnings.simplefilter("ignore")
 
 import datasets
@@ -151,6 +152,23 @@ def main(args):
         # print(f'task : {task}')
         # print(f'acc_norm : {acc_norm}')
         # print(f'acc : {acc}')
+
+    if args.long_bench:
+        long_bench_start = time()
+        pred_long_bench(model, tokenizer=get_tokenizer(model_id), save_path=args.long_bench_result_path, long_bench_config=args.long_bench_config, e=args.long_bench_e)
+        eval_long_bench(args.long_bench_result_path, args.long_bench_e)
+        long_bench_time = time() - long_bench_start
+        
+        sentences = []
+        for k, v in vars(args).items():
+            sentences.append(f"{k}: {v}\n")
+        sentences.append(f'Longbench Time: {long_bench_time:.2f}s')
+        sentences.append("\n")
+
+        with open(os.path.join(args.long_bench_result_path, "pred_e" if args.long_bench_e else "pred", 'result.txt'), 'w') as f:
+            for sentence in sentences:
+                f.write(sentence)
+        
     if use_awq_or_gptq:
         del model
         clean_up()
@@ -280,6 +298,14 @@ if __name__ == '__main__':
                         help='')
     # parser.add_argument('--zeroshot_batch_size', type=int, default=64,
     #                     help='')
+    
+    parser.add_argument('--long_bench', action='store_true', help='')
+    parser.add_argument('--long_bench_e', action='store_true',
+                        help='number of architectures desired')
+    parser.add_argument('--long_bench_result_path', type=str, default='',
+                        help='')
+    parser.add_argument('--long_bench_config', type=str, default='',
+                        help='')
 
     cfgs = parser.parse_args()
     main(cfgs)
