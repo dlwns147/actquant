@@ -189,7 +189,6 @@ poc/
 QuaRot_awq/
 QuaRot_KIVI/
 SpinQuant/
-*egg-info*/
 # setup.py
 
 */.ninja_deps
@@ -201,8 +200,8 @@ SpinQuant/
 build/*
 *.cmake
 *.in
-*/CMakeFiles/
+CMakeFiles
 */CMakeCache.txt
 *.egg
-*/Makefile
+Makefile
 *.nsys-rep
