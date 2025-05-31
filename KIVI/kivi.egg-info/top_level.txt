@@ -1,7 +1,0 @@
-config
-docs
-img
-models
-quant
-utils
-vis
