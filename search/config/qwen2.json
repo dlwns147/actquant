@@ -25,7 +25,7 @@
         "pre_layer": ["model.embed_tokens"],
         "post_layer": ["model.norm", "lm_head", "model.rotary_emb"]
     },
-{
+
     "Qwen2.5-7B-Instruct": {
         "n_block": 28,
         "n_layer": 2,
