@@ -9,7 +9,7 @@ from pymoo.operators.crossover.pntx import TwoPointCrossover, Crossover
 from pymoo.util.misc import crossover_mask
 from pymoo.core.crossover import Crossover
 from pymoo.core.variable import get, Real
-from .func import get_net_info
+# from .func import get_net_info
 
 
 def apply_float_operation(problem, fun):

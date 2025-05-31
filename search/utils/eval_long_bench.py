@@ -1,17 +1,14 @@
 import os
 from datasets import load_dataset
-import torch
 import json
 from tqdm import tqdm
 import numpy as np
-import random
-import argparse
 os.environ["WANDB_DISABLED"] = "true"
 import warnings
 warnings.filterwarnings("ignore")
 
 # from utils.process_args import process_args
-from transformers import LlamaConfig, MistralConfig, AutoTokenizer, AutoConfig, AutoModelForCausalLM
+# from transformers import LlamaConfig, MistralConfig, AutoTokenizer, AutoConfig, AutoModelForCausalLM
 # from models.replace import replace_model
 
 from .metrics import (

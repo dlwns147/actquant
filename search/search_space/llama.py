@@ -1,5 +1,5 @@
 import numpy as np
-from utils import get_net_info
+from utils.func import get_net_info
 from tqdm import tqdm
 import math
 
