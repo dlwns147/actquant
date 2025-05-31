@@ -235,6 +235,8 @@ def main(args):
                 print(f'task: {task}, result: {result}')
         
         if args.long_bench:
+            # if len(args.long_bench_task) == 0 and not args.long_bench_task_e:
+            #     args.long_bench_task = []
             long_bench_start = time()
             pred_long_bench(model, tokenizer=get_tokenizer(model_id), save_path=args.long_bench_result_path, long_bench_config=args.long_bench_config, e=args.long_bench_e)
             eval_long_bench(args.long_bench_result_path, args.long_bench_e)
@@ -388,6 +390,7 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--long_bench_config', type=str, default='',
                         help='')
+    parser.add_argument('--long_bench_task', type=str, nargs='+', default=[])
 
 
     cfgs = parser.parse_args()

@@ -68,8 +68,8 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 COMP_OBJ=(kvbits)
 COMP_OBJ_TEXT=kv
 # COMP_OBJ_VAL="3.0 3.0"
-COMP_OBJ_VAL=(3.0)
-# COMP_OBJ_VAL=(2.5)
+# COMP_OBJ_VAL=(3.0)
+COMP_OBJ_VAL=(2.5)
 # COMP_OBJ_VAL=(2.31)
 # COMP_OBJ_VAL=(2.35)
 
@@ -104,10 +104,10 @@ TASKS="coqa gsm8k truthfulqa"
 
 EXPR_FOLDER=save/search/quant
 
-# EXPR_FILE=2505290559_Llama-2-13b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_50.stats
+EXPR_FILE=2505290559_Llama-2-13b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_50.stats
 # EXPR_FILE=2505290559_Llama-2-13b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_80.stats
 
-EXPR_FILE=2505281228_Llama-2-7b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_50.stats
+# EXPR_FILE=2505281228_Llama-2-7b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_50.stats
 # EXPR_FILE=2505281228_Llama-2-7b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_80.stats
 
 # EXPR_FILE=2505111531_Llama-2-7b-hf_wkv_loss_hqq_iter_200_w234k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_22_55_jsd_co_0.9_mut_0.1_wikitext2_32sample_rbf/iter_200.stats
@@ -123,6 +123,7 @@ EXPR_FILE=2505281228_Llama-2-7b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}
 LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE}gs_${K_QUANT_PER}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE}gs_${V_QUANT_PER}_r${RESIDUAL_LENGTH}
 LONG_BENCH_CONFIG=utils/long_bench_config
+LONG_BENCH_TASK=""
 N=1
 DATASETS="wikitext2 c4"
 
