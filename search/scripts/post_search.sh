@@ -69,9 +69,9 @@ COMP_OBJ=(kvbits)
 COMP_OBJ_TEXT=kv
 # COMP_OBJ_VAL="3.0 3.0"
 # COMP_OBJ_VAL=(3.0)
-COMP_OBJ_VAL=(2.5)
-# COMP_OBJ_VAL=(2.31)
-# COMP_OBJ_VAL=(2.35)
+# COMP_OBJ_VAL=(2.5)
+# COMP_OBJ_VAL=(2.3)
+COMP_OBJ_VAL=(2.35)
 
 
 # COMP_OBJ_THRESHOLD=0.01
@@ -152,14 +152,14 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --expr ${EXPR_FOLDER}/${EXPR_FILE} \
 --prefer ${PREFER} \
 --use_flash \
+--datasets ${DATASETS} \
+--zeroshot \
+--tasks ${TASKS} \
 --long_bench \
 --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
 --long_bench_config ${LONG_BENCH_CONFIG}
 # --long_bench_e
 
-# --datasets ${DATASETS} \
-# --zeroshot \
-# --tasks ${TASKS} \
 
 # --method ${METHOD} \
 # --quant_model_paths ${QMODEL_PATHS} \

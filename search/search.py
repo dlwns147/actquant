@@ -3,7 +3,6 @@ import json
 import torch
 import argparse
 import numpy as np
-from utils import get_correlation
 from evaluator import LlamaEvaluator
 from tqdm import tqdm
 from time import time
@@ -22,7 +21,7 @@ from pymoo.operators.mutation.pm import PolynomialMutation
 
 from search_space.llama import LlamaSearchSpace
 from predictor.factory import get_predictor
-from utils.func import get_net_info, init_accelerator, set_seed
+from utils.func import get_net_info, init_accelerator, set_seed, get_correlation
 from utils.ga import MySampling, BinaryCrossover, MyMutation, IntPolynomialMutation, MyTwoPointCrossover, MyUniformCrossover, IntegerFromFloatMutation, IntMutation
 
 import warnings
