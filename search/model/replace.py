@@ -31,4 +31,7 @@ def replace_model(model, config):
         for i in range(len(layers)):
             # if type(layers[i]) == LlamaDecoderLayer:
             layers[i].self_attn = Qwen2KIVIAttention(layers[i].self_attn, config)
+    else:
+        raise NotImplementedError
+    
     return model

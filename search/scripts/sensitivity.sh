@@ -4,18 +4,27 @@ PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 MODEL_PATH=/SSD/huggingface/meta-llama
 # MODEL_NAME=Llama-2-7b-hf
 MODEL_NAME=Llama-2-13b-hf
+# MODEL_NAME=Llama-3.1-8B-Instruct
 CONFIG=config/llama.json
 DTYPE=float16
 
-# MODEL_PATH=/SSD/huggingface/meta-llama
-# MODEL_NAME=Llama-3.1-8B
-# MODEL_NAME=Llama-3.1-8B-Instruct
-# DTYPE=bfloat16
+# MODEL_PATH=/SSD/huggingface/Qwen
+# # MODEL_NAME=Qwen2.5-7B
+# # MODEL_NAME=Qwen2.5-14B
+# # MODEL_NAME=Qwen2.5-32B
+# # MODEL_NAME=Qwen2.5-72B
+# # MODEL_NAME=Qwen2.5-7B-Instruct
+# # MODEL_NAME=Qwen2.5-14B-Instruct
+# # DTYPE=bfloat16
+# DTYPE=float16
+# CONFIG=config/qwen2.json
 
-# MODEL=facebook/opt-6.7b
-# MODEL=facebook/opt-13b
-# MODEL=facebook/opt-30b
-# MODEL=facebook/opt-66b
+MODEL_PATH=/SSD/huggingface/mistralai
+# MODEL_NAME=Mistral-7B-v0.3
+MODEL_NAME=Mistral-7B-Instruct-v0.3
+# DTYPE=bfloat16
+DTYPE=float16
+CONFIG=config/mistral.json
 
 METHOD="hqq"
 
