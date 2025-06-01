@@ -1,12 +1,12 @@
 from huggingface_hub import snapshot_download
-model_path = "meta-llama"
+# model_path = "meta-llama"
 # model_name = "Llama-2-7b-hf"
 # model_name = "Llama-2-13b-hf"
 # model_name = "Llama-2-70b-hf"
 # model_name = "Meta-Llama-3-8B"
 
 # model_name = "Llama-2-7b-chat-hf"
-model_name = "Llama-2-13b-chat-hf"
+# model_name = "Llama-2-13b-chat-hf"
 # model_name = 'Llama-3.1-8B'
 # model_name = 'Llama-3.1-8B-Instruct'
 
@@ -28,9 +28,9 @@ model_name = "Llama-2-13b-chat-hf"
 # model_name = 'Qwen3-8B'
 # model_name = 'Qwen3-14B'
 
-# model_path = 'mistralai'
-model_name = 'Mistral-7B-v0.3'
-# model_name = 'Mistral-7B-Instruct-v0.3'
+model_path = 'mistralai'
+# model_name = 'Mistral-7B-v0.3'
+model_name = 'Mistral-7B-Instruct-v0.3'
 # model_name = 'Mixtral-8x7B-v0.1'
 
 print(f'model_path : {model_path}, model_name : {model_name}')

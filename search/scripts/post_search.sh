@@ -98,6 +98,7 @@ MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
 
+DATASETS="wikitext2 c4"
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
 TASKS="coqa gsm8k truthfulqa"
 # TASKS="coqa truthfulqa"
@@ -125,7 +126,6 @@ LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${METHOD}_${CO
 LONG_BENCH_CONFIG=utils/long_bench_config
 LONG_BENCH_TASK=""
 N=1
-DATASETS="wikitext2 c4"
 
 N_PROC=1
 # N_PROC=2

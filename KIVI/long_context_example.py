@@ -29,9 +29,10 @@ def main(args):
     # config = LlamaConfig.from_pretrained(model_id)
     config = AutoConfig.from_pretrained(model_id)
 
-    config.k_bits = args.k_bits # KiVi currently support 2/4 K/V bits
-    config.v_bits = args.v_bits
-    config.group_size = args.group_size
+    config.k_bits = [args.k_bits] * config.num_hidden_layers # KiVi currently support 2/4 K/V bits
+    config.v_bits = [args.v_bits] * config.num_hidden_layers
+    config.k_group_size = args.group_size
+    config.v_group_size = args.group_size
     config.residual_length = args.residual_length # corresponding to the number of recent fp16 tokens
     config.use_flash = args.use_flash
     config.quant_kv_output = args.quant_kv_output
