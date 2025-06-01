@@ -19,5 +19,7 @@
     "Mistral-7B-v0.3": 32768,
     "Mistral-7B-Instruct-v0.3": 32768,
     "longchat-7b-v1.5-32k": 31500,
-    "Mistral-7B-Instruct-v0.2": 31500
+    "Mistral-7B-Instruct-v0.2": 31500,
+    "Qwen2.5-7B-Instruct": 131072,
+    "Qwen2.5-14B-Instruct": 131072
 }
