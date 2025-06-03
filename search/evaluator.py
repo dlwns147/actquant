@@ -63,7 +63,6 @@ class LlamaEvaluator:
                             key = f'{config["layers"]}.{blk_idx}.{linear}'
                             if key in outlier:
                                 self.outlier[f'{blk_idx}.{linear}'] = [outlier[key], get_fp16_channel(getsubattr(getblock(model, config)[blk_idx], linear), outlier[key])]
-                            
             del model
             clean_up()
 
@@ -104,8 +103,16 @@ class LlamaEvaluator:
             if ('k' in bits or 'w' in bits):
                 self.model.config.k_bits = [max(bits['k'])] * config['n_block']
                 self.model.config.v_bits = [max(bits['v'])] * config['n_block']
-                self.model.config.k_group_size = group_size['k']
-                self.model.config.v_group_size = group_size['v']
+                
+                if len(group_size['k']) == 1:
+                    self.model.config.k_group_size = [max(group_size['k'])] * config['n_block']
+                elif len(group_size['k']) == 2:
+                    self.model.config.k_group_size = [max(group_size['k'][-1])] * config['n_block']
+                    
+                if len(group_size['v']) == 1:
+                    self.model.config.v_group_size = [max(group_size['v'])] * config['n_block']
+                elif len(group_size['v']) == 2:
+                    self.model.config.v_group_size = [max(group_size['v'][-1])] * config['n_block']
                 self.model.config.use_flash = use_flash
 
                 self.model.config.residual_length = residual_length 
@@ -159,9 +166,21 @@ class LlamaEvaluator:
                     if not flag:
                         raise NotImplementedError(f'{linear_group}: {linear_group_bits} is not available')
                     
-        if 'k' in arch or 'v' in arch:
-            self.model.config.k_bits = arch['k']
-            self.model.config.v_bits = arch['v']
+        if 'k' in arch:
+            if len(arch['k'][0]) == 1:
+                self.model.config.k_bits = arch['k']
+            elif len(arch['k'][0]) == 2:
+                self.model.config.k_bits = [x[0] for x in arch['k']]
+                self.model.config.k_group_size = [x[1] for x in arch['k']]
+
+        if 'v' in arch:
+            if len(arch['v'][0]) == 1:
+                self.model.config.v_bits = arch['v']
+            elif len(arch['v'][0]) == 2:
+                self.model.config.v_bits = [x[0] for x in arch['v']]
+                self.model.config.v_group_size = [x[1] for x in arch['v']]
+            else:
+                raise NotImplementedError
         
         return self.model
     

@@ -58,18 +58,31 @@ def compute_bits(arch, config, group_size, target='w'):
     #     return memory_usage / total_in_dim
             
     elif target == 'k' or target == 'v':
-        c_group_size = group_size[target]
-        if c_group_size == -1:
-            if target == 'k':
-                c_group_size = config['linear_shape'][config['k_linear']][0]
-            else:
-                c_group_size = config['linear_shape'][config['v_linear']][0]
-        return np.mean(arch[target]).item() + (32 / c_group_size)
+        if len(group_size[target]) == 1:
+            # c_group_size = group_size[target]
+            # if c_group_size == -1:
+            #     if target == 'k':
+            #         c_group_size = config['linear_shape'][config['k_linear']][0]
+            #     else:
+            #         c_group_size = config['linear_shape'][config['v_linear']][0]
+            return np.mean(arch[target]).item() + (32 / group_size[target])
+        elif len(group_size[target]) > 1:
+            bits_list, group_size_list = [x[0] for x in arch[target]], [x[1] for x in arch[target]]
+            return np.mean(bits_list).item() + 32 / np.mean(group_size_list).item()
+        else:
+            raise NotImplementedError
 
     elif target =='kv':
-        k_group_size = config['linear_shape'][config['k_linear']][0] if group_size['k'] == -1 else group_size['k']
-        v_group_size = config['linear_shape'][config['v_linear']][0] if group_size['v'] == -1 else group_size['v']
-        return np.mean(arch['k'] + arch['v']).item() + (16 / k_group_size) + (16 / v_group_size)
+        if len(group_size['k']) == 1:
+            # k_group_size = config['linear_shape'][config['k_linear']][0] if group_size['k'] == -1 else group_size['k']
+            # v_group_size = config['linear_shape'][config['v_linear']][0] if group_size['v'] == -1 else group_size['v']
+            return np.mean(arch['k'] + arch['v']).item() + 32 / np.mean(group_size['k'] + group_size['v']).item() # (16 / group_size['k']) + (16 / v_group_size)
+        elif len(group_size['k']) > 1:
+            k_bits_list, k_group_size_list = [x[0] for x in arch['k']], [x[1] for x in arch['k']]
+            v_bits_list, v_group_size_list = [x[0] for x in arch['v']], [x[1] for x in arch['v']]
+            return np.mean(k_bits_list + v_bits_list).item() + 32 / np.mean(k_group_size_list + v_group_size_list).item()
+        else:
+            raise NotImplementedError
     
     else:
         raise NotImplementedError

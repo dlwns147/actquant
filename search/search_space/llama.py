@@ -6,11 +6,9 @@ import math
 
 class LlamaSearchSpace:
     def __init__(self, 
-                n_block,
                 bits,
                 group_size,
                 pass_module,
-                # min_bits,
                 config=None,
                 comp_obj='bits',
                 comp_obj_min=[],
@@ -19,7 +17,6 @@ class LlamaSearchSpace:
                 only_outlier_bits=False,
                 rand_size=5
                 ):
-        self.n_block = n_block  # number of blocks
         
         # self.q_proj_option = sorted(([b for b in quant_model_bits if b not in list(map(int, outlier_bits['self_attn.q_proj']))] if only_outlier_bits else quant_model_bits) + outlier_bits['self_attn.q_proj'])
         # self.k_proj_option = sorted(([b for b in quant_model_bits if b not in list(map(int, outlier_bits['self_attn.k_proj']))] if only_outlier_bits else quant_model_bits) + outlier_bits['self_attn.k_proj'])
@@ -32,15 +29,6 @@ class LlamaSearchSpace:
         # self.down_proj_option = sorted(([b for b in quant_model_bits if b not in list(map(int, outlier_bits['mlp.down_proj']))] if only_outlier_bits else quant_model_bits) + outlier_bits['mlp.down_proj'])
 
         self.group_size = group_size
-        # self.w_group_size = group_size['w']
-        # # self.a_group_size = group_size['a']
-        # self.v_group_size = group_size['v']
-        # self.k_group_size = group_size['k']
-
-        # self.w_bits = bits['w']
-        # self.abits = bits['a']
-        # self.k_bits = bits['k']
-        # self.v_bits = bits['v']
 
         self.q_proj_option = bits['w']
         self.k_proj_option = bits['w']
@@ -63,7 +51,7 @@ class LlamaSearchSpace:
         assert 'w' in pass_module and 'k' in pass_module and 'v' in pass_module
         self.config = config
         self.n_linear = len(config['linear'])
-        self.n_layer = int(config['n_layer'])
+        self.n_block = int(config['n_block'])
         
         self.comp_obj = comp_obj
         self.comp_obj_min = comp_obj_min
@@ -98,8 +86,6 @@ class LlamaSearchSpace:
         self.pass_idx_list.sort()
         print(f'self.pass_idx_list : {self.pass_idx_list}')
         self.rand_size = rand_size
-
-        # self.n_bits = len(quant_model_bits)
 
     def sample(self, n_samples=1, nb=None, w=None, k=None, v=None, pool=[]):
         """ randomly sample a architecture"""
@@ -233,7 +219,15 @@ class LlamaSearchSpace:
         data = []
         data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option)], v=[min(self.v_option)])[0])
         n_doe -= 1
+        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option)], v=[min(self.v_option)])[0])
+        n_doe -= 1
+        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option)], v=[max(self.v_option)])[0])
+        n_doe -= 1
         data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option)], v=[max(self.v_option)])[0])
+        n_doe -= 1
+        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option)], v=[min(self.v_option)])[0])
+        n_doe -= 1
+        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option)], v=[max(self.v_option)])[0])
         n_doe -= 1
         if len(self.comp_obj) > 1:
             data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option)], v=[max(self.v_option)])[0])
@@ -297,13 +291,11 @@ class LlamaSearchSpace:
     
 
 
-class LlamaGroupsizeSearchSpace:
+class LlamaGroupSizeSearchSpace:
     def __init__(self, 
-                n_block,
                 bits,
                 group_size,
                 pass_module,
-                # min_bits,
                 config=None,
                 comp_obj='bits',
                 comp_obj_min=[],
@@ -312,7 +304,6 @@ class LlamaGroupsizeSearchSpace:
                 only_outlier_bits=False,
                 rand_size=5
                 ):
-        self.n_block = n_block  # number of blocks
         
         # self.q_proj_option = sorted(([b for b in quant_model_bits if b not in list(map(int, outlier_bits['self_attn.q_proj']))] if only_outlier_bits else quant_model_bits) + outlier_bits['self_attn.q_proj'])
         # self.k_proj_option = sorted(([b for b in quant_model_bits if b not in list(map(int, outlier_bits['self_attn.k_proj']))] if only_outlier_bits else quant_model_bits) + outlier_bits['self_attn.k_proj'])
@@ -324,16 +315,7 @@ class LlamaGroupsizeSearchSpace:
         # self.up_proj_option = sorted(([b for b in quant_model_bits if b not in list(map(int, outlier_bits['mlp.up_proj']))] if only_outlier_bits else quant_model_bits) + outlier_bits['mlp.up_proj'])
         # self.down_proj_option = sorted(([b for b in quant_model_bits if b not in list(map(int, outlier_bits['mlp.down_proj']))] if only_outlier_bits else quant_model_bits) + outlier_bits['mlp.down_proj'])
 
-        self.group_size = group_size
-        # self.w_group_size = group_size['w']
-        # # self.a_group_size = group_size['a']
-        # self.v_group_size = group_size['v']
-        # self.k_group_size = group_size['k']
-
-        # self.w_bits = bits['w']
-        # self.abits = bits['a']
-        # self.k_bits = bits['k']
-        # self.v_bits = bits['v']
+        assert 'w' in pass_module and 'k' in pass_module and 'v' in pass_module
 
         self.q_proj_option = bits['w']
         self.k_proj_option = bits['w']
@@ -344,19 +326,30 @@ class LlamaGroupsizeSearchSpace:
         self.up_proj_option = bits['w']
         self.down_proj_option = bits['w']
 
-        # self.qkv_option = self.abits
-        # self.o_option = self.abits
-        # self.gateup_option = self.abits
-        # self.down_option = self.abits
-
-        self.k_option = bits['k']
-        self.v_option = bits['v']
+        # self.k_option = bits['k']
+        # self.v_option = bits['v']
         
+        if 'k' in bits and 'k' in group_size:
+            assert (len(group_size['k']) == 1 or len(group_size['k']) == len(bits['k']))
+            if len(bits['k']) == 1:
+                group_size['k'] = group_size['k'] * len(bits['k'])
+            group_size['k'] = {b: sorted(g, reverse=True) for b, g in zip(bits['k'], group_size['k'])}
+            self.k_option = [(b, g) for b, g_list in group_size['k'].items() for g in g_list]
+
+        if 'v' in bits and 'v' in group_size:
+            assert (len(group_size['v']) == 1 or len(group_size['v']) == len(bits['v']))
+            if len(bits['v']) == 1:
+                group_size['v'] = group_size['v'] * len(bits['v'])
+            group_size['v'] = {b: sorted(g, reverse=True) for b, g in zip(bits['v'], group_size['v'])}
+            self.v_option = [(b, g) for b, g_list in group_size['v'].items() for g in g_list]
+        # print(f'self.k_option: {self.k_option}, self.v_option: {self.v_option}')
+
+        self.group_size = group_size
         self.pass_module = pass_module
-        assert 'w' in pass_module and 'k' in pass_module and 'v' in pass_module
+        
         self.config = config
         self.n_linear = len(config['linear'])
-        self.n_layer = int(config['n_layer'])
+        self.n_block = int(config['n_block'])
         
         self.comp_obj = comp_obj
         self.comp_obj_min = comp_obj_min
@@ -436,18 +429,13 @@ class LlamaGroupsizeSearchSpace:
                 w_down_prob = prob[np.array([np.argwhere(_x == np.array(self.down_proj_option))[0, 0] for _x in w_down])]
                 w_down_list = np.random.choice(w_down, size=nb, p=w_down_prob / w_down_prob.sum(), replace=True).tolist()
 
-                
                 kv_k_prob = prob[np.array([np.argwhere(_x == np.array(self.k_option))[0, 0] for _x in kv_k])]
-                kv_k_list = np.random.choice(kv_k, size=nb, p=kv_k_prob / kv_k_prob.sum(), replace=True).tolist()
+                # kv_k_list = np.random.choice(kv_k, size=nb, p=kv_k_prob / kv_k_prob.sum(), replace=True).tolist()
+                kv_k_list = np.array(kv_k)[np.random.choice(len(kv_k), size=nb, p=kv_k_prob / kv_k_prob.sum(), replace=True)].tolist()
 
                 kv_v_prob = prob[np.array([np.argwhere(_x == np.array(self.v_option))[0, 0] for _x in kv_v])]
-                kv_v_list = np.random.choice(kv_v, size=nb, p=kv_v_prob / kv_v_prob.sum(), replace=True).tolist()
-
-                # kv_k_gs_prob = prob[np.array([np.argwhere(_x == np.array(self.k_option))[0, 0] for _x in kv_k])]
-                # kv_k_gs_list = np.random.choice(kv_k, size=nb, p=kv_k_prob / kv_k_prob.sum(), replace=True).tolist()
-
-                # kv_v_gs_prob = prob[np.array([np.argwhere(_x == np.array(self.v_option))[0, 0] for _x in kv_v])]
-                # kv_v_gs_list = np.random.choice(kv_v, size=nb, p=kv_v_prob / kv_v_prob.sum(), replace=True).tolist()
+                # kv_v_list = np.random.choice(kv_v, size=nb, p=kv_v_prob / kv_v_prob.sum(), replace=True).tolist()
+                kv_v_list = np.array(kv_v)[np.random.choice(len(kv_v), size=nb, p=kv_v_prob / kv_v_prob.sum(), replace=True)].tolist()
 
                 for linear in self.pass_module['w']:
                     blk, linear_name = linear.split('.')[0], linear.split('.')[-1]
@@ -470,21 +458,16 @@ class LlamaGroupsizeSearchSpace:
                     else:
                         raise NotImplementedError(f"linear : {linear}")
                 
-
                 for layer in self.pass_module['k']:
-                    kv_k_list[layer] = max(self.k_option)
+                    kv_k_list[layer] = max(self.k_option, key=lambda x: (x[0], x[1]))
 
                 for layer in self.pass_module['v']:
-                    kv_v_list[layer] = max(self.v_option)
+                    kv_v_list[layer] = max(self.v_option, key=lambda x: (x[0], x[1]))
                     
                 new_arch = {
                     'w': {'self_attn.q_proj': w_q_list, 'self_attn.k_proj': w_k_list, 'self_attn.v_proj': w_v_list, 'self_attn.o_proj': w_o_list, 'mlp.gate_proj': w_gate_list, 'mlp.up_proj': w_up_list, 'mlp.down_proj': w_down_list},
                     'k': kv_k_list,
                     'v': kv_v_list,
-                    'group_size': {
-                        'k': [],
-                        'v': []
-                    }
                 }
                 complexity = get_net_info(new_arch, self.config, self.group_size)
                 # print(f'new_arch : {new_arch}')
@@ -502,14 +485,22 @@ class LlamaGroupsizeSearchSpace:
     def initialize(self, n_doe, pool=[]):
         # sample one arch with least (lb of hyperparameters) and most complexity (ub of hyperparameters)
         data = []
-        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option)], v=[min(self.v_option)])[0])
+        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
         n_doe -= 1
-        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option)], v=[max(self.v_option)])[0])
+        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        n_doe -= 1
+        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        n_doe -= 1
+        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        n_doe -= 1
+        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        n_doe -= 1
+        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
         n_doe -= 1
         if len(self.comp_obj) > 1:
-            data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option)], v=[max(self.v_option)])[0])
+            data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
             n_doe -= 1
-            data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option)], v=[min(self.v_option)])[0])
+            data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
             n_doe -= 1
         
         # for w_bits in self.q_proj_option:
@@ -530,13 +521,14 @@ class LlamaGroupsizeSearchSpace:
                     ]) for linear in self.config['linear']
             ])
         # a_encode = np.concatenate([np.array([np.argwhere(_x == np.array(self.abits))[0, 0] for _x in arch['activation'][linear_group]]) for linear_group in self.config['linear_group']])
-        k_encode = np.array([np.argwhere(_x == np.array(self.k_option))[0, 0] for _x in arch['k']])
-        v_encode = np.array([np.argwhere(_x == np.array(self.v_option))[0, 0] for _x in arch['v']])
+        k_encode = np.array([np.argwhere((_x == np.array(self.k_option)).all(axis=1))[0, 0] for _x in arch['k']])
+        v_encode = np.array([np.argwhere((_x == np.array(self.v_option)).all(axis=1))[0, 0] for _x in arch['v']])
         
         return np.concatenate((w_encode, k_encode, v_encode))
         # return np.concatenate((w_encode, a_encode, k_encode, v_encode))
     
     def encode_predictor(self, arch):
+        # import pdb; pdb.set_trace()
         # encode arch ({'q': [0, 2, 4], 'k: , etc}) to integer bit-string [1, 0, 2, 1, ...]
         w_encode = np.concatenate([
                 np.array([
@@ -544,8 +536,8 @@ class LlamaGroupsizeSearchSpace:
                     ]) if 'wbits' in self.comp_obj else [] for linear in self.config['linear']
             ])
         # a_encode = np.concatenate([np.array([np.argwhere(_x == np.array(self.abits))[0, 0] for _x in arch['activation'][linear_group]]) for linear_group in self.config['linear_group']])
-        k_encode = np.array([np.argwhere(_x == np.array(self.k_option))[0, 0] for blk_idx, _x in enumerate(arch['k']) if blk_idx not in self.pass_module['k']]) if 'kvbits' in self.comp_obj or 'kbits' in self.comp_obj else []
-        v_encode = np.array([np.argwhere(_x == np.array(self.v_option))[0, 0] for blk_idx, _x in enumerate(arch['v']) if blk_idx not in self.pass_module['v']]) if 'kvbits' in self.comp_obj or 'vbits' in self.comp_obj else []
+        k_encode = np.array([np.argwhere((_x == np.array(self.k_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['k']) if blk_idx not in self.pass_module['k']]) if 'kvbits' in self.comp_obj or 'kbits' in self.comp_obj else []
+        v_encode = np.array([np.argwhere((_x == np.array(self.v_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['v']) if blk_idx not in self.pass_module['v']]) if 'kvbits' in self.comp_obj or 'vbits' in self.comp_obj else []
 
         # import pdb; pdb.set_trace()
 

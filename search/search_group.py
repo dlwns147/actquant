@@ -19,7 +19,7 @@ from pymoo.operators.crossover.binx import BinomialCrossover
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.operators.mutation.pm import PolynomialMutation
 
-from search_space.llama import LlamaSearchSpace
+from search_space.llama import LlamaGroupSizeSearchSpace # LlamaSearchSpace
 from predictor.factory import get_predictor
 from utils.func import get_net_info, init_accelerator, set_seed, get_correlation
 from utils.ga import MySampling, BinaryCrossover, MyMutation, IntPolynomialMutation, MyTwoPointCrossover, MyUniformCrossover, IntegerFromFloatMutation, IntMutation
@@ -146,7 +146,7 @@ class Search:
             k_quant_per=kwargs.pop('k_quant_per', 'channel'),
             v_quant_per=kwargs.pop('v_quant_per', 'token'),
         )
-        self.search_space = LlamaSearchSpace(
+        self.search_space = LlamaGroupSizeSearchSpace(
             bits=self.bits,
             group_size=self.group_size,
             pass_module=self.pass_module,
@@ -577,9 +577,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--w_group_size', type=int, default=128,
                         help='')
-    parser.add_argument('--k_group_size', type=int, default=128,
+    parser.add_argument('--k_group_size', type=int, nargs='+', action='append', default=[],
                         help='')
-    parser.add_argument('--v_group_size', type=int, default=128,
+    parser.add_argument('--v_group_size', type=int, nargs='+', action='append', default=[],
                         help='')
     
     parser.add_argument('--residual_length', type=int, default=128, 
