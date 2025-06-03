@@ -81,7 +81,7 @@ def main(args):
 
     use_awq_or_gptq = 'awq' in args.method or 'gptq' in args.method
     method = 'awq' if 'awq' in args.method else 'gptq' if 'gptq' in args.method else None
-    group_size = {'w': args.w_group_size, 'k': args.k_group_size, 'v': args.v_group_size}
+    group_size = {'w': args.w_group_size, 'k': [args.k_group_size], 'v': [args.v_group_size]}
     
     if use_awq_or_gptq:
         args.quant_model_bits = []

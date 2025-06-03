@@ -167,16 +167,16 @@ class LlamaEvaluator:
                         raise NotImplementedError(f'{linear_group}: {linear_group_bits} is not available')
                     
         if 'k' in arch:
-            if len(arch['k'][0]) == 1:
+            if type(arch['k'][0]) in [int, float]:
                 self.model.config.k_bits = arch['k']
-            elif len(arch['k'][0]) == 2:
+            elif type(arch['k'][0]) is list:
                 self.model.config.k_bits = [x[0] for x in arch['k']]
                 self.model.config.k_group_size = [x[1] for x in arch['k']]
 
         if 'v' in arch:
-            if len(arch['v'][0]) == 1:
+            if type(arch['v'][0]) in [int, float]:
                 self.model.config.v_bits = arch['v']
-            elif len(arch['v'][0]) == 2:
+            elif type(arch['v'][0]) is list:
                 self.model.config.v_bits = [x[0] for x in arch['v']]
                 self.model.config.v_group_size = [x[1] for x in arch['v']]
             else:
