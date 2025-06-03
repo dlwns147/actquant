@@ -91,8 +91,8 @@ class Qwen2KIVIAttention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if self.config.quant_kv_output:
-            key_states = fake_quant(key_states, self.config.k_group_size, self.config.k_bits[self.layer_idx], self.config.k_quant_per)
-            value_states = fake_quant(value_states, self.config.v_group_size, self.config.v_bits[self.layer_idx], self.config.v_quant_per)
+            key_states = fake_quant(key_states, self.config.k_group_size[self.layer_idx], self.config.k_bits[self.layer_idx], self.config.k_quant_per)
+            value_states = fake_quant(value_states, self.config.v_group_size[self.layer_idx], self.config.v_bits[self.layer_idx], self.config.v_quant_per)
 
         # assert self.num_key_value_groups == 1
         # [bsz, nh, t, hd]
@@ -101,15 +101,15 @@ class Qwen2KIVIAttention(nn.Module):
         if past_key_value is not None and len(past_key_value) > self.layer_idx:
             key_states_quant_trans, key_states_full, key_scale_trans, key_mn_trans, value_states_quant, value_states_full, value_scale, value_mn = past_key_value[self.layer_idx]
             
-            attn_qkquant = cuda_bmm_fA_qB_outer(self.config.k_group_size, query_states, key_states_quant_trans, key_scale_trans, key_mn_trans, self.config.k_bits[self.layer_idx]) if key_states_quant_trans is not None else None
+            attn_qkquant = cuda_bmm_fA_qB_outer(self.config.k_group_size[self.layer_idx], query_states, key_states_quant_trans, key_scale_trans, key_mn_trans, self.config.k_bits[self.layer_idx]) if key_states_quant_trans is not None else None
             key_states_full = torch.cat([key_states_full, key_states], dim=2) if key_states_full is not None else key_states
             attn_qkfull = torch.matmul(query_states, repeat_kv(key_states_full, self.num_key_value_groups).transpose(2, 3))
             attn_weights = torch.cat([attn_qkquant, attn_qkfull], dim=-1) / math.sqrt(self.head_dim) if attn_qkquant is not None else attn_qkfull / math.sqrt(self.head_dim)
 
             # update key cache
             if key_states_full.shape[-2] == self.config.residual_length:
-                assert self.config.residual_length % self.config.k_group_size == 0
-                key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(key_states_full.transpose(2, 3).contiguous(), self.config.k_group_size, self.config.k_bits[self.layer_idx])
+                assert self.config.residual_length % self.config.k_group_size[self.layer_idx] == 0
+                key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(key_states_full.transpose(2, 3).contiguous(), self.config.k_group_size[self.layer_idx], self.config.k_bits[self.layer_idx])
                 key_states_full = None
                 if key_states_quant_trans is not None:
                     key_states_quant_trans = torch.cat([key_states_quant_trans, key_states_quant_trans_new], dim=3)
@@ -148,14 +148,14 @@ class Qwen2KIVIAttention(nn.Module):
             if value_states_quant is None:
                 attn_output = torch.matmul(attn_weights, value_states_full)
             else:
-                attn_output = cuda_bmm_fA_qB_outer(self.config.v_group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant, value_scale, value_mn, self.config.v_bits[self.layer_idx])
+                attn_output = cuda_bmm_fA_qB_outer(self.config.v_group_size[self.layer_idx], attn_weights[:, :, :, :-value_full_length], value_states_quant, value_scale, value_mn, self.config.v_bits[self.layer_idx])
                 attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], repeat_kv(value_states_full, self.num_key_value_groups))
             attn_output = attn_output.transpose(1, 2).contiguous()
 
             # update value cache
             if value_full_length > self.config.residual_length:
                 assert value_full_length == self.config.residual_length + 1
-                value_states_quant_new, scale, mn = triton_quantize_and_pack_along_last_dim(value_states_full[:, :, :1, :].contiguous(), self.config.v_group_size, self.config.v_bits[self.layer_idx])
+                value_states_quant_new, scale, mn = triton_quantize_and_pack_along_last_dim(value_states_full[:, :, :1, :].contiguous(), self.config.v_group_size[self.layer_idx], self.config.v_bits[self.layer_idx])
                 value_states_full = value_states_full[:, :, 1:, :].contiguous()
                 if value_states_quant is not None:
                     value_states_quant = torch.cat([value_states_quant, value_states_quant_new], dim=2)
@@ -231,7 +231,7 @@ class Qwen2KIVIAttention(nn.Module):
                 key_states_full = None
 
             if key_states_quant is not None and use_cache:
-                key_states_quant_trans, key_scale_trans, key_mn_trans = triton_quantize_and_pack_along_last_dim(key_states_quant.transpose(2, 3).contiguous(), self.config.k_group_size, self.config.k_bits[self.layer_idx])
+                key_states_quant_trans, key_scale_trans, key_mn_trans = triton_quantize_and_pack_along_last_dim(key_states_quant.transpose(2, 3).contiguous(), self.config.k_group_size[self.layer_idx], self.config.k_bits[self.layer_idx])
             else:
                 key_states_quant_trans = None
                 key_scale_trans = None
@@ -245,7 +245,7 @@ class Qwen2KIVIAttention(nn.Module):
             else:
                 value_states_quant = value_states[:, :, :-self.config.residual_length, :].contiguous()
                 value_states_full = value_states[:, :, -self.config.residual_length:, :].contiguous()
-                value_states_quant, value_scale, value_mn = triton_quantize_and_pack_along_last_dim(value_states_quant, self.config.v_group_size, self.config.v_bits[self.layer_idx])
+                value_states_quant, value_scale, value_mn = triton_quantize_and_pack_along_last_dim(value_states_quant, self.config.v_group_size[self.layer_idx], self.config.v_bits[self.layer_idx])
 
         # past_key_value = (key_states_quant_trans, key_states_full, key_scale_trans, key_mn_trans, 
         #                   value_states_quant, value_states_full, value_scale, value_mn) if use_cache else None

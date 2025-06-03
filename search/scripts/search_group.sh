@@ -2,12 +2,12 @@ DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-MODEL_PATH=/SSD/huggingface/meta-llama
-# MODEL_NAME=Llama-2-7b-hf
-# MODEL_NAME=Llama-2-13b-hf
-MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
-CONFIG=config/llama.json
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# # MODEL_NAME=Llama-2-7b-hf
+# # MODEL_NAME=Llama-2-13b-hf
+# MODEL_NAME=Llama-3.1-8B-Instruct
+# DTYPE=float16
+# CONFIG=config/llama.json
 
 # MODEL_PATH=/SSD/huggingface/Qwen
 # # MODEL_NAME=Qwen2.5-7B
@@ -20,12 +20,12 @@ CONFIG=config/llama.json
 # DTYPE=float16
 # CONFIG=config/qwen2.json
 
-# MODEL_PATH=/SSD/huggingface/mistralai
-# # MODEL_NAME=Mistral-7B-v0.3
-# MODEL_NAME=Mistral-7B-Instruct-v0.3
-# # DTYPE=bfloat16
-# DTYPE=float16
-# CONFIG=config/mistral.json
+MODEL_PATH=/SSD/huggingface/mistralai
+# MODEL_NAME=Mistral-7B-v0.3
+MODEL_NAME=Mistral-7B-Instruct-v0.3
+# DTYPE=bfloat16
+DTYPE=float16
+CONFIG=config/mistral.json
 
 # METHOD="hqq layer_prune"
 # METHOD_TEXT="hqq_layer_prune"
