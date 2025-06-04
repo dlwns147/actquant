@@ -2,12 +2,12 @@ DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-# MODEL_PATH=/SSD/huggingface/meta-llama
-# # MODEL_NAME=Llama-2-7b-hf
-# # MODEL_NAME=Llama-2-13b-hf
-# MODEL_NAME=Llama-3.1-8B-Instruct
-# DTYPE=float16
-# CONFIG=config/llama.json
+MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=Llama-2-7b-hf
+# MODEL_NAME=Llama-2-13b-hf
+MODEL_NAME=Llama-3.1-8B-Instruct
+DTYPE=float16
+CONFIG=config/llama.json
 
 # MODEL_PATH=/SSD/huggingface/Qwen
 # # MODEL_NAME=Qwen2.5-7B
@@ -20,12 +20,12 @@ PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 # DTYPE=float16
 # CONFIG=config/qwen2.json
 
-MODEL_PATH=/SSD/huggingface/mistralai
-# MODEL_NAME=Mistral-7B-v0.3
-MODEL_NAME=Mistral-7B-Instruct-v0.3
-# DTYPE=bfloat16
-DTYPE=float16
-CONFIG=config/mistral.json
+# MODEL_PATH=/SSD/huggingface/mistralai
+# # MODEL_NAME=Mistral-7B-v0.3
+# MODEL_NAME=Mistral-7B-Instruct-v0.3
+# # DTYPE=bfloat16
+# DTYPE=float16
+# CONFIG=config/mistral.json
 
 Q_BITS="2 3 4"
 Q_BITS_TEXT="234"
@@ -94,14 +94,14 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --use_flash \
 -n ${N} \
 --save ${SAVE} \
+--datasets ${DATASETS} \
+--zeroshot \
+--tasks ${TASKS} \
 --long_bench \
 --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
 --long_bench_config ${LONG_BENCH_CONFIG} \
 --clip_asym
 
-# --datasets ${DATASETS} \
-# --zeroshot \
-# --tasks ${TASKS} \
 
 # --method ${METHOD} \
 # --group_size ${GROUP_SIZE} \
