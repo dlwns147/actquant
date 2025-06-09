@@ -210,8 +210,8 @@ if __name__ == '__main__':
                         help='file path to supernet weights')
     parser.add_argument('--config', type=str, default='config/llama.json',
                         help='')
-    parser.add_argument('--bits', type=int, default=2,
-                        help='')
+    # parser.add_argument('--bits', type=int, default=2,
+    #                     help='')
     # parser.add_argument('--group_size', type=int, default=128,
     #                     help='')
     

@@ -100,6 +100,7 @@ do
 done
 QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 
+
 # OUTLIER_BITS="2 3"
 # OUTLIER_TEXT=23
 
@@ -170,8 +171,7 @@ SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${METHO
 
 N_PROC=1
 
-CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} search_group.py \
---gpu_id ${DEVICES} \
+ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
 --quant_model_paths ${QMODEL_PATHS} \
@@ -179,10 +179,6 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --k_bits ${K_BITS} \
 --v_bits ${V_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
---k_group_size ${K_GROUP_SIZE[0]} \
---k_group_size ${K_GROUP_SIZE[1]} \
---v_group_size ${V_GROUP_SIZE[0]} \
---v_group_size ${V_GROUP_SIZE[1]} \
 --comp_obj ${COMP_OBJ} \
 --comp_obj_min ${COMP_OBJ_MIN} \
 --comp_obj_max ${COMP_OBJ_MAX} \
@@ -208,6 +204,56 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --n_sample ${N_SAMPLE} \
 --dataset ${DATASET} \
 --save_iter ${SAVE_ITER} \
+"
+for g in "${K_GROUP_SIZE[@]}"
+do
+    ARGS+=" --k_group_size ${g} "
+done
+
+for g in "${V_GROUP_SIZE[@]}"
+do
+    ARGS+="--v_group_size ${g} "
+done
+
+CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} search_group.py \
+${ARGS}
+# --gpu_id ${DEVICES} \
+# --model_path ${MODEL_PATH} \
+# --model_name ${MODEL_NAME} \
+# --quant_model_paths ${QMODEL_PATHS} \
+# --w_bits ${W_BITS} \
+# --k_bits ${K_BITS} \
+# --v_bits ${V_BITS} \
+# --w_group_size ${W_GROUP_SIZE} \
+# --k_group_size ${K_GROUP_SIZE[0]} \
+# --k_group_size ${K_GROUP_SIZE[1]} \
+# --v_group_size ${V_GROUP_SIZE[0]} \
+# --v_group_size ${V_GROUP_SIZE[1]} \
+# --comp_obj ${COMP_OBJ} \
+# --comp_obj_min ${COMP_OBJ_MIN} \
+# --comp_obj_max ${COMP_OBJ_MAX} \
+# --sensitivity_result_path ${SENSITIVITY_RESULT_PATH} \
+# --residual_length ${RESIDUAL_LENGTH} \
+# --quant_kv_output \
+# --k_quant_per ${K_QUANT_PER} \
+# --v_quant_per ${V_QUANT_PER} \
+# --use_flash \
+# --predictor ${PREDICTOR} \
+# --save ${SAVE} \
+# --iterations ${ITER} \
+# --n_doe ${N_DOE} \
+# --n_iter ${N_ITER} \
+# --metric ${METRIC} \
+# --ga_pop_size ${GA_POP_SIZE} \
+# --config ${CONFIG} \
+# --debug \
+# --max_value ${MAX_VALUE} \
+# --mut_prob ${MUT_PROB} \
+# --crossover_prob ${CROSSOVER_PROB} \
+# --loss_func ${LOSS_FUNC} \
+# --n_sample ${N_SAMPLE} \
+# --dataset ${DATASET} \
+# --save_iter ${SAVE_ITER} \
 
 # --method ${METHOD} \
 

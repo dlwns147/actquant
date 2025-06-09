@@ -73,10 +73,11 @@ def compute_bits(arch, config, group_size, target='w'):
             raise NotImplementedError
 
     elif target =='kv':
+        import pdb; pdb.set_trace()
         if len(group_size['k']) == 1:
             # k_group_size = config['linear_shape'][config['k_linear']][0] if group_size['k'] == -1 else group_size['k']
             # v_group_size = config['linear_shape'][config['v_linear']][0] if group_size['v'] == -1 else group_size['v']
-            return np.mean(arch['k'] + arch['v']).item() + 32 / np.mean(group_size['k'][0] + group_size['v'][0]).item() # (16 / group_size['k']) + (16 / v_group_size)
+            return np.mean(arch['k'] + arch['v']).item() + 32 / np.mean([group_size['k'][0], group_size['v'][0]]).item() # (16 / group_size['k']) + (16 / v_group_size)
         elif len(group_size['k']) > 1:
             k_bits_list, k_group_size_list = [x[0] for x in arch['k']], [x[1] for x in arch['k']]
             v_bits_list, v_group_size_list = [x[0] for x in arch['v']], [x[1] for x in arch['v']]

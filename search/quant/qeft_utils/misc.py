@@ -124,7 +124,12 @@ def processing_arguments(args):
         if args.tuning != 'mse':
             print('\nWe highly recommend using the mse option together when using OWQ.')
     elif args.target_rank:
-        assert args.target_rank > 0
+        if isinstance(args.target_rank, int):
+            assert args.target_rank > 0
+        elif isinstance(args.target_rank, list):
+            assert args.target_rank
+        else:
+            raise NotImplementedError
     else:
         if args.wbits < 16 and not args.nearest and args.tuning == 'mse':
             args.tuning = 'minmax'

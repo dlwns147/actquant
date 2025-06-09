@@ -192,6 +192,7 @@ QuaRot_KIVI/
 SpinQuant/
 # *egg-info*/
 # setup.py
+search/outlier
 
 */.ninja_deps
 *.o
