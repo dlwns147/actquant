@@ -73,7 +73,7 @@ def compute_bits(arch, config, group_size, target='w'):
             raise NotImplementedError
 
     elif target =='kv':
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         if len(group_size['k']) == 1:
             # k_group_size = config['linear_shape'][config['k_linear']][0] if group_size['k'] == -1 else group_size['k']
             # v_group_size = config['linear_shape'][config['v_linear']][0] if group_size['v'] == -1 else group_size['v']

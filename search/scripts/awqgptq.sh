@@ -57,12 +57,15 @@ W_GROUP_SIZE=128
 # K_BITS=2
 # V_BITS=2
 
-K_BITS=4
-V_BITS=4
+# K_BITS=4
+# V_BITS=4
 
-KV_GROUP_SIZE=32
+K_BITS=8
+V_BITS=8
+
+# KV_GROUP_SIZE=32
 # KV_GROUP_SIZE=64
-# KV_GROUP_SIZE=128
+KV_GROUP_SIZE=128
 
 
 RESIDUAL_LENGTH=128
@@ -94,7 +97,6 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --use_flash \
 -n ${N} \
 --save ${SAVE} \
---datasets ${DATASETS} \
 --zeroshot \
 --tasks ${TASKS} \
 --long_bench \
@@ -102,6 +104,7 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --long_bench_config ${LONG_BENCH_CONFIG} \
 --clip_asym
 
+# --datasets ${DATASETS} \
 
 # --method ${METHOD} \
 # --group_size ${GROUP_SIZE} \
