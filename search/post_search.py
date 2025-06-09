@@ -221,6 +221,32 @@ def main(args):
             # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
             print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}')
 
+        if args.pass_key_file:
+            # method_name = f"K{config.k_bits}V{config.v_bits} KiVi"
+            print( "-----------------------------------" )
+            enc = get_tokenizer(model_id)
+            for line in open(args.pass_key_file, "r"):
+                clean_up()
+                torch.cuda.reset_max_memory_allocated()
+                example = json.loads(line)
+                prompt_postfix = "What is the pass key? The pass key is "
+                prompt = example["input"] + prompt_postfix
+                input_ids = enc(prompt, return_tensors="pt").input_ids.cuda()
+                print( "-----------------------------------" )
+                print( f"#Tokens of Prompt:", input_ids.shape[1], end=" " )
+                print( "Passkey target:", example["target"] )
+
+                tokens = model.generate(input_ids, max_new_tokens=len(example["target"]))
+                answer = prompt_postfix + enc.decode(tokens[0].tolist()[input_ids.shape[1]:], skip_special_tokens=True)
+                answer = answer.replace("\n", "\\n")
+                # answer= f"{method_name}:\n     [ {answer} ]"
+                answer= f"[ {answer} ]"
+                
+                peak_memory = torch.cuda.max_memory_allocated()
+                print( answer )
+                print(f"Mem: {peak_memory / 1024 / 1024 / 1024:.3f} GB")
+                # print(f"Mem: {peak_memory / 1024 / 1024:.3f} MB")
+                print( "-----------------------------------\n" )
         
         if args.zeroshot:
             clean_up()
@@ -395,6 +421,9 @@ if __name__ == '__main__':
     parser.add_argument('--long_bench_config', type=str, default='',
                         help='')
     parser.add_argument('--long_bench_task', type=str, nargs='+', default=[])
+    parser.add_argument('--pass_key_file', type=str, default='',
+                        help='')
+
 
 
     cfgs = parser.parse_args()

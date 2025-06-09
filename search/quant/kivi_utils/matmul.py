@@ -212,7 +212,8 @@ def cuda_bmm_fA_qB_outer(group_size: int,
 	flatten_B = B * nh_kv
 	scales = scales.view(flatten_B, scales.shape[-2], scales.shape[-1]).transpose(1, 2).contiguous()
 	zeros = zeros.view(flatten_B, zeros.shape[-2], zeros.shape[-1]).transpose(1, 2).contiguous()
-	assert bits in [2, 4]
+	# assert bits in [2, 4]
+	assert bits in [2, 4, 8]
 	assert nh % nh_kv == 0
 	c = kivi_gemv.gemv_forward_cuda_outer_dim(fA, qB, scales, zeros, bits, group_size, nh, nh_kv)
 	c = c.view(B, nh, c.shape[-2], c.shape[-1])

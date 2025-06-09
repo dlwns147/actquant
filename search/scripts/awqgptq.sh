@@ -2,23 +2,23 @@ DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-MODEL_PATH=/SSD/huggingface/meta-llama
-# MODEL_NAME=Llama-2-7b-hf
-# MODEL_NAME=Llama-2-13b-hf
-MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
-CONFIG=config/llama.json
-
-# MODEL_PATH=/SSD/huggingface/Qwen
-# # MODEL_NAME=Qwen2.5-7B
-# # MODEL_NAME=Qwen2.5-14B
-# # MODEL_NAME=Qwen2.5-32B
-# # MODEL_NAME=Qwen2.5-72B
-# # MODEL_NAME=Qwen2.5-7B-Instruct
-# # MODEL_NAME=Qwen2.5-14B-Instruct
-# # DTYPE=bfloat16
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# # MODEL_NAME=Llama-2-7b-hf
+# # MODEL_NAME=Llama-2-13b-hf
+# MODEL_NAME=Llama-3.1-8B-Instruct
 # DTYPE=float16
-# CONFIG=config/qwen2.json
+# CONFIG=config/llama.json
+
+MODEL_PATH=/SSD/huggingface/Qwen
+# MODEL_NAME=Qwen2.5-7B
+# MODEL_NAME=Qwen2.5-14B
+# MODEL_NAME=Qwen2.5-32B
+# MODEL_NAME=Qwen2.5-72B
+MODEL_NAME=Qwen2.5-7B-Instruct
+# MODEL_NAME=Qwen2.5-14B-Instruct
+# DTYPE=bfloat16
+DTYPE=float16
+CONFIG=config/qwen2.json
 
 # MODEL_PATH=/SSD/huggingface/mistralai
 # # MODEL_NAME=Mistral-7B-v0.3
@@ -38,8 +38,8 @@ COMP_OBJ_TEXT=bits
 
 
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
-TASKS="coqa gsm8k truthfulqa"
-# TASKS="coqa truthfulqa"
+# TASKS="coqa gsm8k truthfulqa"
+TASKS="coqa truthfulqa"
 
 N=1
 DATASETS="wikitext2 c4"
@@ -78,6 +78,8 @@ SAVE=save/result/${TODAY}_test
 LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_pure_${METHOD}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_PER}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_PER}_r${RESIDUAL_LENGTH}
 LONG_BENCH_CONFIG=utils/long_bench_config
 
+PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
+
 N_PROC=1
 
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} awqgptq.py \
@@ -97,6 +99,7 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --use_flash \
 -n ${N} \
 --save ${SAVE} \
+--pass_key_file ${PASS_KEY_FILE} \
 --zeroshot \
 --tasks ${TASKS} \
 --long_bench \

@@ -8,8 +8,8 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-from quant.new_pack import triton_quantize_and_pack_along_last_dim, fake_quant
-from quant.matmul import cuda_bmm_fA_qB_outer
+from quant.kivi_utils.new_pack import triton_quantize_and_pack_along_last_dim, fake_quant
+from quant.kivi_utils.matmul import cuda_bmm_fA_qB_outer
 
 from transformers.models.qwen2.configuration_qwen2 import *
 from transformers.models.qwen2.modeling_qwen2 import *
