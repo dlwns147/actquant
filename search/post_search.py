@@ -258,7 +258,12 @@ def main(args):
             task = list(results.keys())            
             print(f'task : {task}')
             for task, result in results.items():
-                print(f'task: {task}, result: {result}')
+                # print(f'task: {task}, result: {result}')
+                new_result = {}
+                for k, v in result.items():
+                    if k in ['em,none', 'exact_match,strict-match', 'exact_match,flexible-extract', 'bleu_max,none', 'bleu_acc,none', 'acc,none']:
+                        new_result[k] = float(v)
+                print(f'task: {task}, result: {list(new_result.keys())}, {list(new_result.values())}')
         
         if args.long_bench:
             # if len(args.long_bench_task) == 0 and not args.long_bench_task_e:
