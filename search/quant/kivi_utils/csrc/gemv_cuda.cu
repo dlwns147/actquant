@@ -563,7 +563,6 @@ __global__ void bgemv8_kernel_outer_dim(
     }
 }
 
-
 /*
 Computes GEMV (PyTorch interface).
 
@@ -603,7 +602,7 @@ torch::Tensor gemv_forward_cuda_outer_dim(
     at::Tensor _out_feats = torch::empty({BS, num_in_feats, num_out_channels}, options);
     int num_out_feats = _out_feats.size(-2);
     auto out_feats = reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>());
-    const int pack_factor = 32 / bit;
+    int pack_factor = 32 / bit;
     dim3 num_blocks(BS, (num_out_channels / pack_factor + 3) / 4, num_out_feats);
     dim3 num_threads(32, 4);
     if (bit == 4){
@@ -620,14 +619,16 @@ torch::Tensor gemv_forward_cuda_outer_dim(
         in_feats, kernel, zeros, scaling_factors, out_feats,
         // constants
         num_in_channels, num_out_channels, group_size, nh, nh_kv
-      );}
+      );     
+      }
     else if (bit == 8){
-      // note: in this case, pack factor == 4
+      // note: in this case, pack factor == 16
       bgemv8_kernel_outer_dim<<<num_blocks, num_threads>>>(
         // pointers
         in_feats, kernel, zeros, scaling_factors, out_feats,
         // constants
         num_in_channels, num_out_channels, group_size, nh, nh_kv
-      );}
+      );     
+      }
     return _out_feats;
 ;}
