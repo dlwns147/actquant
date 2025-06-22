@@ -81,7 +81,7 @@ def main(args):
 
     use_awq_or_gptq = 'awq' in args.method or 'gptq' in args.method
     method = 'awq' if 'awq' in args.method else 'gptq' if 'gptq' in args.method else None
-    group_size = {'w': args.w_group_size, 'k': [args.k_group_size], 'v': [args.v_group_size]}
+    group_size = {'w': args.w_group_size, 'k': [[args.k_group_size]], 'v': [[args.v_group_size]]}
     
     if use_awq_or_gptq:
         args.quant_model_bits = []
@@ -166,7 +166,8 @@ def main(args):
         
         results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks)
         
-        task = list(results.keys())            
+        task = list(results.keys())     
+        total_result = []
         print(f'task : {task}')
         for task, result in results.items():
             # print(f'task: {task}, result: {result}')
@@ -175,6 +176,8 @@ def main(args):
                 if k in ['em,none', 'exact_match,strict-match', 'exact_match,flexible-extract', 'bleu_max,none', 'bleu_acc,none', 'acc,none']:
                     new_result[k] = float(v)
             print(f'task: {task}, result: {list(new_result.keys())}, {list(new_result.values())}')
+            total_result += list(new_result.values())
+        print(f'total_result: {total_result}')
             
         # acc_norm = [task_result['acc_norm,none'] if 'acc_norm,none' in task_result else task_result['acc,none'] for task_result in results.values()]
         # acc = [task_result['acc,none'] for task_result in results.values()]

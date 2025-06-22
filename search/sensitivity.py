@@ -155,12 +155,18 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--v_bits', type=int, nargs='+', default=[2, 4], 
                         help='')
-    parser.add_argument('--w_group_size', type=int, default=128, 
+    # parser.add_argument('--w_group_size', type=int, default=128, 
+    #                     help='')
+    # parser.add_argument('--k_group_size', type=int, default=128, 
+    #                     help='')
+    # parser.add_argument('--v_group_size', type=int, default=128, 
+    #                     help='')  
+    parser.add_argument('--w_group_size', type=int, default=128,
                         help='')
-    parser.add_argument('--k_group_size', type=int, default=128, 
+    parser.add_argument('--k_group_size', type=int, nargs='+', action='append', default=[],
                         help='')
-    parser.add_argument('--v_group_size', type=int, default=128, 
-                        help='')  
+    parser.add_argument('--v_group_size', type=int, nargs='+', action='append', default=[],
+                        help='')
     parser.add_argument('--residual_length', type=int, default=128, 
                         help='')
     parser.add_argument('--use_flash', action='store_true', help='')
