@@ -90,17 +90,14 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --model_name ${MODEL_NAME} \
 --config ${CONFIG} \
 --w_bits ${W_BITS} \
---k_bits ${K_BITS} \
---v_bits ${V_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
---k_group_size ${KV_GROUP_SIZE} \
---v_group_size ${KV_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
 --k_quant_per ${K_QUANT_PER} \
 --v_quant_per ${V_QUANT_PER} \
 --use_flash \
 -n ${N} \
 --save ${SAVE} \
+--datasets ${DATASETS} \
 --zeroshot \
 --tasks ${TASKS} \
 --long_bench \
@@ -108,7 +105,12 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --long_bench_config ${LONG_BENCH_CONFIG} \
 --clip_asym
 
-# --datasets ${DATASETS} \
+# --k_bits ${K_BITS} \
+# --v_bits ${V_BITS} \
+# --k_group_size ${KV_GROUP_SIZE} \
+# --v_group_size ${KV_GROUP_SIZE} \
+
+
 # --pass_key_file ${PASS_KEY_FILE} \
 
 # --method ${METHOD} \

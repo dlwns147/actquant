@@ -80,8 +80,8 @@ class Search:
 
         w_group_size = kwargs.pop('w_group_size', 128)
         # a_group_size = kwargs.pop('wbits', [2, 3, 4])
-        k_group_size = kwargs.pop('k_group_size', [128])
-        v_group_size = kwargs.pop('v_group_size', [128])
+        k_group_size = kwargs.pop('k_group_size', [[128]])
+        v_group_size = kwargs.pop('v_group_size', [[128]])
         self.group_size = {'w': w_group_size, 'k': k_group_size, 'v': v_group_size}
 
         self.residual_length = kwargs.pop('residual_length', 128)

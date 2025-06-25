@@ -81,6 +81,12 @@ def main(args):
 
     use_awq_or_gptq = 'awq' in args.method or 'gptq' in args.method
     method = 'awq' if 'awq' in args.method else 'gptq' if 'gptq' in args.method else None
+    bits = {'w': [args.w_bits]}
+    if args.k_bits is not None:
+        bits['k'] = [args.k_bits]
+    if args.v_bits is not None:
+        bits['v'] = [args.v_bits]
+        
     group_size = {'w': args.w_group_size, 'k': [[args.k_group_size]], 'v': [[args.v_group_size]]}
     
     if use_awq_or_gptq:
@@ -98,7 +104,7 @@ def main(args):
         n_sample=args.n_sample,
         datasets=args.datasets,
         device_map=device_map,
-        bits={'w': [args.w_bits], 'k': [args.k_bits], 'v': [args.v_bits]},
+        bits=bits,
         group_size=group_size,
         residual_length=args.residual_length,
         use_flash=args.use_flash,
@@ -108,11 +114,12 @@ def main(args):
 
     arch = dict()
     # arch['w'] = 
-    arch = {
-        'w': {linear: [args.w_bits] * config['n_block'] for linear in config['linear']},
-        'k': [args.k_bits] * config['n_block'],
-        'v': [args.v_bits] * config['n_block']
-    }
+    arch = {'w': {linear: [args.w_bits] * config['n_block'] for linear in config['linear']}}
+    if args.k_bits is not None:
+        arch['k'] = [args.k_bits] * config['n_block']
+        
+    if args.v_bits is not None:
+        arch['v'] = [args.v_bits] * config['n_block']
     accelerator.print(arch)
     
     w_bits = np.concatenate(list(arch['w'].values()))
@@ -255,9 +262,9 @@ if __name__ == '__main__':
     
     parser.add_argument('--w_bits', type=int, default=4, 
                         help='')
-    parser.add_argument('--k_bits', type=int, default=4, 
+    parser.add_argument('--k_bits', type=int, default=None, 
                         help='')
-    parser.add_argument('--v_bits', type=int, default=4, 
+    parser.add_argument('--v_bits', type=int, default=None, 
                         help='')
     
     parser.add_argument('--w_group_size', type=int, default=128, 
