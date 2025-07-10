@@ -2,8 +2,9 @@ import numpy as np
 import math
 from utils.func import *
 from utils.data import get_loader
-from utils.eval import eval_metric, get_logits
+from utils.eval import eval_metric, get_logits, eval_zeroshot, get_tokenizer
 from model.replace import replace_model
+ 
 
 # from model.skip_llama import block_replace
 # from monkeypatch.ftllama_modeling import convert_model_to_ft
@@ -35,12 +36,16 @@ class LlamaEvaluator:
                  k_quant_per='channel',
                  v_quant_per='token',
                  use_flash=False,
+                 limit=20,
+                 num_fewshot=None,
+                 batch_size=1,
                  **kwargs):
         
         # model_id = os.path.join(model_path, model_name)
         self.method = method
         self.model = None
         self.group_size = group_size
+        self.tokenizer = get_tokenizer(model_id)
         # self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
 
         # with accelerator.main_process_first():
@@ -66,8 +71,8 @@ class LlamaEvaluator:
             del model
             clean_up()
 
-        if loss_func != 'jsd':
-            self.dense_logits = {dataset: None for dataset in self.train_loaders.keys()}
+        # if loss_func != 'jsd':
+        #     self.dense_logits = {dataset: None for dataset in self.train_loaders.keys()}
 
         self.quant_models = list()
         if 'hqq' in method:
@@ -150,6 +155,9 @@ class LlamaEvaluator:
                 q_model.eval()
                 q_model.config.use_cache = False
 
+        self.limit = limit
+        self.num_fewshot = num_fewshot
+        self.batch_size = batch_size
         accelerator.wait_for_everyone()
 
     def sample(self, arch):
@@ -209,13 +217,27 @@ class LlamaEvaluator:
             loaders = self.test_loaders
         elif metric == 'loss':
             loaders = self.train_loaders
+        elif 'gsm8k' in metric:
+            loaders = {metric: None}
         else:
             raise NotImplementedError(f"metric should be 'ppl' or 'loss', not {metric}")
         metric_list = dict()
         for dataset, loader in loaders.items():
-            metric_list[dataset] = eval_metric(model=self.sample(arch) if model is None else model, accelerator=accelerator, metric=metric, loader=loader, seqlen=self.seqlen, loss_func=loss_func, dense_logits_list=self.dense_logits[dataset])
+            result = eval_metric(model=self.sample(arch) if model is None else model, 
+                                accelerator=accelerator, metric=metric, 
+                                loader=loader, 
+                                seqlen=self.seqlen, 
+                                loss_func=loss_func, 
+                                dense_logits_list=self.dense_logits[dataset] if self.loss_func == 'jsd' else None, 
+                                num_fewshot=self.num_fewshot, 
+                                limit=self.limit,
+                                batch_size=self.batch_size,
+                                verbosity='FATAL')
+            if 'gsm8k' in metric:
+                result = 1 - float(result[metric]['exact_match,strict-match'])
+                # result = 1 - float(result[metric]['exact_match,flexible-extract'])
+            metric_list[dataset] = result
         complexity = get_net_info(arch, self.config, self.group_size)
-        # torch.cuda.empty_cache()
         return metric_list, complexity
     
     def remove_linears(self, model, config):

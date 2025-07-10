@@ -112,6 +112,7 @@ class LlamaSearchSpace:
         # import pdb; pdb.set_trace()
         for n in tqdm(range(n_samples), desc='Sampling'):
             while True:
+                # 불균일 분포로부터 뽑기 위해(가우시안 분포로 뽑으면 대부분 중간에 몰린 데이터가 생성됨)
                 prob = np.random.rand(self.rand_size)
 
                 w_q_prob = prob[np.array([np.argwhere(_x == np.array(self.q_proj_option))[0, 0] for _x in w_q])]
@@ -229,6 +230,7 @@ class LlamaSearchSpace:
         n_doe -= 1
         data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option)], v=[max(self.v_option)])[0])
         n_doe -= 1
+        # TODO: 왜 아래의 경우가 comp_obj > 1일 때로 해놓았는지?
         if len(self.comp_obj) > 1:
             data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option)], v=[max(self.v_option)])[0])
             n_doe -= 1

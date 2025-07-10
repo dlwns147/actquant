@@ -12,6 +12,7 @@ from quant.kivi_utils.matmul import cuda_bmm_fA_qB_outer
 
 from transformers.models.llama.configuration_llama import *
 from transformers.models.llama.modeling_llama import *
+from transformers.models.llama.modeling_llama import _prepare_4d_causal_attention_mask_with_cache_position
 # from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_flash_attention_utils import _flash_attention_forward

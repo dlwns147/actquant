@@ -130,7 +130,7 @@ def triton_bmm_fA_qB_outer(group_size: int,
 	Returns C of shape (B, nh, M, N) float16
 	"""    
 	assert len(fA.shape) == 4 and len(qB.shape) == 4
-	B, nh, M, K = fA.shape 
+	B, nh, M, K = fA.shape
 	feat_per_int = 32 // bits
 	# flatten to a 3D tensor
 	fA = fA.view(-1, M, K)

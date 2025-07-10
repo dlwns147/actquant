@@ -6,12 +6,13 @@ from transformers import LlamaConfig, AutoTokenizer
 import time
 from datasets import load_dataset
 import gc
+import numpy as np
 # from copy import deepcopy
 
 # from models.cache import KIVIDynamicCache
 
-K_BITS = 3
-V_BITS = 3
+K_BITS = 4
+V_BITS = 4
 GROUP_SIZE = 128
 RESIDUAL_LENGTH = 128
 BATCH_SIZE = 1
@@ -33,8 +34,8 @@ if K_BITS < 16 and V_BITS < 16:
         config=config,
         # cache_dir=CACHE_DIR,
         torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        device_map="auto",
+        # low_cpu_mem_usage=True,
+        # device_map="auto",
     )
 else:
     from transformers import LlamaForCausalLM
@@ -65,8 +66,11 @@ prompt = ''
 for i in range(100):
     prompt += 'Question: ' + dataset['train'][i]['question'] + '\nAnswer: ' + dataset['train'][i]['answer'] + '\n'
 prompt += "Question: John takes care of 10 dogs. Each dog takes .5 hours a day to walk and take care of their business. How many hours a week does he spend taking care of dogs?"
-inputs = tokenizer(prompt, return_tensors="pt").to('cuda')
-print(f"Prompt length: {inputs['input_ids'].shape[1]} tokens")
+inputs = tokenizer(prompt, return_tensors="pt").input_ids.cuda()
+
+inputs = inputs[:, : 64000]
+
+print(f"Prompt length: {inputs.shape[1]} tokens")
 print(f"model: {model_name_or_path}")
 print('======')
 
@@ -75,10 +79,10 @@ max_new_tokens = 1024
 # --- Warm-up run ---
 # past_key_values_copy = deepcopy(past_key_values)
 
-print("Warming up...")
-with torch.no_grad():
-    _ = model.generate(**inputs, use_cache=True, max_new_tokens=10)
-print("Warm-up finished.")
+# print("Warming up...")
+# with torch.no_grad():
+#     _ = model.generate(inputs, use_cache=True, max_new_tokens=10)
+# print("Warm-up finished.")
 
 # del past_key_values_copy
 
@@ -94,24 +98,34 @@ memory_before = torch.cuda.memory_allocated()
 torch.cuda.reset_peak_memory_stats()
 
 with torch.no_grad():
-    start_time = time.time()
-    outputs = model.generate(**inputs, use_cache=True, max_new_tokens=max_new_tokens, return_dict_in_generate=True)
-    # outputs = model.generate(**inputs, use_cache=True, max_new_tokens=max_new_tokens)
-    torch.cuda.synchronize()
-    end_time = time.time()
+    # Prefill
+    outputs = model(inputs, past_key_values=None, use_cache=True)
+
+    # Generation
+    time_list = []
+    for i in range(max_new_tokens):
+        token = outputs.logits[:, -1].max(1)[1].unsqueeze(1)
+        
+        torch.cuda.synchronize()
+        start_time = time.perf_counter()
+        outputs = model(token, past_key_values=outputs.past_key_values, use_cache=True)
+        torch.cuda.synchronize()
+        end_time = time.perf_counter()
+
+        time_list.append(end_time - start_time)
+
+torch.cuda.synchronize()
+
 
 max_gpu_memory_gb = torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024
-print(f"Max GPU memory (peak): {max_gpu_memory_gb * 1024:.2f} MB")
 memory_after = torch.cuda.memory_allocated()
 memory_used_gb = (memory_after - memory_before) / 1024 / 1024 / 1024
 
-# import code; code.interact("cache speed line 119", local=dict(globals(), **locals()))
-
-elapsed_time = end_time - start_time
-num_generated_tokens = outputs.sequences.shape[1] - inputs['input_ids'].shape[1]
+elapsed_time = 1 / np.median(time_list)
+num_generated_tokens = max_new_tokens
 
 if elapsed_time > 0:
-    tokens_per_sec = num_generated_tokens / elapsed_time
+    tokens_per_sec = elapsed_time
 else:
     tokens_per_sec = float('inf')
 
@@ -120,3 +134,5 @@ print(f"Elapsed time: {elapsed_time:.4f} seconds")
 print(f"Tokens per second: {tokens_per_sec:.2f}")
 print(f"Max GPU memory (peak): {max_gpu_memory_gb:.2f} GB")
 print(f"Memory used by generate: {memory_used_gb:.2f} GB")
+
+# import code; code.interact("cache speed line 135", local=dict(globals(), **locals()))

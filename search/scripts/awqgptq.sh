@@ -40,8 +40,10 @@ COMP_OBJ_TEXT=bits
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
 # TASKS="coqa gsm8k truthfulqa"
 # TASKS="coqa truthfulqa"
-TASKS="truthfulqa"
+# TASKS="truthfulqa"
 # TASKS="coqa"
+# TASKS="gsm8k"
+TASKS="gsm8k_cot"
 
 N=1
 DATASETS="wikitext2 c4"
@@ -59,11 +61,11 @@ W_GROUP_SIZE=128
 # K_BITS=2
 # V_BITS=2
 
-# K_BITS=4
-# V_BITS=4
+K_BITS=4
+V_BITS=4
 
-K_BITS=8
-V_BITS=8
+# K_BITS=8
+# V_BITS=8
 
 # KV_GROUP_SIZE=32
 # KV_GROUP_SIZE=64
@@ -73,6 +75,12 @@ KV_GROUP_SIZE=128
 RESIDUAL_LENGTH=128
 K_QUANT_PER=channel
 V_QUANT_PER=token
+
+# BATCH_SIZE=1
+BATCH_SIZE=4
+# BATCH_SIZE=16
+# BATCH_SIZE=32
+
 
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${METHOD}_${BITS}
 SAVE=save/result/${TODAY}_test
@@ -92,6 +100,8 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --w_bits ${W_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
+--k_bits ${K_BITS} \
+--v_bits ${V_BITS} \
 --k_quant_per ${K_QUANT_PER} \
 --v_quant_per ${V_QUANT_PER} \
 --use_flash \
@@ -100,13 +110,12 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --datasets ${DATASETS} \
 --zeroshot \
 --tasks ${TASKS} \
---long_bench \
---long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
---long_bench_config ${LONG_BENCH_CONFIG} \
---clip_asym
+--zeroshot_batch_size ${BATCH_SIZE} \
+# --long_bench \
+# --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
+# --long_bench_config ${LONG_BENCH_CONFIG} \
+# --clip_asym
 
-# --k_bits ${K_BITS} \
-# --v_bits ${V_BITS} \
 # --k_group_size ${KV_GROUP_SIZE} \
 # --v_group_size ${KV_GROUP_SIZE} \
 
@@ -117,3 +126,4 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 # --group_size ${GROUP_SIZE} \
 
 # --zeroshot_batch_size ${BATCH_SIZE} \
+

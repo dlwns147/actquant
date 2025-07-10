@@ -162,6 +162,8 @@ class LlamaAttention_KIVI(nn.Module):
             # upcast attention to fp32
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
 
+            print(attn_weights.shape)
+
             value_states_full = torch.cat([value_states_full, value_states], dim=2)
             value_full_length = value_states_full.shape[-2]
             if value_states_quant is None:
@@ -651,7 +653,6 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([LlamaDecoderLayer_KIVI(config) for _ in range(config.num_hidden_layers)])
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing

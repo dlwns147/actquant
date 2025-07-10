@@ -48,6 +48,7 @@ our_llama_31_8b_inst_longbench = [53.25375, 53.26625, 53.20375, 53.15, 52.95125,
 our_llama_31_8b_inst_c4 = [11.48899174, 11.59070683, 11.73498726, 12.13742638, 12.89850044, 14.92379189, 17.19935036, 19.52639198]
 
 kvtuner_llama_31_8b_inst_bits = [3.0625, 3.59375, 4, 4.5, 5]
+kvtuner_llama_31_8b_inst_gsm8k = [0.645185747, 0.644427597, 0.652009098, 0.722517058, 0.73388931]
 kvtuner_llama_31_8b_inst_longbench = [48.41, 49.79875, 50.3925, 53.22375, 52.87625]
 
 kivi_qwen25_14b_inst_bits = [9, 8.5, 8.25, 5, 4.5, 4.25, 3, 2.5, 2.25]
@@ -74,12 +75,13 @@ our_mistral_7b_inst_v03_c4 = [8.887125969, 8.906814575, 8.962604523, 9.082873344
 # model_name = 'Qwen2.5 14B Inst'
 model_name = 'Mistral 7B Inst v0.3'
 
-# axes[0].scatter(kivi_llama_31_8b_inst_bits, kivi_llama_31_8b_inst_gsm8k, label='KIVI', s=scatter_size, c=colors[0])
-# axes[0].plot(our_llama_31_8b_inst_bits, our_llama_31_8b_inst_gsm8k, 'o-', label='Our', ms=marker_size, c=colors[1])
+axes[0].scatter(kivi_llama_31_8b_inst_bits, kivi_llama_31_8b_inst_gsm8k, label='KIVI', s=scatter_size, c=colors[0])
+axes[0].plot(our_llama_31_8b_inst_bits, our_llama_31_8b_inst_gsm8k, 'o-', label='Our', ms=marker_size, c=colors[1])
+axes[0].plot(kvtuner_llama_31_8b_inst_bits, kvtuner_llama_31_8b_inst_gsm8k, 'o-', label='KVTuner', ms=marker_size, c=colors[2])
 # axes[0].scatter(kivi_qwen25_14b_inst_bits, kivi_qwen25_14b_inst_gsm8k, label='KIVI', s=scatter_size, c=colors[0])
 # axes[0].plot(our_qwen25_14b_inst_bits, our_qwen25_14b_inst_gsm8k, 'o-', label='Our', ms=marker_size, c=colors[1])
-axes[0].scatter(kivi_mistral_7b_inst_v03_bits, kivi_mistral_7b_inst_v03_gsm8k, label='KIVI', s=scatter_size, c=colors[0])
-axes[0].plot(our_mistral_7b_inst_v03_bits, our_mistral_7b_inst_v03_gsm8k, 'o-', label='Our', ms=marker_size, c=colors[1])
+# axes[0].scatter(kivi_mistral_7b_inst_v03_bits, kivi_mistral_7b_inst_v03_gsm8k, label='KIVI', s=scatter_size, c=colors[0])
+# axes[0].plot(our_mistral_7b_inst_v03_bits, our_mistral_7b_inst_v03_gsm8k, 'o-', label='Our', ms=marker_size, c=colors[1])
 axes[0].set_title('GSM8K strict-match')
 axes[0].set_xlabel('Bits')
 axes[0].set_ylabel('strict-match')
@@ -87,13 +89,13 @@ axes[0].set_xlim([None, 5.5])
 axes[0].grid(c='0.8')
 axes[0].legend()
 
-# axes[1].scatter(kivi_llama_31_8b_inst_bits, kivi_llama_31_8b_inst_longbench, s=scatter_size, label='KIVI', c=colors[0])
-# axes[1].plot(our_llama_31_8b_inst_bits, our_llama_31_8b_inst_longbench, 'o-', ms=marker_size, label='Our', c=colors[1])
-# axes[1].plot(kvtuner_llama_31_8b_inst_bits, kvtuner_llama_31_8b_inst_longbench, 'o-', ms=marker_size, label='KVTuner', c=colors[2])
+axes[1].scatter(kivi_llama_31_8b_inst_bits, kivi_llama_31_8b_inst_longbench, s=scatter_size, label='KIVI', c=colors[0])
+axes[1].plot(our_llama_31_8b_inst_bits, our_llama_31_8b_inst_longbench, 'o-', ms=marker_size, label='Our', c=colors[1])
+axes[1].plot(kvtuner_llama_31_8b_inst_bits, kvtuner_llama_31_8b_inst_longbench, 'o-', ms=marker_size, label='KVTuner', c=colors[2])
 # axes[1].scatter(kivi_qwen25_14b_inst_bits, kivi_qwen25_14b_inst_longbench, label='KIVI', s=scatter_size, c=colors[0])
 # axes[1].plot(our_qwen25_14b_inst_bits, our_qwen25_14b_inst_longbench, 'o-', label='Our', ms=marker_size, c=colors[1])
-axes[1].scatter(kivi_mistral_7b_inst_v03_bits, kivi_mistral_7b_inst_v03_longbench, label='KIVI', s=scatter_size, c=colors[0])
-axes[1].plot(our_mistral_7b_inst_v03_bits, our_mistral_7b_inst_v03_longbench, 'o-', label='Our', ms=marker_size, c=colors[1])
+# axes[1].scatter(kivi_mistral_7b_inst_v03_bits, kivi_mistral_7b_inst_v03_longbench, label='KIVI', s=scatter_size, c=colors[0])
+# axes[1].plot(our_mistral_7b_inst_v03_bits, our_mistral_7b_inst_v03_longbench, 'o-', label='Our', ms=marker_size, c=colors[1])
 axes[1].set_title('8 Long Bench Task Avg Acc')
 axes[1].set_xlabel('Bits')
 axes[1].set_ylabel('Avg Acc.')
@@ -101,12 +103,12 @@ axes[1].set_xlim([None, 5.5])
 axes[1].grid(c='0.8')
 axes[1].legend()
 
-# axes[2].scatter(kivi_llama_31_8b_inst_bits, kivi_llama_31_8b_inst_c4, s=scatter_size, label='KIVI', c=colors[0])
-# axes[2].plot(our_llama_31_8b_inst_bits, our_llama_31_8b_inst_c4, 'o-', ms=marker_size, label='Our', c=colors[1])
+axes[2].scatter(kivi_llama_31_8b_inst_bits, kivi_llama_31_8b_inst_c4, s=scatter_size, label='KIVI', c=colors[0])
+axes[2].plot(our_llama_31_8b_inst_bits, our_llama_31_8b_inst_c4, 'o-', ms=marker_size, label='Our', c=colors[1])
 # axes[2].scatter(kivi_qwen25_14b_inst_bits, kivi_qwen25_14b_inst_c4, label='KIVI', s=scatter_size, c=colors[0])
 # axes[2].plot(our_qwen25_14b_inst_bits, our_qwen25_14b_inst_c4, 'o-', label='Our', ms=marker_size, c=colors[1])
-axes[2].scatter(kivi_mistral_7b_inst_v03_bits, kivi_mistral_7b_inst_v03_c4, label='KIVI', s=scatter_size, c=colors[0])
-axes[2].plot(our_mistral_7b_inst_v03_bits, our_mistral_7b_inst_v03_c4, 'o-', label='Our', ms=marker_size, c=colors[1])
+# axes[2].scatter(kivi_mistral_7b_inst_v03_bits, kivi_mistral_7b_inst_v03_c4, label='KIVI', s=scatter_size, c=colors[0])
+# axes[2].plot(our_mistral_7b_inst_v03_bits, our_mistral_7b_inst_v03_c4, 'o-', label='Our', ms=marker_size, c=colors[1])
 axes[2].set_title('C4 Perpleixty')
 axes[2].set_xlabel('Bits')
 axes[2].set_ylabel('C4 PPL')

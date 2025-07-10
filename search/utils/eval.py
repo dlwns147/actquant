@@ -209,12 +209,14 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None):
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, tokenizer=None, num_fewshot=None, limit=None, batch_size=None, verbosity='INFO'):
     # accelerator.wait_for_everyone()
     if metric == 'ppl':
         return eval_ppl(model, accelerator, loader, seqlen=seqlen)
     elif metric == 'loss':
         return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list)
+    elif 'gsm8k' in metric:
+        return eval_zeroshot(model, tokenizer, task_list=[metric], num_fewshot=num_fewshot, limit=limit, batch_size=batch_size, verbosity=verbosity)
     else:
         raise NotImplementedError(f'{metric} is not supported')
 
@@ -312,23 +314,24 @@ def measure_latency(model, generation, device, batch_size=64, prompt_length=64, 
 
     return median_latency
 
-torch.no_grad()
-def eval_zeroshot(model, tokenizer, task_list=['coqa', 'gsm8k', 'truthfulqa']):
+@torch.no_grad()
+def eval_zeroshot(model, tokenizer, task_list=['coqa', 'gsm8k', 'truthfulqa'], batch_size=None, num_fewshot=None, limit=None, verbosity='INFO'):
     
-    import os
     from lm_eval.models.huggingface import HFLM
     from lm_eval import tasks, evaluator, utils
     import datasets
     datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
     
     # model.tie_weights = lambda: None
-    hflm = HFLM(pretrained=model, tokenizer=tokenizer) #, batch_size=batch_size)# , batch_size='auto')
+    hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size if batch_size is not None else 1) #, batch_size='auto')
     
     results = evaluator.simple_evaluate(
         model=hflm,
         tasks=task_list,
-        # num_fewshot=num_fewshot,
-        # batch_size=batch_size,
+        num_fewshot=num_fewshot,
+        batch_size=batch_size,
+        limit=limit,
+        verbosity=verbosity
     )
-
+    
     return results['results']

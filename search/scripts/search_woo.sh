@@ -4,28 +4,11 @@ PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
 MODEL_PATH=/SSD/huggingface/meta-llama
 # MODEL_NAME=Llama-2-7b-hf
-# MODEL_NAME=Llama-2-13b-hf
-MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
+MODEL_NAME=Llama-2-13b-hf
+# MODEL_NAME=Llama-3.1-8B-Instruct
 CONFIG=config/llama.json
+DTYPE=float16
 
-# MODEL_PATH=/SSD/huggingface/Qwen
-# # MODEL_NAME=Qwen2.5-7B
-# # MODEL_NAME=Qwen2.5-14B
-# # MODEL_NAME=Qwen2.5-32B
-# # MODEL_NAME=Qwen2.5-72B
-# # MODEL_NAME=Qwen2.5-7B-Instruct
-# MODEL_NAME=Qwen2.5-14B-Instruct
-# # DTYPE=bfloat16
-# DTYPE=float16
-# CONFIG=config/qwen2.json
-
-# MODEL_PATH=/SSD/huggingface/mistralai
-# # MODEL_NAME=Mistral-7B-v0.3
-# MODEL_NAME=Mistral-7B-Instruct-v0.3
-# # DTYPE=bfloat16
-# DTYPE=float16
-# CONFIG=config/mistral.json
 
 # METHOD="hqq layer_prune"
 # METHOD_TEXT="hqq_layer_prune"
@@ -47,23 +30,19 @@ K_BITS="2 4"
 K_BITS_TEXT="24"
 # K_BITS=4
 # K_BITS_TEXT=4
-# K_GROUP_SIZE=128
-K_GROUP_SIZE=("32 64 128" "128")
-K_GROUP_SIZE_TEXT=3264128128
+K_GROUP_SIZE=128
 
 V_BITS="2 4"
 V_BITS_TEXT="24"
 # V_BITS=4
 # V_BITS_TEXT=4
-# V_GROUP_SIZE=128
-V_GROUP_SIZE=("32 64 128" "128")
-V_GROUP_SIZE_TEXT=3264128128
+V_GROUP_SIZE=128
 
 K_QUANT_PER=channel
 V_QUANT_PER=token
 
-# RESIDUAL_LENGTH=0
-RESIDUAL_LENGTH=128
+RESIDUAL_LENGTH=0
+# RESIDUAL_LENGTH=128
 
 # COMP_OBJ="wbits kvbits"
 # COMP_OBJ_TEXT=wkv
@@ -100,7 +79,6 @@ do
 done
 QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 
-
 # OUTLIER_BITS="2 3"
 # OUTLIER_TEXT=23
 
@@ -110,13 +88,10 @@ OUTLIER_TEXT=234
 N_OUTLIER=32
 OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.pth
 
-LOSS_FUNC=cross_entropy
-# LOSS_FUNC=jsd
+# LOSS_FUNC=cross_entropy
+LOSS_FUNC=jsd
 
-# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_${LOSS_FUNC}/loss
-# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_${LOSS_FUNC}/loss
-SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_jsd/loss
-
+SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE}v${V_GROUP_SIZE}group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_${LOSS_FUNC}/loss
 
 # PREDICTOR=mlp
 PREDICTOR=rbf
@@ -127,9 +102,9 @@ DATASET=wikitext2
 
 # N_SAMPLE=8
 # N_SAMPLE=16
-N_SAMPLE=32
+# N_SAMPLE=32
 # N_SAMPLE=64
-# N_SAMPLE=128
+N_SAMPLE=128
 
 # N_DOE=100
 # N_DOE=300
@@ -138,41 +113,31 @@ N_SAMPLE=32
 # ITER=200
 # N_ITER=50
 
-# N_DOE=150
+N_DOE=70
+ITER=100
+N_ITER=50
+
+# N_DOE=200
 # ITER=100
 # N_ITER=50
 
-N_DOE=80
-ITER=50
-N_ITER=50
 
 # N_DOE=400
 # ITER=200
 
 GA_POP_SIZE=200
 # GA_POP_SIZE=100
-# METRIC=loss
-# METRIC=gsm8k
-METRIC=gsm8k_cot
+METRIC=loss
 
-# MAX_VALUE=5
-MAX_VALUE=1
+MAX_VALUE=5
 MUT_PROB=0.1
 CROSSOVER_PROB=0.9
 
-SAVE_ITER=1
-# SAVE_ITER=10
+# SAVE_ITER=1
+SAVE_ITER=10
 
-# BATCH_SIZE=4
-# BATCH_SIZE=16
-BATCH_SIZE=32
-
-LIMIT=40
-# LIMIT=50
-# LIMIT=100
-
-SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${METHOD_TEXT}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_PER}_v_${V_QUANT_PER}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}_${BATCH_SIZE}bs_${LIMIT}limit
-# SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${METHOD_TEXT}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE}v${V_GROUP_SIZE}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_PER}_v_${V_QUANT_PER}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}_${OUTLIER_TEXT}
+SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${METHOD_TEXT}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE}v${V_GROUP_SIZE}group_size_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_PER}_v_${V_QUANT_PER}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}
+# SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${METHOD_TEXT}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE}v${V_GROUP_SIZE}group_size_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_PER}_v_${V_QUANT_PER}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}_${OUTLIER_TEXT}
 
 # SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${OBJ}_${METRIC}_${METHOD_TEXT}_iter_${ITER}_w${Q_BITS_TEXT}k${K_BITS}v${V_BITS}bits_obj_${SEC_OBJ_RANGE_SMALL}_${SEC_OBJ_RANGE_LARGE}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}
 # SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${OBJ}_${METRIC}_${METHOD_TEXT}_iter_${ITER}_${Q_BITS_TEXT}_obj_${SEC_OBJ_RANGE_SMALL}_${SEC_OBJ_RANGE_LARGE}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}_outlier_${OUTLIER_TEXT}
@@ -183,7 +148,8 @@ SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${METHO
 
 N_PROC=1
 
-ARGS="--gpu_id ${DEVICES} \
+CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} search_woo.py \
+--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
 --quant_model_paths ${QMODEL_PATHS} \
@@ -191,11 +157,14 @@ ARGS="--gpu_id ${DEVICES} \
 --k_bits ${K_BITS} \
 --v_bits ${V_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
+--k_group_size ${K_GROUP_SIZE} \
+--v_group_size ${V_GROUP_SIZE} \
 --comp_obj ${COMP_OBJ} \
 --comp_obj_min ${COMP_OBJ_MIN} \
 --comp_obj_max ${COMP_OBJ_MAX} \
 --sensitivity_result_path ${SENSITIVITY_RESULT_PATH} \
 --residual_length ${RESIDUAL_LENGTH} \
+--quant_kv_output \
 --k_quant_per ${K_QUANT_PER} \
 --v_quant_per ${V_QUANT_PER} \
 --use_flash \
@@ -215,60 +184,6 @@ ARGS="--gpu_id ${DEVICES} \
 --n_sample ${N_SAMPLE} \
 --dataset ${DATASET} \
 --save_iter ${SAVE_ITER} \
---limit ${LIMIT} \
---batch_size ${BATCH_SIZE}
-"
-for g in "${K_GROUP_SIZE[@]}"
-do
-    ARGS+=" --k_group_size ${g} "
-done
-
-for g in "${V_GROUP_SIZE[@]}"
-do
-    ARGS+="--v_group_size ${g} "
-done
-
-CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} search_group.py \
-${ARGS}
-
-# --quant_kv_output \
-# --gpu_id ${DEVICES} \
-# --model_path ${MODEL_PATH} \
-# --model_name ${MODEL_NAME} \
-# --quant_model_paths ${QMODEL_PATHS} \
-# --w_bits ${W_BITS} \
-# --k_bits ${K_BITS} \
-# --v_bits ${V_BITS} \
-# --w_group_size ${W_GROUP_SIZE} \
-# --k_group_size ${K_GROUP_SIZE[0]} \
-# --k_group_size ${K_GROUP_SIZE[1]} \
-# --v_group_size ${V_GROUP_SIZE[0]} \
-# --v_group_size ${V_GROUP_SIZE[1]} \
-# --comp_obj ${COMP_OBJ} \
-# --comp_obj_min ${COMP_OBJ_MIN} \
-# --comp_obj_max ${COMP_OBJ_MAX} \
-# --sensitivity_result_path ${SENSITIVITY_RESULT_PATH} \
-# --residual_length ${RESIDUAL_LENGTH} \
-# --quant_kv_output \
-# --k_quant_per ${K_QUANT_PER} \
-# --v_quant_per ${V_QUANT_PER} \
-# --use_flash \
-# --predictor ${PREDICTOR} \
-# --save ${SAVE} \
-# --iterations ${ITER} \
-# --n_doe ${N_DOE} \
-# --n_iter ${N_ITER} \
-# --metric ${METRIC} \
-# --ga_pop_size ${GA_POP_SIZE} \
-# --config ${CONFIG} \
-# --debug \
-# --max_value ${MAX_VALUE} \
-# --mut_prob ${MUT_PROB} \
-# --crossover_prob ${CROSSOVER_PROB} \
-# --loss_func ${LOSS_FUNC} \
-# --n_sample ${N_SAMPLE} \
-# --dataset ${DATASET} \
-# --save_iter ${SAVE_ITER} \
 
 # --method ${METHOD} \
 
