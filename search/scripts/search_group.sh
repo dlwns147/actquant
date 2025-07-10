@@ -142,9 +142,9 @@ N_SAMPLE=32
 # ITER=100
 # N_ITER=50
 
-N_DOE=80
-ITER=50
-N_ITER=50
+N_DOE=100
+ITER=100
+N_ITER=30
 
 # N_DOE=400
 # ITER=200
@@ -167,9 +167,12 @@ SAVE_ITER=1
 # BATCH_SIZE=16
 BATCH_SIZE=32
 
-LIMIT=40
+# LIMIT=40
 # LIMIT=50
-# LIMIT=100
+LIMIT=100
+
+VERBOSITY='FATAL'
+# VERBOSITY='INFO
 
 SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${METHOD_TEXT}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_PER}_v_${V_QUANT_PER}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}_${BATCH_SIZE}bs_${LIMIT}limit
 # SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${METHOD_TEXT}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE}v${V_GROUP_SIZE}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_PER}_v_${V_QUANT_PER}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}_${OUTLIER_TEXT}
@@ -216,7 +219,8 @@ ARGS="--gpu_id ${DEVICES} \
 --dataset ${DATASET} \
 --save_iter ${SAVE_ITER} \
 --limit ${LIMIT} \
---batch_size ${BATCH_SIZE}
+--batch_size ${BATCH_SIZE} \
+--verbosity ${VERBOSITY} \
 "
 for g in "${K_GROUP_SIZE[@]}"
 do
@@ -309,4 +313,3 @@ ${ARGS}
 # COMP_OBJ_MAX_TEXT="555"
 
 # --iqr_threshold ${IQR_THRESHOLD} \
-                                                                  
