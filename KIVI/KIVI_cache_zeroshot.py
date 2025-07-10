@@ -3,6 +3,8 @@ import json
 import torch
 import argparse
 from time import time
+from copy import deepcopy
+import gc
 
 import lm_eval
 from datasets import load_dataset
@@ -16,6 +18,7 @@ from common_code.eval_long_bench import pred_long_bench, eval_long_bench
 from models.llama_kivi_4_50_3_generation import convert_generation_kivi
 from models.llama_kivi_4_50_3 import convert_model_kivi
 from models.KIVICache import KIVICacheConfig, KIVIDynamicCache
+from transformers.cache_utils import DynamicCache
 
 
 def pass_key(model, tokenizer, past_key_values, pass_key_file='/NAS/SJ/actquant/common_code/passkey_examples.jsonl'):
@@ -51,11 +54,8 @@ def pass_key(model, tokenizer, past_key_values, pass_key_file='/NAS/SJ/actquant/
         torch.cuda.empty_cache()
 
 
-def zeroshot(model_name, quant_scheme, per_layer_config, residual_length=128, q_group_size=32, 
-            task_list=["coqa", "gsm8k", "truthfulqa_gen"], num_fewshots=0, batch_size='auto', limit=None, 
-            quantilizer='vanilla', device='cuda'):
-
-    from lm_eval.models.huggingface_quant import HFLM_Quant
+def zeroshot(model, tokenizer, task_list=["coqa", "gsm8k", "truthfulqa_gen"], num_fewshots=0, batch_size='auto', limit=None, device='cuda'):
+    from lm_eval.models.huggingface import HFLM
     from lm_eval import evaluator
 
     clean_up()
@@ -65,38 +65,20 @@ def zeroshot(model_name, quant_scheme, per_layer_config, residual_length=128, q_
     else:
         batch_size = 'auto'
 
-    model = HFLM_Quant(pretrained=model_name,
-                        nbits_key=1,
-                        nbits_value=1,
-                        residual_length=residual_length if quant_scheme == 'per-channel-asym' else 0,
-                        q_group_size=q_group_size if quant_scheme == 'per-channel-asym' else -1,
-                        asym=True,
-                        axis_key=1 if quant_scheme == 'per-channel-asym' else 0,
-                        axis_value=0,
-                        dtype=torch.bfloat16,
-                        force_quant=False,
-                        per_layer_quant=True,
-                        per_layer_config=per_layer_config,
-                        quantilizer=quantilizer,
-                        device_map='auto',
-                        parallelize=True, # True for multi-gpu, False for single-gpu 
-                    )
+    model.generation_config.temperature = 1.0
+    model.generation_config.top_p = 1.0
+    model.generation_config.top_k = None
 
-    model._model.generation_config.temperature = 1.0
-    model._model.generation_config.top_p = 1.0
-    model._model.generation_config.top_k = None
+    hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
+
 
     results = evaluator.simple_evaluate(
-        model=model,
+        model=hflm,
         tasks=task_list,
         num_fewshot=num_fewshots, # 0 for no fewshot, 1 for one shot, 2 for two shot, etc.
         batch_size=batch_size,
         device=device
     )
-
-    # import code; code.interact('flexible_quant_zeroshot line 70', local=dict(globals(), **locals()))
-    # print(results['results']['gsm8k']['exact_match,flexible-extract'])
-    # return float(results['results']['gsm8k']['exact_match,flexible-extract'])
 
     return results['results']
 
@@ -126,6 +108,7 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct")
     # parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
     # parser.add_argument("--per_layer_config_path", type=str, default="/NAS/SJ/actquant/KVTuner/search_results/post_search/llama_31_8b_instruct_channel.json")
+    parser.add_argument("--use_kivi", action="store_true")
     parser.add_argument("--k_bits", type=int, default=4)
     parser.add_argument("--v_bits", type=int, default=4)
     parser.add_argument("--residual_length", type=int, default=128)
@@ -156,20 +139,24 @@ def main(args):
     if args.save_path is not None:
         save_path = f'./eval_results/g{args.q_group_size}l{args.residual_length}/' + args.save_path
     else:
-        save_path = f'./eval_results/g{args.q_group_size}l{args.residual_length}/'
+        save_path = None
 
-    if not os.path.exists(save_path):
-        os.makedirs(save_path, exist_ok=True)
-    with open(os.path.join(save_path, 'args.txt'), 'w') as f:
-        for k, v in vars(args).items():
-            f.write(f"{k}: {v}\n")
+    if save_path is not None:
+        if not os.path.exists(save_path):
+            os.makedirs(save_path, exist_ok=True)
+        with open(os.path.join(save_path, 'args.txt'), 'w') as f:
+            for k, v in vars(args).items():
+                f.write(f"{k}: {v}\n")
 
     kivi_cache_config = KIVICacheConfig(nbits_key=args.k_bits, 
                                         nbits_value=args.v_bits, 
                                         q_group_size=args.q_group_size, 
                                         residual_length=args.residual_length, 
                                         per_layer_quant=False)
-    past_key_values = KIVIDynamicCache(kivi_cache_config)
+    if args.use_kivi:
+        past_key_values = KIVIDynamicCache(kivi_cache_config)
+    else:
+        past_key_values = DynamicCache()
 
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, 
                                                  _attn_implementation="flash_attention_2", device_map="auto").cuda().eval()
@@ -177,17 +164,16 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    convert_model_kivi(model, kivi_cache_config)
-    convert_generation_kivi(kivi_cache_config)
+    if args.use_kivi:
+        convert_model_kivi(model, kivi_cache_config)
+        convert_generation_kivi(kivi_cache_config)
 
     if args.pass_key:
         pass_key(model, tokenizer, past_key_values)
 
     if args.zeroshot:
         # task_list가 없으면 기본값 사용
-        zeroshot_results = zeroshot(model_name, args.quant_scheme, per_layer_config, residual_length=args.residual_length, q_group_size=args.q_group_size, 
-                 task_list=args.task_list, num_fewshots=args.num_fewshots, batch_size=args.batch_size, limit=args.limit, 
-                 quantilizer=args.quantilizer, device=args.device)
+        zeroshot_results = zeroshot(model, tokenizer, task_list=args.task_list, num_fewshots=args.num_fewshots, batch_size=args.batch_size, limit=args.limit, device=args.device)
         print(zeroshot_results)
         results['zeroshot'] = zeroshot_results
 
@@ -215,7 +201,9 @@ def main(args):
             with open(save_path + '.json', 'w') as f:
                 json.dump(results, f, indent=4)
         except Exception as e:
-            import code; code.interact('flexible_quant_zeroshot line 185', local=dict(globals(), **locals()))
+            import code; code.interact('KIVI_cache_zeroshot line 185', local=dict(globals(), **locals()))
+
+    import code; code.interact('KIVI_cache_zeroshot line 206', local=dict(globals(), **locals()))
 
 
 if __name__ == "__main__":

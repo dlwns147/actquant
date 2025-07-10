@@ -41,6 +41,7 @@ class LlamaEvaluator:
                  batch_size=1,
                  task_manager=None,
                  task_dict=None,
+                 verbosity='FATAL',
                  **kwargs):
         
         # model_id = os.path.join(model_path, model_name)
@@ -162,6 +163,7 @@ class LlamaEvaluator:
         self.batch_size = batch_size
         self.task_manager = task_manager
         self.task_dict = task_dict
+        self.verbosity = verbosity
         accelerator.wait_for_everyone()
 
     def sample(self, arch):
@@ -236,7 +238,7 @@ class LlamaEvaluator:
                                 num_fewshot=self.num_fewshot, 
                                 limit=self.limit,
                                 batch_size=self.batch_size,
-                                verbosity='FATAL',
+                                verbosity=self.verbosity,
                                 task_manager=self.task_manager,
                                 task_dict=self.task_dict)
             if 'gsm8k' in metric:

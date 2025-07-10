@@ -88,7 +88,8 @@ class Search:
         self.group_size = {'w': w_group_size, 'k': k_group_size, 'v': v_group_size}
 
         self.residual_length = kwargs.pop('residual_length', 128)
-        self.task_manager = TaskManager(kwargs.pop('verbosity', 'FATAL')) if self.metric not in ['ppl', 'loss'] else None
+        self.verbosity = kwargs.pop('verbosity', 'FATAL')
+        self.task_manager = TaskManager(self.verbosity) if self.metric not in ['ppl', 'loss'] else None
         self.task_dict = get_task_dict([self.metric], self.task_manager) if self.metric not in ['ppl', 'loss'] else None
         
         self.comp_obj = kwargs.pop('comp_obj', ['wbits', 'kvbits'])  # second objective to optimize simultaneously
