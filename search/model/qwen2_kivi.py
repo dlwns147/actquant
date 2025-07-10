@@ -13,6 +13,7 @@ from quant.kivi_utils.matmul import cuda_bmm_fA_qB_outer
 
 from transformers.models.qwen2.configuration_qwen2 import *
 from transformers.models.qwen2.modeling_qwen2 import *
+from transformers.models.qwen2.modeling_qwen2 import _prepare_4d_causal_attention_mask_with_cache_position
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 
 from transformers.cache_utils import Cache, DynamicCache, StaticCache

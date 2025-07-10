@@ -10,11 +10,11 @@ PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 # CONFIG=config/llama.json
 
 # MODEL_PATH=/SSD/huggingface/Qwen
-# MODEL_NAME=Qwen2.5-7B
+# # MODEL_NAME=Qwen2.5-7B
 # # MODEL_NAME=Qwen2.5-14B
 # # MODEL_NAME=Qwen2.5-32B
 # # MODEL_NAME=Qwen2.5-72B
-# # MODEL_NAME=Qwen2.5-7B-Instruct
+# MODEL_NAME=Qwen2.5-7B-Instruct
 # # MODEL_NAME=Qwen2.5-14B-Instruct
 # # DTYPE=bfloat16
 # DTYPE=float16
