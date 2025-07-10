@@ -13,16 +13,20 @@ from common_code.func import clean_up
 from common_code.eval import eval_zeroshot
 from common_code.eval_long_bench import pred_long_bench, eval_long_bench
 
+from models.llama_kivi_4_50_3_generation import convert_generation_kivi
+from models.llama_kivi_4_50_3 import convert_model_kivi
+from models.KIVICache import KIVICacheConfig, KIVIDynamicCache
 
-def pass_key(model, tokenizer, per_layer_config, residual_length=128, q_group_size=32, pass_key_file='/NAS/SJ/actquant/common_code/passkey_examples.jsonl'):
+
+def pass_key(model, tokenizer, past_key_values, pass_key_file='/NAS/SJ/actquant/common_code/passkey_examples.jsonl'):
     print( "-----------------------------------" )
-    for line in open(pass_key_file, "r"):
-        cache_config = FlexibleQuantizedCacheConfig(axis_key=0, axis_value=0, asym=True, q_group_size=q_group_size, residual_length=residual_length, device='cuda', 
-                                            per_layer_quant=True,per_layer_config=per_layer_config)
-        past_key_values = FlexibleVanillaQuantizedCache(cache_config=cache_config)
 
-        clean_up()
+    original_past_key_values = deepcopy(past_key_values)
+
+    for line in open(pass_key_file, "r"):
         torch.cuda.reset_max_memory_allocated() 
+
+        past_key_values = deepcopy(original_past_key_values)
 
         example = json.loads(line)
         prompt_postfix = "What is the pass key? The pass key is "
@@ -41,6 +45,10 @@ def pass_key(model, tokenizer, per_layer_config, residual_length=128, q_group_si
         print( answer )
         print(f"Mem: {peak_memory / 1024 / 1024 / 1024:.3f} GB")
         print( "-----------------------------------\n" )
+
+        del past_key_values
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 def zeroshot(model_name, quant_scheme, per_layer_config, residual_length=128, q_group_size=32, 
@@ -118,10 +126,10 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct")
     # parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
     # parser.add_argument("--per_layer_config_path", type=str, default="/NAS/SJ/actquant/KVTuner/search_results/post_search/llama_31_8b_instruct_channel.json")
+    parser.add_argument("--k_bits", type=int, default=4)
+    parser.add_argument("--v_bits", type=int, default=4)
     parser.add_argument("--residual_length", type=int, default=128)
-    parser.add_argument("--q_group_size", type=int, default=32)
-    parser.add_argument("--quant_scheme", type=str, default="per-channel-asym", choices=["per-channel-asym", "per-token-asym"])
-    parser.add_argument("--quantilizer", type=str, default="vanilla", choices=["vanilla", "hqq"])
+    parser.add_argument("--q_group_size", type=int, default=128)
     # parser.add_argument("--task_list", type=list, default=["coqa", "gsm8k", "truthfulqa_gen"])
     parser.add_argument("--task_list", type=str, nargs='+', default=["coqa", "gsm8k", "truthfulqa_gen"])
     parser.add_argument("--num_fewshots", type=int, default=0)
@@ -136,7 +144,6 @@ def parse_args():
     parser.add_argument("--long_bench_config", type=str, default="/NAS/SJ/actquant/common_code/long_bench_config")
     # parser.add_argument("--long_bench_result_path", type=str, default=None)
 
-    parser.add_argument("--target_bit", type=float, default=3.0)
     parser.add_argument("--save_path", type=str, default=None)
 
     args = parser.parse_args()
@@ -146,14 +153,10 @@ def main(args):
     results = {}
     model_name = args.model_name
 
-    if 'llama' in model_name.lower():
-        per_layer_config_path = f'/NAS/SJ/actquant/KVTuner/search_results/g{args.q_group_size}l{args.residual_length}/post_search/llama_31_8b_instruct_channel.json'
-    elif 'qwen' in model_name.lower():
-        per_layer_config_path = f'/NAS/SJ/actquant/KVTuner/search_results/g{args.q_group_size}l{args.residual_length}/post_search/qwen_25_7b_instruct_channel.json'
+    if args.save_path is not None:
+        save_path = f'./eval_results/g{args.q_group_size}l{args.residual_length}/' + args.save_path
     else:
-        raise ValueError(f"Model {model_name} is not supported")
-
-    save_path = f'./eval_results/g{args.q_group_size}l{args.residual_length}/' + args.save_path
+        save_path = f'./eval_results/g{args.q_group_size}l{args.residual_length}/'
 
     if not os.path.exists(save_path):
         os.makedirs(save_path, exist_ok=True)
@@ -161,26 +164,24 @@ def main(args):
         for k, v in vars(args).items():
             f.write(f"{k}: {v}\n")
 
-    with open(per_layer_config_path, 'r') as f:
-        data = json.load(f)
+    kivi_cache_config = KIVICacheConfig(nbits_key=args.k_bits, 
+                                        nbits_value=args.v_bits, 
+                                        q_group_size=args.q_group_size, 
+                                        residual_length=args.residual_length, 
+                                        per_layer_quant=False)
+    past_key_values = KIVIDynamicCache(kivi_cache_config)
 
-    target_bit = str(args.target_bit)
-    tot_scale, per_layer_config = data[target_bit]['tot_scale'] if target_bit in data else None, data[target_bit]['per_layer_config'] if target_bit in data else None
-    if per_layer_config is None:
-        items = [item for item in data.values() if abs(item['tot_scale'] - args.target_bit) < 0.1]
-        items = sorted(items, key=lambda x: x['accuracy'], reverse=True)
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, 
+                                                 _attn_implementation="flash_attention_2", device_map="auto").cuda().eval()
+    model.generation_config.pad_token_id = model.generation_config.eos_token_id[0]
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, trust_remote_code=True)
+    tokenizer.pad_token = tokenizer.eos_token
 
-        if len(items) > 0:
-            tot_scale, per_layer_config = items[0]['tot_scale'], items[0]['per_layer_config']
-        else:
-            print(f"No per_layer_config found for {model_name} with target_bit {args.target_bit}")
-            return
-
-    results['tot_scale'] = tot_scale
-    results['per_layer_config'] = per_layer_config
+    convert_model_kivi(model, kivi_cache_config)
+    convert_generation_kivi(kivi_cache_config)
 
     if args.pass_key:
-        pass_key(model, tokenizer, per_layer_config, residual_length=args.residual_length, q_group_size=args.q_group_size)
+        pass_key(model, tokenizer, past_key_values)
 
     if args.zeroshot:
         # task_list가 없으면 기본값 사용

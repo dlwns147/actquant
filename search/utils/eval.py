@@ -209,14 +209,14 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, tokenizer=None, num_fewshot=None, limit=None, batch_size=None, verbosity='INFO'):
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, tokenizer=None, num_fewshot=None, limit=None, batch_size=None, verbosity='INFO', task_manager=None, task_dict=None):
     # accelerator.wait_for_everyone()
     if metric == 'ppl':
         return eval_ppl(model, accelerator, loader, seqlen=seqlen)
     elif metric == 'loss':
         return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list)
     elif 'gsm8k' in metric:
-        return eval_zeroshot(model, tokenizer, task_list=[metric], num_fewshot=num_fewshot, limit=limit, batch_size=batch_size, verbosity=verbosity)
+        return eval_zeroshot(model, tokenizer, task_list=[metric], num_fewshot=num_fewshot, limit=limit, batch_size=batch_size, verbosity=verbosity, task_manager=task_manager, task_dict=task_dict)
     else:
         raise NotImplementedError(f'{metric} is not supported')
 
@@ -315,7 +315,7 @@ def measure_latency(model, generation, device, batch_size=64, prompt_length=64, 
     return median_latency
 
 @torch.no_grad()
-def eval_zeroshot(model, tokenizer, task_list=['coqa', 'gsm8k', 'truthfulqa'], batch_size=None, num_fewshot=None, limit=None, verbosity='INFO'):
+def eval_zeroshot(model, tokenizer, task_list=['coqa', 'gsm8k', 'truthfulqa'], batch_size=None, task_manager=None, task_dict=None, num_fewshot=None, limit=None, verbosity='INFO'):
     
     from lm_eval.models.huggingface import HFLM
     from lm_eval import tasks, evaluator, utils
@@ -331,7 +331,9 @@ def eval_zeroshot(model, tokenizer, task_list=['coqa', 'gsm8k', 'truthfulqa'], b
         num_fewshot=num_fewshot,
         batch_size=batch_size,
         limit=limit,
-        verbosity=verbosity
+        verbosity=verbosity,
+        task_manager=task_manager,
+        task_dict=task_dict
     )
     
     return results['results']

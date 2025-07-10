@@ -23,6 +23,7 @@ from search_space.llama import LlamaGroupSizeSearchSpace # LlamaSearchSpace
 from predictor.factory import get_predictor
 from utils.func import get_net_info, init_accelerator, set_seed, get_correlation
 from utils.ga import MySampling, BinaryCrossover, MyMutation, IntPolynomialMutation, MyTwoPointCrossover, MyUniformCrossover, IntegerFromFloatMutation, IntMutation
+from lm_eval.tasks import TaskManager, get_task_dict
 
 import warnings
 warnings.simplefilter("ignore")
@@ -87,7 +88,9 @@ class Search:
         self.group_size = {'w': w_group_size, 'k': k_group_size, 'v': v_group_size}
 
         self.residual_length = kwargs.pop('residual_length', 128)
-
+        self.task_manager = TaskManager(kwargs.pop('verbosity', 'FATAL')) if self.metric not in ['ppl', 'loss'] else None
+        self.task_dict = get_task_dict([self.metric], self.task_manager) if self.metric not in ['ppl', 'loss'] else None
+        
         self.comp_obj = kwargs.pop('comp_obj', ['wbits', 'kvbits'])  # second objective to optimize simultaneously
         self.comp_obj_min = kwargs.pop('comp_obj_min', [min(w_bits), min(k_bits)])
         self.comp_obj_max = kwargs.pop('comp_obj_max', [max(w_bits), max(k_bits)])
@@ -148,7 +151,9 @@ class Search:
             k_quant_per=kwargs.pop('k_quant_per', 'channel'),
             v_quant_per=kwargs.pop('v_quant_per', 'token'),
             limit=self.limit,
-            batch_size=self.batch_size
+            batch_size=self.batch_size,
+            task_manager=self.task_manager,
+            task_dict=self.task_dict
         )
         self.search_space = LlamaGroupSizeSearchSpace(
             bits=self.bits,
@@ -620,11 +625,13 @@ if __name__ == '__main__':
     parser.add_argument('--seqlen', type=int, default=2048,
                         help='sequential length of the calibaration (train) set')
     parser.add_argument('--metric', type=str, default='ppl',
-                        help='which metric predictor model to fit (ppl/loss)')
+                        help='which metric predictor model to fit (ppl/loss/gsm8k)')
     parser.add_argument('--limit', type=int, default=None,
                         help='')
     parser.add_argument('--batch_size', type=int, default=None,
                         help='batch size for measuring lm_eval tasks.')
+    parser.add_argument('--verbosity', type=str, default='INFO',
+                        help='verbosity for measuring lm_eval tasks.')
     
     parser.add_argument('--config', type=str, default='config/llama.json',
                         help='config file to read the model meta data')
