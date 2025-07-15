@@ -2,7 +2,7 @@
 import torch
 from datasets import load_dataset
 from transformers import AutoTokenizer, LlamaTokenizer
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
 class TokenizerWrapper:
     def __init__(self, input_ids):
@@ -32,30 +32,49 @@ def get_wikitext2(tokenizer, seqlen=2048, batch_size=1, cache_dir=None):
     testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt').input_ids
     n_sample = testenc.numel() // seqlen
     testenc = testenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-
     return DataLoader(testenc, batch_size=batch_size, drop_last=False)
+
+    # tokenized = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
+    # input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
+    # n_sample = input_ids.numel() // seqlen
+    # input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=False)
 
 def get_c4(tokenizer, seqlen=2048, batch_size=1, cache_dir=None):
    
     valdata = load_dataset('allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation', cache_dir=cache_dir)
 
     valenc = tokenizer(' '.join(valdata[:1100]['text']), return_tensors='pt')
-    # valenc = valenc.input_ids[:, :(256 * seqlen)]
     valenc = valenc.input_ids[:, :(256 * seqlen)]
     n_sample = valenc.numel() // seqlen
     valenc = valenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-
     return DataLoader(valenc, batch_size=batch_size, drop_last=False)
+
+    # tokenized = tokenizer(' '.join(valdata[:1100]['text']), return_tensors='pt')
+    # input_ids, attention_mask = tokenized['input_ids'][:, :(256 * seqlen)], tokenized['attention_mask'][:, :(256 * seqlen)]
+    # n_sample = input_ids.numel() // seqlen
+    # input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=False)
 
 def get_wikitext2_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
     
     traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train', cache_dir=cache_dir)
     traindata = traindata.shuffle(seed=seed)
+    
     trainenc = tokenizer("\n\n".join(traindata[:n_sample]['text']), return_tensors='pt').input_ids
     n_sample = trainenc.numel() // seqlen
     trainenc = trainenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-
     return DataLoader(trainenc, batch_size=batch_size)
+
+    # tokenized = tokenizer("\n\n".join(traindata[:n_sample]['text']), return_tensors='pt')
+    # input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
+    # n_sample = input_ids.numel() // seqlen
+    # input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size)
+
 
 def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
     traindata = load_dataset(
@@ -65,9 +84,51 @@ def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_
     
     trainenc = tokenizer(' '.join(traindata[:n_sample]['text']), return_tensors='pt').input_ids
     n_sample = trainenc.numel() // seqlen
-    trainenc = trainenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-
+    trainenc = trainenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)    
     return DataLoader(trainenc, batch_size=batch_size, drop_last=True)
+
+    # tokenized = tokenizer(' '.join(traindata[:n_sample]['text']), return_tensors='pt')
+    # input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
+    # n_sample = input_ids.numel() // seqlen
+    # input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=True)
+    
+
+
+def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
+    traindata = load_dataset('gsm8k', 'main', split='train', cache_dir=cache_dir)
+    traindata = traindata.shuffle(seed=seed)
+    # trainenc = tokenizer("\n\n".join(traindata[:n_sample]['text']), return_tensors='pt').input_ids
+    count = 0
+    data_list = []
+    for data in traindata:
+        prompt = f"Question: {data['question']}\nAnswer:"
+        target = f" {data['answer']}"
+        
+        tokenized = tokenizer(prompt + target, return_tensors='pt')
+        input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
+        len_prompt_target = input_ids.shape[-1]
+        len_prompt = len(tokenizer(prompt)["input_ids"])
+        print(f'len_prompt_target: {len_prompt_target}, len_prompt: {len_prompt}')
+        input_ids = torch.column_stack([input_ids, torch.zeros((1, seqlen - len_prompt_target), dtype=int)])
+        attention_mask = torch.column_stack([attention_mask, torch.zeros((1, seqlen - len_prompt_target), dtype=int)])
+        if len(input_ids) > seqlen:
+            continue
+        labels = input_ids.clone()        
+        labels[0, :len_prompt] = -100
+        labels[0, len_prompt_target:] = -100
+        data_list.append([input_ids, attention_mask, labels])
+        count += 1
+        if count == n_sample:
+            break
+    if count < n_sample:
+        raise NotImplementedError(f"'seqlen' is too small to generate a calibration dataset, dataset size: {count}, n_sample: {n_sample}")
+    input_ids_dataset = torch.concat([x[0] for x in data_list], dim=0)
+    attention_mask_dataset = torch.concat([x[1] for x in data_list], dim=0)
+    labels_dataset = torch.concat([x[2] for x in data_list], dim=0)
+    
+    return DataLoader(TensorDataset(input_ids_dataset, attention_mask_dataset, labels_dataset), batch_size=batch_size)
 
 def get_trainloaders(name, n_sample=128, seed=0, seqlen=2048, model='', batch_size=1, cache_dir=None):
     tokenizer = get_tokenizer(model)
@@ -75,17 +136,23 @@ def get_trainloaders(name, n_sample=128, seed=0, seqlen=2048, model='', batch_si
         return get_wikitext2_trainenc(seed, n_sample, seqlen, model, tokenizer, batch_size, cache_dir=cache_dir)
     if 'c4' in name:
         return get_c4_trainenc(seed, n_sample, seqlen, model, tokenizer, batch_size, cache_dir=cache_dir)
+    if 'gsm8k' in name:
+        return get_gsm8k_trainenc(seed, n_sample, seqlen, model, tokenizer, batch_size, cache_dir=cache_dir)
 
-def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, tokenizer=None, model='', cache_dir=None):
+def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, batch_size=1, tokenizer=None, model='', cache_dir=None):
     if tokenizer is None:
         tokenizer = get_tokenizer(model, cache_dir=cache_dir)
     if train:
         if 'wikitext2' in name:
-            return get_wikitext2_trainenc(seed=seed, n_sample=n_sample, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
+            return get_wikitext2_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
         if 'c4' in name:
-            return get_c4_trainenc(seed=seed, n_sample=n_sample, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
+            return get_c4_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
+        if 'gsm8k' in name:
+            return get_gsm8k_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
     else:
         if 'wikitext2' in name:
-            return get_wikitext2(tokenizer=tokenizer, seqlen=seqlen, cache_dir=cache_dir)
+            return get_wikitext2(tokenizer=tokenizer, batch_size=batch_size, seqlen=seqlen, cache_dir=cache_dir)
         if 'c4' in name:
-            return get_c4(seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
+            return get_c4(tokenizer=tokenizer, batch_size=batch_size, seqlen=seqlen, cache_dir=cache_dir)
+        if 'gsm8k' in name:
+            return None

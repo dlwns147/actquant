@@ -43,9 +43,11 @@ def eval_ppl(model, accelerator, loader, seqlen=2048):
     
     # Loop through each batch
     for inputs in tqdm(loader, desc='Eval PPL'):
+    # for inputs, attention_mask, labels in tqdm(loader, desc='Eval PPL'):
 
         # Forward pass through the model
         outputs = model(inputs)
+        # outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
 
         # Shift logits and labels for next token prediction
@@ -111,8 +113,10 @@ def get_logits(model, loader):
     # List to store negative log likelihoods
     logits = []
     for inputs in loader:
+    # for inputs, attention_mask, labels in loader:
 
         outputs = model(inputs)
+        # outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
         logits.append(lm_logits)
 
@@ -134,8 +138,10 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     
     # Loop through each batch
     for i, inputs in enumerate(loader):
+    # for i, (inputs, attention_mask, labels) in enumerate(loader):
 
         outputs = model(inputs)
+        # outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
 
         # Shift logits and labels for next token prediction
@@ -209,14 +215,14 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, tokenizer=None, num_fewshot=None, limit=None, batch_size=None, verbosity='INFO', task_manager=None, task_dict=None):
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
     # accelerator.wait_for_everyone()
     if metric == 'ppl':
         return eval_ppl(model, accelerator, loader, seqlen=seqlen)
     elif metric == 'loss':
         return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list)
     elif 'gsm8k' in metric:
-        return eval_zeroshot(model, tokenizer, task_list=[metric], num_fewshot=num_fewshot, limit=limit, batch_size=batch_size, verbosity=verbosity, task_manager=task_manager, task_dict=task_dict)
+        return eval_zeroshot(model, tokenizer, task_list=[metric], limit=limit, batch_size=batch_size, num_fewshot=num_fewshot, verbosity=verbosity, task_manager=task_manager, task_dict=task_dict)
     else:
         raise NotImplementedError(f'{metric} is not supported')
 

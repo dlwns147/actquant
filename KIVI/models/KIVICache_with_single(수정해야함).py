@@ -10,51 +10,35 @@ from quant.new_pack import triton_quantize_and_pack_along_last_dim
 
 @dataclass
 class KIVICacheConfig(CacheConfig):
-    """
-    KIVI cache config
-    We didn't provide single config(per model config) for now.
-
-    Args:
-        # per layer config
-        k_bits: k_bits for key
-        v_bits: v_bits for value
-        k_group_size: k_group_size for key
-        v_group_size: v_group_size for value
-
-        # quantization config
-        k_quant_per: k_quant_per for key
-        v_quant_per: v_quant_per for value
-        residual_length: residual_length for key and value
-    """
-
     cache_implementation = "kivi"
 
     def __init__(
         self,
-
-        # per layer config
-        k_bits : Optional[List[int]] = [],
-        v_bits : Optional[List[int]] = [],
-        k_group_size: Optional[List[int]] = [],
-        v_group_size: Optional[List[int]] = [],
-
-        # quantization config
-        k_quant_per: Optional[str] = 'channel',
-        v_quant_per: Optional[str] = 'token',
+        nbits: Optional[int] = 4,
+        nbits_key: Optional[int] = 0,
+        nbits_value: Optional[int] = 0,
+        q_group_size: Optional[int] = 128,
         residual_length: Optional[int] = 128,
+        per_layer_quant: Optional[bool] = False,
+        per_layer_config: Optional[Dict[str, Any]] = None,
+        per_layer_config_path: Optional[str] = None,
     ):
-        assert len(k_bits) > 0 and len(v_bits) > 0, "k_bits, v_bits must be provided"
-
-        # per layer config
-        self.k_bits = k_bits
-        self.v_bits = v_bits
-        self.k_group_size = k_group_size
-        self.v_group_size = v_group_size
-
-        # quantization config
-        self.k_quant_per = k_quant_per
-        self.v_quant_per = v_quant_per
+        self.nbits = nbits
+        self.nbits_key = nbits_key if nbits_key else nbits
+        self.nbits_value = nbits_value if nbits_value else nbits
+        self.q_group_size = q_group_size
         self.residual_length = residual_length
+
+        self.per_layer_quant = per_layer_quant
+        if per_layer_quant:
+            if per_layer_config is not None:
+                self.per_layer_config = per_layer_config
+            elif per_layer_config_path is not None:
+                import yaml
+                with open(per_layer_config_path, 'r') as f:
+                    self.per_layer_config = yaml.safe_load(f)
+            else:
+                raise ValueError("per_layer_quant is set to True but per_layer_config or per_layer_config_path is not provided.")
 
 
 class KIVIDynamicCache(DynamicCache):
@@ -96,13 +80,14 @@ class KIVIDynamicCache(DynamicCache):
         self.value_scale_cache: List[torch.Tensor] = []
         self.value_mn_cache: List[torch.Tensor] = []
 
-        self.k_bits = cache_config.k_bits
-        self.v_bits = cache_config.v_bits
-        self.k_group_size = cache_config.k_group_size
-        self.v_group_size = cache_config.v_group_size
-        self.k_quant_per = cache_config.k_quant_per
-        self.v_quant_per = cache_config.v_quant_per
+        self.nbits = cache_config.nbits
+        self.nbits_key = cache_config.nbits_key
+        self.nbits_value = cache_config.nbits_value
+        self.q_group_size = cache_config.q_group_size
         self.residual_length = cache_config.residual_length
+        self.per_layer_quant = cache_config.per_layer_quant
+        if self.per_layer_quant:
+            self.per_layer_config = cache_config.per_layer_config
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -291,6 +276,8 @@ class KIVIDynamicCache(DynamicCache):
             self.key_cache[layer_idx] = self.key_cache[layer_idx][indices, ...]
             self.value_cache[layer_idx] = self.value_cache[layer_idx][indices, ...]
 
+    # TODO: full_cache랑 full이랑 지금 좀 어긋남. 수정이 필요함.
+    # TODO: if 안에 안 들어갔을 때 처리해야 함.
     def _update_prefill(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int):
         if key_states.shape[-2] % self.residual_length != 0:
             if key_states.shape[-2] < self.residual_length:
@@ -306,7 +293,7 @@ class KIVIDynamicCache(DynamicCache):
         # quantize key states
         if key_states_quant is not None:
             key_states_quant_trans, key_scale_trans, key_mn_trans = triton_quantize_and_pack_along_last_dim(
-                key_states_quant.transpose(2, 3).contiguous(), self.k_group_size[layer_idx], self.k_bits[layer_idx]
+                key_states_quant.transpose(2, 3).contiguous(), self.q_group_size, self.nbits_key if not self.per_layer_quant else self.per_layer_config[layer_idx]["nbits_key"]
                 )
         else:
             key_states_quant_trans = None
@@ -323,8 +310,8 @@ class KIVIDynamicCache(DynamicCache):
             value_states_quant = value_states[:, :, :-self.residual_length, :].contiguous()
             value_states_full = value_states[:, :, -self.residual_length:, :].contiguous()
             value_states_quant, value_scale, value_mn = triton_quantize_and_pack_along_last_dim(value_states_quant, 
-                                                                                            self.v_group_size[layer_idx], 
-                                                                                            self.v_bits[layer_idx])
+                                                                                            self.q_group_size, 
+                                                                                            self.nbits_value if not self.per_layer_quant else self.per_layer_config[layer_idx]["nbits_value"])
 
         self.key_states_quant_trans_cache.append(key_states_quant_trans)
         self.key_states_full_cache.append(key_states_full)
@@ -340,10 +327,10 @@ class KIVIDynamicCache(DynamicCache):
         # expected shape: (B, nh, M, K)
 
         if key_states_full.shape[-2] == self.residual_length:
-            assert self.residual_length % self.k_group_size[layer_idx] == 0
+            assert self.residual_length % self.q_group_size == 0
             key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(key_states_full.transpose(2, 3).contiguous(), 
-                                                                                                                        self.k_group_size[layer_idx], 
-                                                                                                                        self.k_bits[layer_idx])
+                                                                                                                        self.q_group_size, 
+                                                                                                                        self.nbits_key if not self.per_layer_quant else self.per_layer_config[layer_idx]["nbits_key"])
             key_states_full = None
             if self.key_states_quant_trans_cache[layer_idx] is not None:
                 self.key_states_quant_trans_cache[layer_idx] = torch.cat([self.key_states_quant_trans_cache[layer_idx], key_states_quant_trans_new], dim=3)
@@ -358,8 +345,8 @@ class KIVIDynamicCache(DynamicCache):
         if value_full_length > self.residual_length:
             assert value_full_length == self.residual_length + 1
             value_states_quant_new, scale, mn = triton_quantize_and_pack_along_last_dim(value_states_full[:, :, :1, :].contiguous(), 
-                                                                                            self.v_group_size[layer_idx], 
-                                                                                            self.v_bits[layer_idx])
+                                                                                            self.q_group_size, 
+                                                                                            self.nbits_value if not self.per_layer_quant else self.per_layer_config[layer_idx]["nbits_value"])
             value_states_full = value_states_full[:, :, 1:, :].contiguous()
             if self.value_states_quant_cache[layer_idx] is not None:
                 self.value_states_quant_cache[layer_idx] = torch.cat([self.value_states_quant_cache[layer_idx], value_states_quant_new], dim=2)

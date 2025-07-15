@@ -137,6 +137,7 @@ class MistralKIVIAttention(nn.Module):
 
             value_states_full = torch.cat([value_states_full, value_states], dim=2)
             value_full_length = value_states_full.shape[-2]
+            import pdb; pdb.set_trace()
             if value_states_quant is None:
                 attn_output = torch.matmul(attn_weights, value_states_full)
             else:

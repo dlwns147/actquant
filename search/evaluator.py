@@ -20,6 +20,7 @@ class LlamaEvaluator:
                 #  quant_model_bits=[],
                  outlier=None,
                  datasets=['wikitext2'],
+                 data_batch_size=1,
                  seed=0,
                  seqlen=2048,
                  n_sample=128,
@@ -38,7 +39,7 @@ class LlamaEvaluator:
                  use_flash=False,
                  limit=20,
                  num_fewshot=None,
-                 batch_size=1,
+                 lm_eval_batch_size=1,
                  task_manager=None,
                  task_dict=None,
                  verbosity='FATAL',
@@ -52,8 +53,8 @@ class LlamaEvaluator:
         # self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
 
         # with accelerator.main_process_first():
-        self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, train=True, seed=seed, seqlen=seqlen)) for dataset in datasets}
-        self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, train=False, seqlen=seqlen)) for dataset in datasets}
+        self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=True, seed=seed, seqlen=seqlen)) for dataset in datasets}
+        self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, batch_size=data_batch_size, train=False, seqlen=seqlen)) for dataset in datasets}
 
         self.loss_func = loss_func
         self.outlier = dict()
@@ -74,8 +75,8 @@ class LlamaEvaluator:
             del model
             clean_up()
 
-        # if loss_func != 'jsd':
-        #     self.dense_logits = {dataset: None for dataset in self.train_loaders.keys()}
+        if loss_func != 'jsd':
+            self.dense_logits = {dataset: None for dataset in self.train_loaders.keys()}
 
         self.quant_models = list()
         if 'hqq' in method:
@@ -160,7 +161,7 @@ class LlamaEvaluator:
 
         self.limit = limit
         self.num_fewshot = num_fewshot
-        self.batch_size = batch_size
+        self.lm_eval_batch_size = lm_eval_batch_size
         self.task_manager = task_manager
         self.task_dict = task_dict
         self.verbosity = verbosity
@@ -230,14 +231,15 @@ class LlamaEvaluator:
         metric_list = dict()
         for dataset, loader in loaders.items():
             result = eval_metric(model=self.sample(arch) if model is None else model, 
-                                accelerator=accelerator, metric=metric, 
+                                accelerator=accelerator,
+                                metric=metric, 
                                 loader=loader, 
                                 seqlen=self.seqlen, 
                                 loss_func=loss_func, 
-                                dense_logits_list=self.dense_logits[dataset] if self.loss_func == 'jsd' else None, 
+                                dense_logits_list=self.dense_logits[dataset] if self.loss_func=='jsd' else None, 
                                 num_fewshot=self.num_fewshot, 
                                 limit=self.limit,
-                                batch_size=self.batch_size,
+                                batch_size=self.lm_eval_batch_size,
                                 verbosity=self.verbosity,
                                 task_manager=self.task_manager,
                                 task_dict=self.task_dict)

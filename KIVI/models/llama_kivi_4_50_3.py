@@ -72,6 +72,8 @@ def forward_for_kivi_gemv(
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
+    assert past_key_value is not None, "past_key_value is None"
+
     # [bsz, nh, t, hd]
     key_states_quant_trans = past_key_value.key_states_quant_trans_cache[module.layer_idx]
     key_states_full = past_key_value.key_states_full_cache[module.layer_idx]
@@ -116,11 +118,14 @@ def forward_for_kivi_gemv(
     # upcast attention to fp32
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
 
+
     value_states_full = torch.cat([value_states_full, value_states], dim=2)
     value_full_length = value_states_full.shape[-2]
     if value_states_quant is None:
         # This seems to be a bug in original code. It should be repeat_kv as well.
-        attn_output = torch.matmul(attn_weights, value_states_full)
+        # if module.layer_idx == 0:
+            # import code; code.interact('forward_for_kivi_gemv line 126', local=dict(globals(), **locals()))
+        attn_output = torch.matmul(attn_weights, repeat_kv(value_states_full, module.num_key_value_groups))
     else:
         attn_output = cuda_bmm_fA_qB_outer(module.q_group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant, 
                                         value_scale, value_mn, module.nbits_value)
@@ -161,6 +166,8 @@ def replace_attention_forward(self):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
+            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        elif past_key_value is None:
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
         else:
             attention_interface = forward_for_kivi_gemv

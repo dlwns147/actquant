@@ -57,7 +57,8 @@ class Search:
         model_id=f'{model_path}/{model_name}'
         self.metric = kwargs.pop('metric', 'loss')
         self.limit = kwargs.pop('limit', 20)
-        self.batch_size = kwargs.pop('batch_size', 1)
+        self.lm_eval_batch_size = kwargs.pop('lm_eval_batch_size', 1)
+        self.num_fewshot = kwargs.pop('num_fewshot', None)
         outlier_path = kwargs.pop('outlier_path' , '')
         base_outlier_bits = sorted(kwargs.pop('base_outlier_bits', []))
         n_outlier = kwargs.pop('n_outlier' , 0)
@@ -142,6 +143,7 @@ class Search:
             seqlen=kwargs.pop('seqlen', 2048),
             n_sample=kwargs.pop('n_sample', 128),
             datasets=[self.dataset],
+            data_batch_size=kwargs.pop('data_batch_size', 1),
             loss_func=self.loss_func,
             device_map=device_map,
             bits=bits,
@@ -152,9 +154,11 @@ class Search:
             k_quant_per=kwargs.pop('k_quant_per', 'channel'),
             v_quant_per=kwargs.pop('v_quant_per', 'token'),
             limit=self.limit,
-            batch_size=self.batch_size,
+            lm_eval_batch_size=self.lm_eval_batch_size,
+            num_fewshot=self.num_fewshot,
             task_manager=self.task_manager,
-            task_dict=self.task_dict
+            task_dict=self.task_dict,
+            verbosity=self.verbosity
         )
         self.search_space = LlamaGroupSizeSearchSpace(
             bits=self.bits,
@@ -332,6 +336,7 @@ class Search:
 
     def _evaluate(self, archs, accelerator):
         metric_list, complexity_list = [], [] # {obj: [] for obj in self.comp_obj}
+        import pdb; pdb.set_trace()
         for arch in tqdm(archs, desc='Eval Arch'):
             metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func)
             metric_list.append(min(self.max_value, np.nan_to_num(list(metric.values())[0], nan=self.max_value)))
@@ -627,10 +632,14 @@ if __name__ == '__main__':
                         help='sequential length of the calibaration (train) set')
     parser.add_argument('--metric', type=str, default='ppl',
                         help='which metric predictor model to fit (ppl/loss/gsm8k)')
+    parser.add_argument('--data_batch_size', type=int, default=1,
+                        help='sequential length of the calibaration (train) set')
     parser.add_argument('--limit', type=int, default=None,
                         help='')
-    parser.add_argument('--batch_size', type=int, default=None,
+    parser.add_argument('--lm_eval_batch_size', type=int, default=None,
                         help='batch size for measuring lm_eval tasks.')
+    parser.add_argument('--num_fewshot', type=int, default=None,
+                        help='# fewshot sample for measuring lm_eval tasks.')
     parser.add_argument('--verbosity', type=str, default='INFO',
                         help='verbosity for measuring lm_eval tasks.')
     

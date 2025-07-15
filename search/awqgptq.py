@@ -171,7 +171,7 @@ def main(args):
         model.config.residual_length = args.residual_length
         model.config.quant_kv_output = False
         
-        results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks, batch_size=args.zeroshot_batch_size)
+        results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks, batch_size=args.zeroshot_batch_size, num_fewshot=args.num_fewshot)
         
         task = list(results.keys())     
         total_result = []
@@ -342,6 +342,8 @@ if __name__ == '__main__':
     parser.add_argument('--zeroshot_csv_file', type=str, default=None,
                         help='')
     parser.add_argument('--zeroshot_batch_size', type=int, default=64,
+                        help='')
+    parser.add_argument('--num_fewshot', type=int, default=None,
                         help='')
     
     parser.add_argument('--long_bench', action='store_true', help='')
