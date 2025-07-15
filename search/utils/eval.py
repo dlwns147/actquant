@@ -42,12 +42,12 @@ def eval_ppl(model, accelerator, loader, seqlen=2048):
     # print(f"n_sample {n_sample}")
     
     # Loop through each batch
-    for inputs in tqdm(loader, desc='Eval PPL'):
-    # for inputs, attention_mask, labels in tqdm(loader, desc='Eval PPL'):
+    # for inputs in tqdm(loader, desc='Eval PPL'):
+    for inputs, attention_mask, labels in tqdm(loader, desc='Eval PPL'):
 
         # Forward pass through the model
-        outputs = model(inputs)
-        # outputs = model(inputs, attention_mask=attention_mask)
+        # outputs = model(inputs)
+        outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
 
         # Shift logits and labels for next token prediction
@@ -112,11 +112,11 @@ def eval_ppl(model, accelerator, loader, seqlen=2048):
 def get_logits(model, loader):    
     # List to store negative log likelihoods
     logits = []
-    for inputs in loader:
-    # for inputs, attention_mask, labels in loader:
+    # for inputs in loader:
+    for inputs, attention_mask, labels in loader:
 
-        outputs = model(inputs)
-        # outputs = model(inputs, attention_mask=attention_mask)
+        # outputs = model(inputs)
+        outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
         logits.append(lm_logits)
 
@@ -137,11 +137,11 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     losses = []
     
     # Loop through each batch
-    for i, inputs in enumerate(loader):
-    # for i, (inputs, attention_mask, labels) in enumerate(loader):
+    # for i, inputs in enumerate(loader):
+    for i, (inputs, attention_mask, labels) in enumerate(loader):
 
-        outputs = model(inputs)
-        # outputs = model(inputs, attention_mask=attention_mask)
+        # outputs = model(inputs)
+        outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
 
         # Shift logits and labels for next token prediction

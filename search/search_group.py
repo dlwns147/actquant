@@ -336,7 +336,6 @@ class Search:
 
     def _evaluate(self, archs, accelerator):
         metric_list, complexity_list = [], [] # {obj: [] for obj in self.comp_obj}
-        import pdb; pdb.set_trace()
         for arch in tqdm(archs, desc='Eval Arch'):
             metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func)
             metric_list.append(min(self.max_value, np.nan_to_num(list(metric.values())[0], nan=self.max_value)))

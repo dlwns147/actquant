@@ -28,52 +28,52 @@ def get_wikitext2(tokenizer, seqlen=2048, batch_size=1, cache_dir=None):
     # traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train', cache_dir=cache_dir)
     testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test', cache_dir=cache_dir)
 
-    # trainenc = tokenizer(" ".join(traindata['text']), return_tensors='pt')
-    testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt').input_ids
-    n_sample = testenc.numel() // seqlen
-    testenc = testenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    return DataLoader(testenc, batch_size=batch_size, drop_last=False)
+    # # trainenc = tokenizer(" ".join(traindata['text']), return_tensors='pt')
+    # testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt').input_ids
+    # n_sample = testenc.numel() // seqlen
+    # testenc = testenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # return DataLoader(testenc, batch_size=batch_size, drop_last=False)
 
-    # tokenized = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
-    # input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
-    # n_sample = input_ids.numel() // seqlen
-    # input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    # attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    # return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=False)
+    tokenized = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
+    input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
+    n_sample = input_ids.numel() // seqlen
+    input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=False)
 
 def get_c4(tokenizer, seqlen=2048, batch_size=1, cache_dir=None):
    
     valdata = load_dataset('allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation', cache_dir=cache_dir)
 
-    valenc = tokenizer(' '.join(valdata[:1100]['text']), return_tensors='pt')
-    valenc = valenc.input_ids[:, :(256 * seqlen)]
-    n_sample = valenc.numel() // seqlen
-    valenc = valenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    return DataLoader(valenc, batch_size=batch_size, drop_last=False)
+    # valenc = tokenizer(' '.join(valdata[:1100]['text']), return_tensors='pt')
+    # valenc = valenc.input_ids[:, :(256 * seqlen)]
+    # n_sample = valenc.numel() // seqlen
+    # valenc = valenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # return DataLoader(valenc, batch_size=batch_size, drop_last=False)
 
-    # tokenized = tokenizer(' '.join(valdata[:1100]['text']), return_tensors='pt')
-    # input_ids, attention_mask = tokenized['input_ids'][:, :(256 * seqlen)], tokenized['attention_mask'][:, :(256 * seqlen)]
-    # n_sample = input_ids.numel() // seqlen
-    # input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    # attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    # return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=False)
+    tokenized = tokenizer(' '.join(valdata[:1100]['text']), return_tensors='pt')
+    input_ids, attention_mask = tokenized['input_ids'][:, :(256 * seqlen)], tokenized['attention_mask'][:, :(256 * seqlen)]
+    n_sample = input_ids.numel() // seqlen
+    input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=False)
 
 def get_wikitext2_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
     
     traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train', cache_dir=cache_dir)
     traindata = traindata.shuffle(seed=seed)
     
-    trainenc = tokenizer("\n\n".join(traindata[:n_sample]['text']), return_tensors='pt').input_ids
-    n_sample = trainenc.numel() // seqlen
-    trainenc = trainenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    return DataLoader(trainenc, batch_size=batch_size)
+    # trainenc = tokenizer("\n\n".join(traindata[:n_sample]['text']), return_tensors='pt').input_ids
+    # n_sample = trainenc.numel() // seqlen
+    # trainenc = trainenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    # return DataLoader(trainenc, batch_size=batch_size)
 
-    # tokenized = tokenizer("\n\n".join(traindata[:n_sample]['text']), return_tensors='pt')
-    # input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
-    # n_sample = input_ids.numel() // seqlen
-    # input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    # attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    # return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size)
+    tokenized = tokenizer("\n\n".join(traindata[:n_sample]['text']), return_tensors='pt')
+    input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
+    n_sample = input_ids.numel() // seqlen
+    input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size)
 
 
 def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
@@ -82,17 +82,17 @@ def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_
     )
     traindata = traindata.shuffle(seed=seed)
     
-    trainenc = tokenizer(' '.join(traindata[:n_sample]['text']), return_tensors='pt').input_ids
-    n_sample = trainenc.numel() // seqlen
-    trainenc = trainenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)    
-    return DataLoader(trainenc, batch_size=batch_size, drop_last=True)
+    # trainenc = tokenizer(' '.join(traindata[:n_sample]['text']), return_tensors='pt').input_ids
+    # n_sample = trainenc.numel() // seqlen
+    # trainenc = trainenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)    
+    # return DataLoader(trainenc, batch_size=batch_size, drop_last=True)
 
-    # tokenized = tokenizer(' '.join(traindata[:n_sample]['text']), return_tensors='pt')
-    # input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
-    # n_sample = input_ids.numel() // seqlen
-    # input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    # attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
-    # return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=True)
+    tokenized = tokenizer(' '.join(traindata[:n_sample]['text']), return_tensors='pt')
+    input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
+    n_sample = input_ids.numel() // seqlen
+    input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
+    return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=True)
     
 
 

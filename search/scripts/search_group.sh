@@ -218,6 +218,7 @@ ARGS="--gpu_id ${DEVICES} \
 --residual_length ${RESIDUAL_LENGTH} \
 --k_quant_per ${K_QUANT_PER} \
 --v_quant_per ${V_QUANT_PER} \
+--quant_kv_output \
 --use_flash \
 --predictor ${PREDICTOR} \
 --save ${SAVE} \
@@ -253,7 +254,8 @@ done
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} search_group.py \
 ${ARGS}
 
-# --quant_kv_output \
+
+
 # --gpu_id ${DEVICES} \
 # --model_path ${MODEL_PATH} \
 # --model_name ${MODEL_NAME} \
