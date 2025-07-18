@@ -68,7 +68,7 @@ def compute_bits(arch, config, group_size, target='w'):
             return np.mean(arch[target]).item() + (32 / group_size[target][0][0])
         elif len(group_size[target]) > 1:
             bits_list, group_size_list = [x[0] for x in arch[target]], [x[1] for x in arch[target]]
-            return np.mean(bits_list).item() + 32 / np.mean(group_size_list).item()
+            return np.mean(bits_list).item() + np.mean(32 / np.array(group_size_list)).item()
         else:
             raise NotImplementedError
 

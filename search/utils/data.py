@@ -98,8 +98,7 @@ def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_
 
 def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
     traindata = load_dataset('gsm8k', 'main', split='train', cache_dir=cache_dir)
-    traindata = traindata.shuffle(seed=seed)
-    # trainenc = tokenizer("\n\n".join(traindata[:n_sample]['text']), return_tensors='pt').input_ids
+    traindata = traindata.shuffle(seed=seed)    
     count = 0
     data_list = []
     for data in traindata:
@@ -110,12 +109,12 @@ def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cac
         input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
         len_prompt_target = input_ids.shape[-1]
         len_prompt = len(tokenizer(prompt)["input_ids"])
-        print(f'len_prompt_target: {len_prompt_target}, len_prompt: {len_prompt}')
+        print(f'len_prompt_target: {len_prompt_target}, len_prompt: {len_prompt}, len_target: {len_prompt_target - len_prompt}')
+        if len_prompt_target > seqlen:
+            continue
         input_ids = torch.column_stack([input_ids, torch.zeros((1, seqlen - len_prompt_target), dtype=int)])
         attention_mask = torch.column_stack([attention_mask, torch.zeros((1, seqlen - len_prompt_target), dtype=int)])
-        if len(input_ids) > seqlen:
-            continue
-        labels = input_ids.clone()        
+        labels = input_ids.detach().clone()
         labels[0, :len_prompt] = -100
         labels[0, len_prompt_target:] = -100
         data_list.append([input_ids, attention_mask, labels])
@@ -123,7 +122,7 @@ def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cac
         if count == n_sample:
             break
     if count < n_sample:
-        raise NotImplementedError(f"'seqlen' is too small to generate a calibration dataset, dataset size: {count}, n_sample: {n_sample}")
+        raise NotImplementedError(f"'seqlen' is too small to generate a calibration dataset, calibration dataset size: {count}, target n_sample: {n_sample}")
     input_ids_dataset = torch.concat([x[0] for x in data_list], dim=0)
     attention_mask_dataset = torch.concat([x[1] for x in data_list], dim=0)
     labels_dataset = torch.concat([x[2] for x in data_list], dim=0)

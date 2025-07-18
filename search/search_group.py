@@ -409,11 +409,13 @@ class Search:
             [x in [x[0] for x in archive] for x in [self.search_space.decode(x) for x in res.pop.get("X")]])
         print(f'not_duplicate : {sum(not_duplicate)}')
 
+        pop = res.pop[not_duplicate]
         # the following lines corresponding to Algo 1 line 11 / Fig. 3(c)-(d) in the paper
         # form a subset selection problem to short list K from pop_size
         # indices = self._subset_selection(res.pop[not_duplicate], F[front, 1], K, self.subset_pop_size)
-        indices = self._subset_selection(res.pop[not_duplicate], F[front, 1:], K, self.subset_pop_size)
-        pop = res.pop[not_duplicate][indices]
+        if sum(not_duplicate) >= K:
+            indices = self._subset_selection(pop, F[front, 1:], K, self.subset_pop_size)
+            pop = pop[indices]
         # pop = res.pop[not_duplicate]
 
         candidates = []

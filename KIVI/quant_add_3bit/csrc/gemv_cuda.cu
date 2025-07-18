@@ -38,6 +38,14 @@ __device__ __forceinline__ float warp_reduce_sum(float sum) {
   return sum;
 }
 
+__device__ __forceinline__ double warp_reduce_sum_double(double sum) {
+  #pragma unroll
+  for(int i = 4; i >= 0; i--){
+    sum += __shfl_down_sync(0xffffffff, sum, 1<<i);
+  }
+  return sum;
+}
+
 __device__ __forceinline__ int make_divisible(int c, int divisor){
   return (c + divisor - 1) / divisor;
 }
@@ -282,7 +290,7 @@ __global__ void bgemv4_kernel_outer_dim(
     const int num = 0xFF >> (8-bit);
     const int ICR = IC;
     // 1float4 == 8 half number
-    float psum[pack_factor]{};
+    double psum[pack_factor]{};
     for (int k=0; k < (IC + TILE_DIM - 1) / TILE_DIM; k++){
       uint32_t qw[4]{};
       half cscale[4]{};
@@ -326,10 +334,10 @@ __global__ void bgemv4_kernel_outer_dim(
           int oc_idx = oc_start_idx + ic_1;
           if (oc_idx < OC){
             float cur_single_weight_fp = (float)(cur_packed_weight & num);
-            float dequantized_weight = cur_scale * cur_single_weight_fp + cur_zero;
+            double dequantized_weight = (double)cur_scale * (double)cur_single_weight_fp + (double)cur_zero;
             // if(blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0 && k == 1) printf("%d %d %d %f %f %f %f %f\n", k, ic_0, ic_1, dequantized_weight, cur_single_weight_fp, cur_scale, cur_zero, cur_inp);
             cur_packed_weight = cur_packed_weight >> bit;
-            psum[ic_1] += dequantized_weight * cur_inp;
+            psum[ic_1] += dequantized_weight * (double)cur_inp;
           }
         }
       }
@@ -337,9 +345,9 @@ __global__ void bgemv4_kernel_outer_dim(
     for (int i=0; i < pack_factor; i++){
       int oc_idx = oc_start_idx + i;
       if (oc_idx < OC){
-        psum[i] = warp_reduce_sum(psum[i]);
+        psum[i] = warp_reduce_sum_double(psum[i]);
         if (threadIdx.x == 0) 
-          outputs[oc_idx] = __float2half(psum[i]); 
+          outputs[oc_idx] = __double2half(psum[i]); 
       }
     }
 }
@@ -366,7 +374,7 @@ __global__ void bgemv2_kernel_outer_dim(
     const int TILE_DIM = 128;
     const int num = 0xFF >> (8-bit);
     // 1float4 == 8 half number
-    float psum[pack_factor]{};
+    double psum[pack_factor]{};
     for (int k=0; k < (ICR + TILE_DIM - 1) / TILE_DIM; k++){
       uint32_t qw[4]{};
       half cscale[4]{};
@@ -408,10 +416,10 @@ __global__ void bgemv2_kernel_outer_dim(
           int oc_idx = oc_start_idx + ic_1;
           if (oc_idx < OC){
             float cur_single_weight_fp = (float)(cur_packed_weight & num);
-            float dequantized_weight = cur_scale * cur_single_weight_fp + cur_zero;
+            double dequantized_weight = (double)cur_scale * (double)cur_single_weight_fp + (double)cur_zero;
             // if(blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0 && k == 1) printf("%d %d %d %f %f %f %f %f\n", k, ic_0, ic_1, dequantized_weight, cur_single_weight_fp, cur_scale, cur_zero, cur_inp);
             cur_packed_weight = cur_packed_weight >> bit;
-            psum[ic_1] += dequantized_weight * cur_inp;
+            psum[ic_1] += dequantized_weight * (double)cur_inp;
           }
         }
       }
@@ -419,9 +427,9 @@ __global__ void bgemv2_kernel_outer_dim(
     for (int i=0; i < pack_factor; i++){
       int oc_idx = oc_start_idx + i;
       if (oc_idx < OC){
-        psum[i] = warp_reduce_sum(psum[i]);
+        psum[i] = warp_reduce_sum_double(psum[i]);
         if (threadIdx.x == 0) 
-          outputs[oc_idx] = __float2half(psum[i]); 
+          outputs[oc_idx] = __double2half(psum[i]); 
       }
     }
 }
@@ -445,7 +453,7 @@ __global__ void bgemv2_kernel_outer_dim(
 //     const int TILE_DIM = 128;
 //     const int num = 0xFF >> (8-bit);
 //     // 1float4 == 8 half number
-//     float psum[pack_factor]{};
+//     double psum[pack_factor]{};
 //     for (int k=0; k < (ICR + TILE_DIM - 1) / TILE_DIM; k++){
 //       uint32_t qw[4]{};
 //       half cscale[4]{};
@@ -476,7 +484,7 @@ __global__ void bgemv2_kernel_outer_dim(
 //           int oc_idx = oc_start_idx + ic_1;
 //           if (oc_idx < OC){
 //             float cur_single_weight_fp = (float)(cur_packed_weight & num);
-//             float dequantized_weight = cur_scale * cur_single_weight_fp + cur_zero;
+//             double dequantized_weight = (double)cur_scale * (double)cur_single_weight_fp + (double)cur_zero;
 //             // if(blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0 && k == 1) printf("%d %d %d %f %f %f %f %f\n", k, ic_0, ic_1, dequantized_weight, cur_single_weight_fp, cur_scale, cur_zero, cur_inp);
 //             cur_packed_weight = cur_packed_weight >> bit;
 //             psum[ic_1] += dequantized_weight * cur_inp;
@@ -487,9 +495,9 @@ __global__ void bgemv2_kernel_outer_dim(
 //     for (int i=0; i < pack_factor; i++){
 //       int oc_idx = oc_start_idx + i;
 //       if (oc_idx < OC){
-//         psum[i] = warp_reduce_sum(psum[i]);
+//         psum[i] = warp_reduce_sum_double(psum[i]);
 //         if (threadIdx.x == 0) 
-//           outputs[oc_idx] = __float2half(psum[i]); 
+//           outputs[oc_idx] = __double2half(psum[i]); 
 //       }
 //     }
 // }

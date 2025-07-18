@@ -111,22 +111,23 @@ def eval_ppl(model, accelerator, loader, seqlen=2048):
 @torch.no_grad()
 def get_logits(model, loader):    
     # List to store negative log likelihoods
-    logits = []
+    dense_logits_list = []
     # for inputs in loader:
     for inputs, attention_mask, labels in loader:
 
         # outputs = model(inputs)
         outputs = model(inputs, attention_mask=attention_mask)
-        lm_logits = outputs.logits
-        logits.append(lm_logits)
-
-    dense_logits_list = torch.cat(logits, dim=0).detach()
+        # lm_logits = outputs.logits
+        lm_logits = outputs.logits[:, :-1, :].contiguous().detach()
+        dense_logits_list.append(lm_logits)
+        
+    # dense_logits_list = torch.cat(dense_logits_list, dim=0).detach()
 
     return dense_logits_list
 
 
 @torch.no_grad()
-def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None):
+def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, ignore_index=-100):
     # Get input IDs
     # testenc = testenc.input_ids
 
@@ -135,11 +136,11 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
   
     # List to store negative log likelihoods
     losses = []
+    seqlens = []
     
     # Loop through each batch
     # for i, inputs in enumerate(loader):
     for i, (inputs, attention_mask, labels) in enumerate(loader):
-
         # outputs = model(inputs)
         outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
@@ -147,70 +148,36 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
         # Shift logits and labels for next token prediction
         shift_logits = lm_logits[:, :-1, :].contiguous()
         shift_logits = shift_logits.reshape(-1, shift_logits.size(-1))
-        shift_labels = inputs[:, 1:].reshape(-1)
+        shift_labels = labels[:, 1:].reshape(-1)
+        mask = torch.where(shift_labels == ignore_index, False, True)
+        cur_seqlen = mask.sum()
         
         # Compute loss
         if loss_func == 'cross_entropy':
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(shift_logits, shift_labels)
+            loss = loss.float() * seqlen * lm_logits.shape[0]
         elif loss_func == 'jsd':
-            dense_logits = dense_logits_list[i]
-            dense_logits = dense_logits[:-1, :].reshape(-1, shift_logits.size(-1)).contiguous()
+            assert dense_logits_list != None
             loss_fct = JSD()
-            loss = loss_fct(shift_logits, dense_logits)
+            dense_logits = dense_logits_list[i].reshape(-1, shift_logits.size(-1)).contiguous()
+            loss = loss_fct(shift_logits, dense_logits, mask=mask)
+            # loss = loss.float() * seqlen * lm_logits.shape[0]
+            loss = loss.float() * cur_seqlen
+            seqlens.append(cur_seqlen)
+
         else:
             raise NotImplementedError(f'{loss_func} is not implemented')
-
-        # Calculate negative log likelihood
-        loss = loss.float() * seqlen * lm_logits.shape[0]
 
         # Append to list of negative log likelihoods
         losses.append(loss)
 
-    # for i in range(0,n_sample,bs):
-
-    #     # Calculate end index
-    #     j = min(i+bs, n_sample)
-
-    #     # Prepare inputs and move to device
-    #     inputs = testenc[:,(i * seqlen):(j * seqlen)].to(device)
-    #     inputs = inputs.reshape(j-i, seqlen)
-
-    #     # Forward pass through the model
-    #     outputs = model(inputs)
-    #     lm_logits = outputs.logits
-
-    #     # Shift logits and labels for next token prediction
-    #     shift_logits = lm_logits[:, :-1, :]
-    #     shift_logits = shift_logits.reshape(-1, shift_logits.size(-1)).contiguous()
-    #     shift_labels = inputs[:, 1:]
-
-    #     # Compute loss
-    #     if loss_func == 'cross_entropy':
-    #         loss_fct = nn.CrossEntropyLoss()
-    #         loss = loss_fct(shift_logits, shift_labels.reshape(-1))
-    #     elif loss_func == 'jsd':
-    #         dense_logits = dense_logits_list[i: j]
-    #         dense_logits = dense_logits[:, :-1, :].reshape(-1, dense_logits.size(-1)).contiguous()
-    #         loss_fct = JSD()
-    #         loss = loss_fct(shift_logits, dense_logits)
-    #     else:
-    #         raise NotImplementedError(f'{loss_func} is not implemented')
-
-        # # Calculate negative log likelihood
-        # loss = loss.float() * seqlen * (j-i)
-        # loss = accelerator.gather_for_metrics(loss)
-
-        # # Append to list of negative log likelihoods
-        # losses.append(loss)
-    
     # Compute sum of negative log_likelihood
-    # losses = accelerator.gather_for_metrics(losses)
-    # print(f'losses: {losses}, {len(losses)}')
-    # losses = torch.cat(losses)
     losses = torch.stack(accelerator.gather_for_metrics(losses)).flatten()
-    loss_sum = losses.sum() / (len(losses) * seqlen)
-    # loss_sum = torch.stack(losses).sum() / seqlen
+    total_seqlen = sum(accelerator.gather_for_metrics(seqlens))
+    # loss_sum = losses.sum() / (len(losses) * seqlen)
+    loss_sum = losses.sum() / total_seqlen
+    print(f'loss_sum: {loss_sum.item()}')
 
     return loss_sum.item()
 
@@ -343,3 +310,94 @@ def eval_zeroshot(model, tokenizer, task_list=['coqa', 'gsm8k', 'truthfulqa'], b
     )
     
     return results['results']
+
+
+# @torch.no_grad()
+# def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None):
+#     # Get input IDs
+#     # testenc = testenc.input_ids
+
+#     # Calculate number of samples
+#     # n_sample = testenc.numel() // seqlen
+  
+#     # List to store negative log likelihoods
+#     losses = []
+    
+#     # Loop through each batch
+#     # for i, inputs in enumerate(loader):
+#     for i, (inputs, attention_mask, labels) in enumerate(loader):
+#         # outputs = model(inputs)
+#         outputs = model(inputs, attention_mask=attention_mask)
+#         lm_logits = outputs.logits
+
+#         # Shift logits and labels for next token prediction
+#         shift_logits = lm_logits[:, :-1, :].contiguous()
+#         shift_logits = shift_logits.reshape(-1, shift_logits.size(-1))
+        
+#         # Compute loss
+#         if loss_func == 'cross_entropy':
+#             loss_fct = nn.CrossEntropyLoss()
+#             shift_labels = inputs[:, 1:].reshape(-1)
+#             loss = loss_fct(shift_logits, shift_labels)
+#         elif loss_func == 'jsd':
+#             assert dense_logits_list != None
+#             dense_logits = dense_logits_list[i]
+#             shift_dense_logits = dense_logits[:, :-1, :].reshape(-1, shift_logits.size(-1)).contiguous()
+#             shift_labels = labels[:, 1:].reshape(-1, 1)
+#             loss_fct = JSD()
+#             loss = loss_fct(shift_logits, shift_dense_logits, label=shift_labels)
+#         else:
+#             raise NotImplementedError(f'{loss_func} is not implemented')
+
+#         # Calculate negative log likelihood
+#         loss = loss.float() * seqlen * lm_logits.shape[0]
+
+#         # Append to list of negative log likelihoods
+#         losses.append(loss)
+
+#     # for i in range(0,n_sample,bs):
+
+#     #     # Calculate end index
+#     #     j = min(i+bs, n_sample)
+
+#     #     # Prepare inputs and move to device
+#     #     inputs = testenc[:,(i * seqlen):(j * seqlen)].to(device)
+#     #     inputs = inputs.reshape(j-i, seqlen)
+
+#     #     # Forward pass through the model
+#     #     outputs = model(inputs)
+#     #     lm_logits = outputs.logits
+
+#     #     # Shift logits and labels for next token prediction
+#     #     shift_logits = lm_logits[:, :-1, :]
+#     #     shift_logits = shift_logits.reshape(-1, shift_logits.size(-1)).contiguous()
+#     #     shift_labels = inputs[:, 1:]
+
+#     #     # Compute loss
+#     #     if loss_func == 'cross_entropy':
+#     #         loss_fct = nn.CrossEntropyLoss()
+#     #         loss = loss_fct(shift_logits, shift_labels.reshape(-1))
+#     #     elif loss_func == 'jsd':
+#     #         dense_logits = dense_logits_list[i: j]
+#     #         dense_logits = dense_logits[:, :-1, :].reshape(-1, dense_logits.size(-1)).contiguous()
+#     #         loss_fct = JSD()
+#     #         loss = loss_fct(shift_logits, dense_logits)
+#     #     else:
+#     #         raise NotImplementedError(f'{loss_func} is not implemented')
+
+#         # # Calculate negative log likelihood
+#         # loss = loss.float() * seqlen * (j-i)
+#         # loss = accelerator.gather_for_metrics(loss)
+
+#         # # Append to list of negative log likelihoods
+#         # losses.append(loss)
+    
+#     # Compute sum of negative log_likelihood
+#     # losses = accelerator.gather_for_metrics(losses)
+#     # print(f'losses: {losses}, {len(losses)}')
+#     # losses = torch.cat(losses)
+#     losses = torch.stack(accelerator.gather_for_metrics(losses)).flatten()
+#     loss_sum = losses.sum() / (len(losses) * seqlen)
+#     # loss_sum = torch.stack(losses).sum() / seqlen
+
+#     return loss_sum.item()

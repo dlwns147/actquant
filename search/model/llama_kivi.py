@@ -164,7 +164,7 @@ class LlamaKIVIAttention(nn.Module):
             value_states_full = torch.cat([value_states_full, value_states], dim=2)
             value_full_length = value_states_full.shape[-2]
             if value_states_quant is None:
-                attn_output = torch.matmul(attn_weights, value_states_full)
+                attn_output = torch.matmul(attn_weights, repeat_kv(value_states_full, self.num_key_value_groups))
             else:
                 attn_output = cuda_bmm_fA_qB_outer(self.config.v_group_size[self.layer_idx], attn_weights[:, :, :, :-value_full_length], value_states_quant, value_scale, value_mn, self.config.v_bits[self.layer_idx])
                 attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], repeat_kv(value_states_full, self.num_key_value_groups))
