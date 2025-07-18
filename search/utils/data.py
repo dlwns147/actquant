@@ -96,14 +96,14 @@ def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_
     
 
 
-def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
+def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None, ignore_index=-100):
     traindata = load_dataset('gsm8k', 'main', split='train', cache_dir=cache_dir)
     traindata = traindata.shuffle(seed=seed)    
     count = 0
     data_list = []
     for data in traindata:
-        prompt = f"Question: {data['question']}\nAnswer:"
-        target = f" {data['answer']}"
+        prompt = f"Question: {data['question']}\nAnswer: "
+        target = data['answer']
         
         tokenized = tokenizer(prompt + target, return_tensors='pt')
         input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
@@ -115,8 +115,8 @@ def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cac
         input_ids = torch.column_stack([input_ids, torch.zeros((1, seqlen - len_prompt_target), dtype=int)])
         attention_mask = torch.column_stack([attention_mask, torch.zeros((1, seqlen - len_prompt_target), dtype=int)])
         labels = input_ids.detach().clone()
-        labels[0, :len_prompt] = -100
-        labels[0, len_prompt_target:] = -100
+        labels[0, :len_prompt] = ignore_index
+        labels[0, len_prompt_target:] = ignore_index
         data_list.append([input_ids, attention_mask, labels])
         count += 1
         if count == n_sample:

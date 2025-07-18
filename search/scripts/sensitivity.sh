@@ -1,19 +1,19 @@
 DEVICES=${1}
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-# MODEL_PATH=/SSD/huggingface/meta-llama
-# # MODEL_NAME=Llama-2-7b-hf
+MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=Llama-2-7b-hf
 # MODEL_NAME=Llama-2-13b-hf
-# # MODEL_NAME=Llama-3.1-8B-Instruct
-# CONFIG=config/llama.json
-# DTYPE=float16
-
-MODEL_PATH=/SSD/huggingface/Qwen
-MODEL_NAME=Qwen2.5-7B-Instruct
-# MODEL_NAME=Qwen2.5-14B-Instruct
-# DTYPE=bfloat16
+MODEL_NAME=Llama-3.1-8B-Instruct
+CONFIG=config/llama.json
 DTYPE=float16
-CONFIG=config/qwen2.json
+
+# MODEL_PATH=/SSD/huggingface/Qwen
+# MODEL_NAME=Qwen2.5-7B-Instruct
+# # MODEL_NAME=Qwen2.5-14B-Instruct
+# # DTYPE=bfloat16
+# DTYPE=float16
+# CONFIG=config/qwen2.json
 
 # MODEL_PATH=/SSD/huggingface/mistralai
 # # MODEL_NAME=Mistral-7B-v0.3
@@ -45,20 +45,33 @@ do
 done
 QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 
-DATASET=wikitext2
+# DATASET=wikitext2
 # DATASET=c4
+DATASET=gsm8k
 
 # LOSS_FUNC=cross_entropy
 LOSS_FUNC=jsd
 
-N_SAMPLE=128
+# N_SAMPLE=8
+# N_SAMPLE=16
+N_SAMPLE=32
+# N_SAMPLE=64
+# N_SAMPLE=128
+
+SEQLEN=256
+# SEQLEN=2048
+
+# DATA_BATCH_SIZE=1
+DATA_BATCH_SIZE=8
+# DATA_BATCH_SIZE=16
+# DATA_BATCH_SIZE=32
 
 RESIDUAL_LENGTH=0
 K_QUANT_PER=channel
 # K_QUANT_PER=token
 V_QUANT_PER=token
 
-RESULT_PATH=csv/sensitivity/${MODEL_NAME}_${METHOD}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE}v${V_GROUP_SIZE}group_size_${AXIS}axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_${DATASET}_${N_SAMPLE}sample_${LOSS_FUNC}
+RESULT_PATH=csv/sensitivity/${MODEL_NAME}_${METHOD}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE}v${V_GROUP_SIZE}group_size_${AXIS}axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_${DATASET}_${N_SAMPLE}sample_${SEQLEN}seqlen_${LOSS_FUNC}
 
 TARGET="w k v"
 # TARGET="k v"
@@ -83,6 +96,8 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --k_quant_per ${K_QUANT_PER} \
 --v_quant_per ${V_QUANT_PER} \
 --n_sample ${N_SAMPLE} \
+--data_batch_size ${DATA_BATCH_SIZE} \
+--seqlen ${SEQLEN} \
 --result_path ${RESULT_PATH} \
 --config ${CONFIG} \
 --loss_func ${LOSS_FUNC} \

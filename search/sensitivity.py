@@ -181,6 +181,8 @@ if __name__ == '__main__':
                         help='test batch size for inference')
     parser.add_argument('--n_sample', type=int, default=128,
                         help='test batch size for inference')
+    parser.add_argument('--data_batch_size', type=int, default=1,
+                        help='sequential length of the calibaration (train) set')
     parser.add_argument('--seqlen', type=int, default=2048,
                         help='test batch size for inference')
     parser.add_argument('--config', type=str, default='config/llama.json',

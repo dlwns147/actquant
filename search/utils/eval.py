@@ -156,7 +156,8 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
         if loss_func == 'cross_entropy':
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(shift_logits, shift_labels)
-            loss = loss.float() * seqlen * lm_logits.shape[0]
+            # loss = loss.float() * seqlen * lm_logits.shape[0]
+            loss = loss.float() * cur_seqlen
         elif loss_func == 'jsd':
             assert dense_logits_list != None
             loss_fct = JSD()

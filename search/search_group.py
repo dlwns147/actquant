@@ -95,10 +95,15 @@ class Search:
         
         self.comp_obj = kwargs.pop('comp_obj', ['wbits', 'kvbits'])  # second objective to optimize simultaneously
         self.comp_obj_min = kwargs.pop('comp_obj_min', [min(w_bits), min(k_bits)])
-        self.comp_obj_max = kwargs.pop('comp_obj_max', [max(w_bits), max(k_bits)])
+        self.comp_obj_max = kwargs.pop('comp_obj_max', [max(w_bits), max(k_bits)])        
         # assert len(self.sec_obj_range) == 2, "len(sec_obj_range) should be 2"
         assert len(self.comp_obj) == len(self.comp_obj_min) and len(self.comp_obj_min) == len(self.comp_obj_max)
         # self.layer_prune_range = kwargs.pop('layer_prune_range', [1, 1])
+                
+        self.target_batch_size = kwargs.pop('target_batch_size', 0)
+        self.target_seqlen = kwargs.pop('target_seqlen', 0)
+        if self.comp_obj == 'mem':
+            assert self.target_batch_size > 0 and self.target_seqlen > 0, "target_batch_size and target_seqlen should be bigger than 0."
 
         self.sensitivity_result_path = kwargs.pop('sensitivity_result_path', '')
         total_module = dict()
@@ -608,7 +613,7 @@ if __name__ == '__main__':
     parser.add_argument('--v_quant_per', type=str, choices=['channel', 'token'], 
                         help='')
     
-    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits'], 
+    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'mem'], 
                         help='complexity objectives to optimize simultaneously')
     parser.add_argument('--comp_obj_min', type=float, nargs='+', default=[2, 2], 
                         help='')
@@ -679,7 +684,11 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--save_iter', type=int, default=1, 
                         help='')
-        
+    
+    parser.add_argument('--target_batch_size', type=int, default=0, 
+                        help='')
+    parser.add_argument('--target_seqlen', type=int, default=0, 
+                        help='')
     
     cfgs = parser.parse_args()
     main(cfgs)
