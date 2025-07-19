@@ -151,6 +151,9 @@ EXPR_FILE=2506030600_Llama-3.1-8B-Instruct_kv_loss_hqq_iter_50_n_iter_50_w16k24v
 LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_PER}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_PER}_r${RESIDUAL_LENGTH}
 LONG_BENCH_CONFIG=utils/long_bench_config
 LONG_BENCH_TASK=""
+
+PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
+
 N=1
 
 N_PROC=1
@@ -186,6 +189,8 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --long_bench \
 --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
 --long_bench_config ${LONG_BENCH_CONFIG}
+
+# --pass_key_file ${PASS_KEY_FILE} \
 # --long_bench_e
 
 # --k_group_size ${K_GROUP_SIZE} \

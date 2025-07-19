@@ -79,7 +79,7 @@ def compute_bits(arch, config, group_size, target='w'):
     else:
         raise NotImplementedError
 
-def compute_memory(arch, config, group_size, batch_size=0, n_token=0):
+def compute_memory(arch, config, group_size, n_token=0):
     weight_memory = 0
     for linear, linear_bits in arch['w'].items():
         w_group_size = group_size['w']
@@ -98,14 +98,15 @@ def compute_memory(arch, config, group_size, batch_size=0, n_token=0):
     
     cache_memory = 0
     for target in ['k', 'v']:
-        out_dim, in_dim = map(int, config['linear_shape'][config[f'{target}_linear']])
+        kv_dim = int(config['linear_shape'][config[f'{target}_linear']][0])
         for bits, group_size in arch[target]:
-            cache_memory += out_dim * in_dim * bits // 8
+            cache_memory += kv_dim * bits // 8
             if bits < 16:
-                assert in_dim % group_size == 0
-                cache_memory += (in_dim // group_size) * out_dim * 4 # scale + zero point
-        
-    cache_memory *= batch_size * n_token
+                assert kv_dim % group_size == 0
+                cache_memory += (kv_dim // group_size) * 4 # scale + zero point
+    cache_memory *= n_token
+    # print(f'arch: {arch}')
+    # print(f'weight_memory: {weight_memory}, cache_memory: {cache_memory}')
     
     return weight_memory + cache_memory
 
@@ -123,14 +124,14 @@ def compute_params(arch, config):
             
     return params / total_params
 
-def get_net_info(arch, config, group_size, batch_size=0, n_token=0):
+def get_net_info(arch, config, group_size, n_token=0):
     net_info = {}
     net_info['wbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='w') if 'w' in arch else 0
     # net_info['abits'] = compute_bits(arch, config, 'activation') if 'activation' in arch else 0
     net_info['kbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='k') if 'k' in arch else 0
     net_info['vbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='v') if 'v' in arch else 0
     net_info['kvbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='kv') if 'v' in arch and 'k' in arch else 0
-    net_info['memory'] = compute_memory(arch=arch, config=config, group_size=group_size, batch_size=batch_size, n_token=n_token)
+    net_info['memory'] = compute_memory(arch=arch, config=config, group_size=group_size, n_token=n_token) if 'w' in arch and 'k' in arch and 'v' in arch else 0
     
     return net_info
 

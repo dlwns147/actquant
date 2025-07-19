@@ -37,6 +37,7 @@ def sensitivity(args):
         seqlen=args.seqlen,
         min_seqlen=args.min_seqlen,
         n_sample=args.n_sample,
+        data_batch_size=args.data_batch_size,
         datasets=[args.dataset],
         loss_func=args.loss_func,
         device_map=device_map,

@@ -1,11 +1,10 @@
 DEVICES=${1}
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-MODEL_PATH=/SSD/huggingface/meta-llama
-# MODEL_NAME=Llama-2-7b-hf
-MODEL_NAME=Llama-3.1-8B-Instruct
-CONFIG=config/llama.json
-DTYPE=float16
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=Llama-3.1-8B-Instruct
+# CONFIG=config/llama.json
+# DTYPE=float16
 
 # MODEL_PATH=/SSD/huggingface/Qwen
 # MODEL_NAME=Qwen2.5-7B-Instruct
@@ -14,12 +13,12 @@ DTYPE=float16
 # DTYPE=float16
 # CONFIG=config/qwen2.json
 
-# MODEL_PATH=/SSD/huggingface/mistralai
-# # MODEL_NAME=Mistral-7B-v0.3
-# MODEL_NAME=Mistral-7B-Instruct-v0.3
-# # DTYPE=bfloat16
-# DTYPE=float16
-# CONFIG=config/mistral.json
+MODEL_PATH=/SSD/huggingface/mistralai
+# MODEL_NAME=Mistral-7B-v0.3
+MODEL_NAME=Mistral-7B-Instruct-v0.3
+# DTYPE=bfloat16
+DTYPE=float16
+CONFIG=config/mistral.json
 
 METHOD="hqq"
 
@@ -55,11 +54,13 @@ LOSS_FUNC=jsd
 # N_SAMPLE=128
 # SEQLEN=2048
 # DATA_BATCH_SIZE=1
+# MIN_SEQLEN=0
 
 DATASET=gsm8k
 N_SAMPLE=32
 SEQLEN=256
-DATA_BATCH_SIZE=8
+DATA_BATCH_SIZE=1
+# DATA_BATCH_SIZE=8
 MIN_SEQLEN=0
 # MIN_SEQLEN=192
 
@@ -77,7 +78,6 @@ N_PROC=1
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
---method ${METHOD} \
 --target ${TARGET} \
 --quant_model_paths ${QMODEL_PATHS} \
 --w_bits ${W_BITS} \
@@ -98,6 +98,7 @@ ARGS="--gpu_id ${DEVICES} \
 --dataset ${DATASET} \
 --use_flash"
 
+# --method ${METHOD} \
 # --eval_ppl
 # --outlier_bits ${OUTLIER_BITS} \
 # --outlier_path ${OUTLIER_PATH} \

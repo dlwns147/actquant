@@ -167,6 +167,7 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
             raise NotImplementedError(f'{loss_func} is not implemented')
         # loss = loss.float() * seqlen * lm_logits.shape[0]
         loss = loss.float() * cur_seqlen
+        # print(f'loss: {loss}, cur_seqlen: {cur_seqlen}, labels: {labels.shape}, shift_labels: {shift_labels.shape}, mask: {mask.shape}')
         seqlens.append(cur_seqlen)
 
         # Append to list of negative log likelihoods
@@ -177,7 +178,7 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     total_seqlen = sum(accelerator.gather_for_metrics(seqlens))
     # loss_sum = losses.sum() / (len(losses) * seqlen)
     loss_sum = losses.sum() / total_seqlen
-    print(f'loss_sum: {loss_sum.item()}')
+    # print(f'loss_sum: {loss_sum.item()}')
 
     return loss_sum.item()
 

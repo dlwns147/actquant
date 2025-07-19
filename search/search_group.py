@@ -100,10 +100,9 @@ class Search:
         assert len(self.comp_obj) == len(self.comp_obj_min) and len(self.comp_obj_min) == len(self.comp_obj_max)
         # self.layer_prune_range = kwargs.pop('layer_prune_range', [1, 1])
                 
-        self.target_batch_size = kwargs.pop('target_batch_size', 0)
-        self.target_seqlen = kwargs.pop('target_seqlen', 0)
-        if self.comp_obj == 'mem':
-            assert self.target_batch_size > 0 and self.target_seqlen > 0, "target_batch_size and target_seqlen should be bigger than 0."
+        self.n_token = kwargs.pop('n_token', 0)
+        if 'memory' in self.comp_obj:
+            assert self.n_token > 0, "n_token should be bigger than 0 when using memory objective."
 
         self.sensitivity_result_path = kwargs.pop('sensitivity_result_path', '')
         total_module = dict()
@@ -113,7 +112,7 @@ class Search:
         
         if self.sensitivity_result_path:
             for target in pass_module.keys():
-                if any([target in obj for obj in self.comp_obj]):
+                # if any([target in obj for obj in self.comp_obj]):
                     with open(os.path.join(self.sensitivity_result_path, f'{target}.csv'), 'r') as f:
                         module_list, sensitivity = list(csv.reader(f))
                         sensitivity = list(map(float, sensitivity))
@@ -126,7 +125,7 @@ class Search:
 
             start = 0
             for target in pass_module.keys():
-                if any([target in obj for obj in self.comp_obj]):
+                # if any([target in obj for obj in self.comp_obj]):
                     end = start + len(total_module[target])
                     for idx in pass_idx_list:
                         if start <= idx and idx < end:
@@ -159,6 +158,7 @@ class Search:
             quant_kv_output=kwargs.pop('quant_kv_output', True),
             k_quant_per=kwargs.pop('k_quant_per', 'channel'),
             v_quant_per=kwargs.pop('v_quant_per', 'token'),
+            n_token=self.n_token,
             limit=self.limit,
             lm_eval_batch_size=self.lm_eval_batch_size,
             num_fewshot=self.num_fewshot,
@@ -174,6 +174,7 @@ class Search:
             comp_obj_min=self.comp_obj_min,
             comp_obj_max=self.comp_obj_max,
             config=self.config,
+            n_token=self.n_token,
             outlier_bits=outlier_bits,
             only_outlier_bits=kwargs.pop('only_outlier_bits', False),
         )
@@ -405,7 +406,7 @@ class Search:
             eliminate_duplicates=True)
         
         # initialize the candidate finding optimization problem
-        problem = AuxiliarySingleLevelProblem(self.search_space, predictor, self.config, self.comp_obj, self.comp_obj_max, self.comp_obj_min, self.group_size)
+        problem = AuxiliarySingleLevelProblem(self.search_space, predictor, self.config, self.comp_obj, self.comp_obj_max, self.comp_obj_min, self.group_size, self.n_token)
         
         # kick-off the search
         res = minimize(problem, method, termination=('n_gen', 20), save_history=True, verbose=True)
@@ -462,7 +463,7 @@ class Search:
 class AuxiliarySingleLevelProblem(Problem):
     """ The optimization problem for finding the next N candidate architectures """
 
-    def __init__(self, search_space, predictor, config, comp_obj, comp_obj_max, comp_obj_min, group_size):
+    def __init__(self, search_space, predictor, config, comp_obj, comp_obj_max, comp_obj_min, group_size, n_token):
         n_block, n_linear = search_space.n_block, search_space.n_linear
         n_comp_obj = len(search_space.comp_obj)
         super().__init__(n_var=n_block * (n_linear + 2), n_obj=n_comp_obj + 1, n_constr=2 * n_comp_obj, type_var=int)
@@ -474,6 +475,7 @@ class AuxiliarySingleLevelProblem(Problem):
         self.comp_obj_min = comp_obj_min
         self.config = config
         self.group_size = group_size
+        self.n_token = n_token
         self.xl = np.zeros((n_linear + 2, n_block))
         self.xu = np.ones((n_linear + 2, n_block))
         
@@ -503,7 +505,7 @@ class AuxiliarySingleLevelProblem(Problem):
 
         for i, (_x, metric) in enumerate(zip(x, metrics)):
             arch = self.ss.decode(_x)
-            info = get_net_info(arch, self.config, self.group_size)
+            info = get_net_info(arch, self.config, self.group_size, n_token=self.n_token)
             f[i, 0] = metric
             # f[i, 1] = info[self.ss.sec_obj]
             for j in range(len(self.comp_obj)):
@@ -614,7 +616,7 @@ if __name__ == '__main__':
     parser.add_argument('--v_quant_per', type=str, choices=['channel', 'token'], 
                         help='')
     
-    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'mem'], 
+    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'memory'], 
                         help='complexity objectives to optimize simultaneously')
     parser.add_argument('--comp_obj_min', type=float, nargs='+', default=[2, 2], 
                         help='')
@@ -688,10 +690,8 @@ if __name__ == '__main__':
     parser.add_argument('--save_iter', type=int, default=1, 
                         help='')
     
-    parser.add_argument('--target_batch_size', type=int, default=0, 
-                        help='')
-    parser.add_argument('--target_seqlen', type=int, default=0, 
-                        help='')
+    parser.add_argument('--n_token', type=int, default=0, 
+                        help='target sequence length for memory calculation')
     
     cfgs = parser.parse_args()
     main(cfgs)

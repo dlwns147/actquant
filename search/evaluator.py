@@ -25,10 +25,10 @@ class LlamaEvaluator:
                  seqlen=2048,
                  min_seqlen=0,
                  n_sample=128,
+                 n_token=0,
                  device_map='auto',
                 #  dtype='auto',
                  dtype=torch.float16,
-                 cache_dir=None,
                  loss_func='cross_entropy',
                  inference=False,
                  bits={},
@@ -142,6 +142,7 @@ class LlamaEvaluator:
                 q_model.eval()
                 q_model.config.use_cache = False
 
+        self.n_token = n_token
         self.limit = limit
         self.num_fewshot = num_fewshot
         self.lm_eval_batch_size = lm_eval_batch_size
@@ -230,7 +231,7 @@ class LlamaEvaluator:
                 result = 1 - float(result[metric]['exact_match,strict-match'])
                 # result = 1 - float(result[metric]['exact_match,flexible-extract'])
             metric_list[dataset] = result
-        complexity = get_net_info(arch, self.config, self.group_size)
+        complexity = get_net_info(arch, self.config, self.group_size, n_token=self.n_token)
         return metric_list, complexity
     
     def remove_linears(self, model, config):

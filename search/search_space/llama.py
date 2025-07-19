@@ -136,18 +136,6 @@ class LlamaSearchSpace:
                 w_down_prob = prob[np.array([np.argwhere(_x == np.array(self.down_proj_option))[0, 0] for _x in w_down])]
                 w_down_list = np.random.choice(w_down, size=nb, p=w_down_prob / w_down_prob.sum(), replace=True).tolist()
 
-                # a_qkv_prob = prob[np.array([np.argwhere(_x == np.array(self.qkv_option))[0, 0] for _x in a_qkv])]
-                # a_qkv_list = np.random.choice(a_qkv, size=nb, p=a_qkv_prob / a_qkv_prob.sum(), replace=True).tolist()
-
-                # a_o_prob = prob[np.array([np.argwhere(_x == np.array(self.o_option))[0, 0] for _x in a_o])]
-                # a_o_list = np.random.choice(a_o, size=nb, p=a_o_prob / a_o_prob.sum(), replace=True).tolist()
-                
-                # a_gateup_prob = prob[np.array([np.argwhere(_x == np.array(self.gateup_option))[0, 0] for _x in a_gateup])]
-                # a_gateup_list = np.random.choice(a_gateup, size=nb, p=a_gateup_prob / a_gateup_prob.sum(), replace=True).tolist()
-                
-                # a_down_prob = prob[np.array([np.argwhere(_x == np.array(self.down_option))[0, 0] for _x in a_down])]
-                # a_down_list = np.random.choice(a_down, size=nb, p=a_down_prob / a_down_prob.sum(), replace=True).tolist()
-                
                 kv_k_prob = prob[np.array([np.argwhere(_x == np.array(self.k_option))[0, 0] for _x in kv_k])]
                 kv_k_list = np.random.choice(kv_k, size=nb, p=kv_k_prob / kv_k_prob.sum(), replace=True).tolist()
 
@@ -175,20 +163,6 @@ class LlamaSearchSpace:
                     else:
                         raise NotImplementedError(f"linear : {linear}")
                 
-                # for linear in self.pass_module['activation']:
-                #     blk, linear_name = linear.split('.')[0], linear.split('.')[-1]
-                #     blk = int(blk)
-                #     if linear_name == 'qkv':
-                #         a_qkv_list[blk] = self.max_bits['a']
-                #     elif linear_name == 'o':
-                #         a_o_list[blk] = self.max_bits['a']
-                #     elif linear_name == 'gateup':
-                #         a_gateup_list[blk] = self.max_bits['a']
-                #     elif linear_name == 'down':
-                #         a_down_list[blk] = self.max_bits['a']
-                #     else:
-                        # raise NotImplementedError(f"linear : {linear}")
-
                 for layer in self.pass_module['k']:
                     kv_k_list[layer] = max(self.k_option)
 
@@ -197,8 +171,6 @@ class LlamaSearchSpace:
                     
                 new_arch = {
                     'w': {'self_attn.q_proj': w_q_list, 'self_attn.k_proj': w_k_list, 'self_attn.v_proj': w_v_list, 'self_attn.o_proj': w_o_list, 'mlp.gate_proj': w_gate_list, 'mlp.up_proj': w_up_list, 'mlp.down_proj': w_down_list},
-                    # 'activation' : {'qkv': a_qkv_list, 'o': a_o_list, 'gateup': a_gateup_list, 'down': a_down_list},
-                    # 'kv_cache': {'k': kv_k_list, 'v': kv_v_list}
                     'k': kv_k_list,
                     'v': kv_v_list
                 }
@@ -304,6 +276,7 @@ class LlamaGroupSizeSearchSpace:
                 comp_obj_max=[],
                 outlier_bits=[],
                 only_outlier_bits=False,
+                n_token=0,
                 rand_size=5
                 ):
         
@@ -386,6 +359,7 @@ class LlamaGroupSizeSearchSpace:
         self.pass_idx_list.sort()
         print(f'self.pass_idx_list : {self.pass_idx_list}')
         self.rand_size = rand_size
+        self.n_token = n_token
 
 
     def sample(self, n_samples=1, nb=None, w=None, k=None, v=None, pool=[]):
@@ -471,7 +445,7 @@ class LlamaGroupSizeSearchSpace:
                     'k': kv_k_list,
                     'v': kv_v_list,
                 }
-                complexity = get_net_info(new_arch, self.config, self.group_size)
+                complexity = get_net_info(new_arch, self.config, self.group_size, n_token=self.n_token)
                 # print(f'new_arch : {new_arch}')
                 # print(f'complexity : {complexity}')
                 flag = (new_arch not in data) and (new_arch not in pool)
@@ -522,26 +496,20 @@ class LlamaGroupSizeSearchSpace:
                     # np.argwhere(_x == np.array(self.w_bits))[0, 0] for _x in arch['w'][linear]
                     ]) for linear in self.config['linear']
             ])
-        # a_encode = np.concatenate([np.array([np.argwhere(_x == np.array(self.abits))[0, 0] for _x in arch['activation'][linear_group]]) for linear_group in self.config['linear_group']])
         k_encode = np.array([np.argwhere((_x == np.array(self.k_option)).all(axis=1))[0, 0] for _x in arch['k']])
         v_encode = np.array([np.argwhere((_x == np.array(self.v_option)).all(axis=1))[0, 0] for _x in arch['v']])
         
         return np.concatenate((w_encode, k_encode, v_encode))
-        # return np.concatenate((w_encode, a_encode, k_encode, v_encode))
     
     def encode_predictor(self, arch):
-        # import pdb; pdb.set_trace()
         # encode arch ({'q': [0, 2, 4], 'k: , etc}) to integer bit-string [1, 0, 2, 1, ...]
         w_encode = np.concatenate([
                 np.array([
                     np.argwhere(_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option')))[0, 0] for blk_idx, _x in enumerate(arch['w'][linear]) if f'{blk_idx}.{linear}' not in self.pass_module['w'] 
-                    ]) if 'wbits' in self.comp_obj else [] for linear in self.config['linear']
+                    ]) if 'wbits' in self.comp_obj or 'memory' in self.comp_obj else [] for linear in self.config['linear']
             ])
-        # a_encode = np.concatenate([np.array([np.argwhere(_x == np.array(self.abits))[0, 0] for _x in arch['activation'][linear_group]]) for linear_group in self.config['linear_group']])
-        k_encode = np.array([np.argwhere((_x == np.array(self.k_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['k']) if blk_idx not in self.pass_module['k']]) if 'kvbits' in self.comp_obj or 'kbits' in self.comp_obj else []
-        v_encode = np.array([np.argwhere((_x == np.array(self.v_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['v']) if blk_idx not in self.pass_module['v']]) if 'kvbits' in self.comp_obj or 'vbits' in self.comp_obj else []
-
-        # import pdb; pdb.set_trace()
+        k_encode = np.array([np.argwhere((_x == np.array(self.k_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['k']) if blk_idx not in self.pass_module['k']]) if 'kvbits' in self.comp_obj or 'kbits' in self.comp_obj or 'memory' in self.comp_obj else []
+        v_encode = np.array([np.argwhere((_x == np.array(self.v_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['v']) if blk_idx not in self.pass_module['v']]) if 'kvbits' in self.comp_obj or 'vbits' in self.comp_obj or 'memory' in self.comp_obj else []
 
         return np.concatenate((w_encode, k_encode, v_encode))
         # return np.delete(np.concatenate((w_encode, k_encode, v_encode)), self.pass_idx_list, axis=-1)
@@ -574,7 +542,8 @@ class LlamaGroupSizeQEFTSearchSpace:
                 n_out=[],
                 outlier_bits=[],
                 only_outlier_bits=False,
-                rand_size=15
+                rand_size=15,
+                n_token=0
                 ):
         
         # self.q_proj_option = sorted(([b for b in quant_model_bits if b not in list(map(int, outlier_bits['self_attn.q_proj']))] if only_outlier_bits else quant_model_bits) + outlier_bits['self_attn.q_proj'])
@@ -658,6 +627,7 @@ class LlamaGroupSizeQEFTSearchSpace:
         self.pass_idx_list.sort()
         print(f'self.pass_idx_list : {self.pass_idx_list}')
         self.rand_size = rand_size
+        self.n_token = n_token
 
 
     def sample(self, n_samples=1, nb=None, w=None, k=None, v=None, pool=[]):
@@ -743,7 +713,7 @@ class LlamaGroupSizeQEFTSearchSpace:
                     'k': kv_k_list,
                     'v': kv_v_list,
                 }
-                complexity = get_net_info(new_arch, self.config, self.group_size)
+                complexity = get_net_info(new_arch, self.config, self.group_size, n_token=self.n_token)
                 # print(f'new_arch : {new_arch}')
                 # print(f'complexity : {complexity}')
                 flag = (new_arch not in data) and (new_arch not in pool)
@@ -807,12 +777,11 @@ class LlamaGroupSizeQEFTSearchSpace:
         w_encode = np.concatenate([
                 np.array([
                     np.argwhere(_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option')))[0, 0] for blk_idx, _x in enumerate(arch['w'][linear]) if f'{blk_idx}.{linear}' not in self.pass_module['w'] 
-                    ]) if 'wbits' in self.comp_obj else [] for linear in self.config['linear']
+                    ]) if 'wbits' in self.comp_obj or 'memory' in self.comp_obj  else [] for linear in self.config['linear']
             ])
         # a_encode = np.concatenate([np.array([np.argwhere(_x == np.array(self.abits))[0, 0] for _x in arch['activation'][linear_group]]) for linear_group in self.config['linear_group']])
-        k_encode = np.array([np.argwhere((_x == np.array(self.k_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['k']) if blk_idx not in self.pass_module['k']]) if 'kvbits' in self.comp_obj or 'kbits' in self.comp_obj else []
-        v_encode = np.array([np.argwhere((_x == np.array(self.v_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['v']) if blk_idx not in self.pass_module['v']]) if 'kvbits' in self.comp_obj or 'vbits' in self.comp_obj else []
-
+        k_encode = np.array([np.argwhere((_x == np.array(self.k_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['k']) if blk_idx not in self.pass_module['k']]) if 'kvbits' in self.comp_obj or 'kbits' in self.comp_obj or 'memory' in self.comp_obj else []
+        v_encode = np.array([np.argwhere((_x == np.array(self.v_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['v']) if blk_idx not in self.pass_module['v']]) if 'kvbits' in self.comp_obj or 'vbits' in self.comp_obj or 'memory' in self.comp_obj else []
         # import pdb; pdb.set_trace()
 
         return np.concatenate((w_encode, k_encode, v_encode))

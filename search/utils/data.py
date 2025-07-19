@@ -103,12 +103,16 @@ def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, min
     data_list = []
     for data in traindata:
         prompt = f"Question: {data['question']}\nAnswer: "
-        target = data['answer']
+        # prompt = f"Q: {data['question']}\nA: "
+        # prompt = f"Q: {data['question']}\nA: Let's think step by step. "
+        target = data['answer'].replace('\n', ' ')
         
         tokenized = tokenizer(prompt + target, return_tensors='pt')
         input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
         len_prompt_target = input_ids.shape[-1]
         len_prompt = len(tokenizer(prompt)["input_ids"])
+        # print(f'prompt|{prompt}, target|{target}')
+        print(f'{prompt + target}')
         print(f'count: {count}, len_prompt_target: {len_prompt_target}, len_prompt: {len_prompt}, len_target: {len_prompt_target - len_prompt}')
         if len_prompt_target > seqlen or len_prompt_target < min_seqlen:
             continue
