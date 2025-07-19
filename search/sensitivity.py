@@ -20,9 +20,7 @@ import warnings
 warnings.simplefilter("ignore")
 
 def sensitivity(args):
-
     set_seed(args.seed)
-
     with open(args.config, 'r') as f:
         config = json.load(f)[args.model_name]
     accelerator, device_map = init_accelerator(args.gpu_id, config)
@@ -37,6 +35,7 @@ def sensitivity(args):
         quant_model_paths=args.quant_model_paths,
         outlier=torch.load(args.outlier_path) if args.outlier_path else None,
         seqlen=args.seqlen,
+        min_seqlen=args.min_seqlen,
         n_sample=args.n_sample,
         datasets=[args.dataset],
         loss_func=args.loss_func,
@@ -51,15 +50,14 @@ def sensitivity(args):
     )
     
     n_block = config['n_block']
-
     ppl = 0
     loss_list = dict()
     ppl_list = dict()
     # arch = {'linear': {l: [max(args.quant_model_bits)] * n_block for lg in config['linear'] for l in lg.split(',')}, 'layer': {l: [1]* n_block for l in config['layer']}}
     arch = {
         'w': {l: [max(args.w_bits)] * n_block for lg in config['linear'] for l in lg.split(',')},
-        'k': [max(args.k_bits)] * n_block,
-        'v': [max(args.v_bits)] * n_block,
+        'k': [[max(args.k_bits), min(args.k_group_size[-1])]] * n_block,
+        'v': [[max(args.v_bits), min(args.v_group_size[-1])]] * n_block,
     }
     
     for target in args.target:
@@ -98,7 +96,7 @@ def sensitivity(args):
                     arch[target][linear][block_idx] = max(args.w_bits)
             else:
                 iter_start = time.time()
-                arch[target][block_idx] = min(args.w_bits)
+                arch[target][block_idx] = [min(getattr(args, f'{target}_bits')), max(getattr(args, f'{target}_group_size')[0])]
                 
                 key = str(block_idx)
                 loss, _ = evaluator.eval(accelerator=accelerator, arch=arch, metric='loss', loss_func=args.loss_func)
@@ -109,7 +107,7 @@ def sensitivity(args):
                 iter_time = time.time() - iter_start
                 accelerator.print(f"[{target} {key} replaced] Loss={loss_list[target][key]:.4f}, PPL={ppl_list[target][key]:.2f}, time: {iter_time:.2f}")
                     
-                arch[target][block_idx] = max(args.w_bits)
+                arch[target][block_idx] = [max(getattr(args, f'{target}_bits')), min(getattr(args, f'{target}_group_size')[-1])]
             
         if accelerator.is_main_process:
             if args.result_path:
@@ -185,6 +183,8 @@ if __name__ == '__main__':
                         help='sequential length of the calibaration (train) set')
     parser.add_argument('--seqlen', type=int, default=2048,
                         help='test batch size for inference')
+    parser.add_argument('--min_seqlen', type=int, default=0,
+                        help='minimum sequential length of the calibaration gsm8k set')
     parser.add_argument('--config', type=str, default='config/llama.json',
                         help='')
     parser.add_argument('--result_path', type=str, default='',

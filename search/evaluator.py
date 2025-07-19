@@ -23,6 +23,7 @@ class LlamaEvaluator:
                  data_batch_size=1,
                  seed=0,
                  seqlen=2048,
+                 min_seqlen=0,
                  n_sample=128,
                  device_map='auto',
                 #  dtype='auto',
@@ -53,7 +54,7 @@ class LlamaEvaluator:
         # self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
 
         # with accelerator.main_process_first():
-        self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=True, seed=seed, seqlen=seqlen)) for dataset in datasets}
+        self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=True, seed=seed, seqlen=seqlen, min_seqlen=min_seqlen)) for dataset in datasets}
         self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, batch_size=data_batch_size, train=False, seqlen=seqlen)) for dataset in datasets}
 
         self.loss_func = loss_func
@@ -90,15 +91,6 @@ class LlamaEvaluator:
                     self.model.config.v_bits = [max(bits['v'])] * config['n_block']
                     self.model.config.k_group_size = [max(group_size['k'][-1])] * config['n_block']
                     self.model.config.v_group_size = [max(group_size['v'][-1])] * config['n_block']
-                    # if len(group_size['k']) == 1:
-                    #     self.model.config.k_group_size = [max(group_size['k'][-1])] * config['n_block']
-                    # elif len(group_size['k']) >= 2:
-                    #     self.model.config.k_group_size = [max(group_size['k'][-1])] * config['n_block']
-                        
-                    # if len(group_size['v']) == 1:
-                    #     self.model.config.v_group_size = [max(group_size['v'])] * config['n_block']
-                    # elif len(group_size['v']) >= 2:
-                    #     self.model.config.v_group_size = [max(group_size['v'][-1])] * config['n_block']
                     self.model.config.use_flash = use_flash
 
                     self.model.config.residual_length = residual_length 
@@ -124,15 +116,6 @@ class LlamaEvaluator:
                 
                 self.model.config.k_group_size = [max(group_size['k'][-1])] * config['n_block']
                 self.model.config.v_group_size = [max(group_size['v'][-1])] * config['n_block']
-                # if len(group_size['k']) == 1:
-                #     self.model.config.k_group_size = [max(group_size['k'])] * config['n_block']
-                # elif len(group_size['k']) == 2:
-                #     self.model.config.k_group_size = [max(group_size['k'][-1])] * config['n_block']
-                    
-                # if len(group_size['v']) == 1:
-                #     self.model.config.v_group_size = [max(group_size['v'])] * config['n_block']
-                # elif len(group_size['v']) == 2:
-                #     self.model.config.v_group_size = [max(group_size['v'][-1])] * config['n_block']
                 self.model.config.use_flash = use_flash
 
                 self.model.config.residual_length = residual_length 

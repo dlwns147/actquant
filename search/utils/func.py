@@ -44,19 +44,9 @@ def compute_bits(arch, config, group_size, target='w'):
             for bits in linear_bits:
                 memory_usage += out_dim * in_dim * bits
                 if bits < 16:
-                    memory_usage += (in_dim // c_group_size) * out_dim * 32
+                    memory_usage += (in_dim // c_group_size) * out_dim * 32 # scale + zero point
         return memory_usage / config['model_numel']
     
-    # elif target == 'activation':
-    #     total_in_dim = 0
-    #     for linear_group, linear_group_bits in arch[target].items():
-    #         for linear in linear_group:
-    #             _, in_dim = config['linear_shape'][linear]
-    #             for bits in linear_group_bits:
-    #                 total_in_dim += in_dim
-    #                 memory_usage += int(in_dim) * bits
-    #     return memory_usage / total_in_dim
-            
     elif target == 'k' or target == 'v':
         if len(group_size[target]) == 1:
             # c_group_size = group_size[target]
@@ -89,17 +79,35 @@ def compute_bits(arch, config, group_size, target='w'):
     else:
         raise NotImplementedError
 
-def compute_max_memory(arch, config, batch_size=0, prompt_len=0, gen_len=0):
+def compute_memory(arch, config, group_size, batch_size=0, n_token=0):
     weight_memory = 0
-    # batch_size * prompt_len
-    cache_memory = 0
-    embed_memory = 0
-    head_memory = 0
-
-    attn_memory = 0
-    mlp_memory = 0
+    for linear, linear_bits in arch['w'].items():
+        w_group_size = group_size['w']
+        out_dim, in_dim = map(int, config['linear_shape'][linear])
+        if w_group_size == -1:
+            w_group_size = in_dim
+        assert in_dim % w_group_size == 0
+        for bits in linear_bits:
+            weight_memory += out_dim * in_dim * bits // 8
+            if bits < 16:
+                weight_memory += (in_dim // w_group_size) * out_dim * 4 # scale + zero point
+                
+    weight_memory += int(config['vocab_size']) * int(config['hidden_size']) * 4 # lm_head + embed_token
+    weight_memory += int(config['n_norm']) * int(config['hidden_size']) * 2 # norms
+    weight_memory += int(config['max_position_embeddings']) * int(config['head_dim']) * 2 # positional embedding
     
-    return weight_memory + cache_memory + embed_memory + max([attn_memory, mlp_memory, head_memory])
+    cache_memory = 0
+    for target in ['k', 'v']:
+        out_dim, in_dim = map(int, config['linear_shape'][config[f'{target}_linear']])
+        for bits, group_size in arch[target]:
+            cache_memory += out_dim * in_dim * bits // 8
+            if bits < 16:
+                assert in_dim % group_size == 0
+                cache_memory += (in_dim // group_size) * out_dim * 4 # scale + zero point
+        
+    cache_memory *= batch_size * n_token
+    
+    return weight_memory + cache_memory
 
 
 def compute_sparsity(arch):
@@ -115,14 +123,14 @@ def compute_params(arch, config):
             
     return params / total_params
 
-def get_net_info(arch, config, group_size, batch_size=0, prompt_len=0, gen_len=0):
+def get_net_info(arch, config, group_size, batch_size=0, n_token=0):
     net_info = {}
-    net_info['wbits'] = compute_bits(arch, config, group_size, 'w') if 'w' in arch else 0
+    net_info['wbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='w') if 'w' in arch else 0
     # net_info['abits'] = compute_bits(arch, config, 'activation') if 'activation' in arch else 0
-    net_info['kbits'] = compute_bits(arch, config, group_size, 'k') if 'k' in arch else 0
-    net_info['vbits'] = compute_bits(arch, config, group_size, 'v') if 'v' in arch else 0
-    net_info['kvbits'] = compute_bits(arch, config, group_size, 'kv') if 'v' in arch and 'k' in arch else 0
-    net_info['max_memory'] = compute_max_memory(arch, config, batch_size, prompt_len, gen_len)
+    net_info['kbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='k') if 'k' in arch else 0
+    net_info['vbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='v') if 'v' in arch else 0
+    net_info['kvbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='kv') if 'v' in arch and 'k' in arch else 0
+    net_info['memory'] = compute_memory(arch=arch, config=config, group_size=group_size, batch_size=batch_size, n_token=n_token)
     
     return net_info
 
@@ -195,15 +203,15 @@ def init_accelerator(gpu_id, config):
 
 def load_hqq_model(model_id, device_map, use_cache=False, inference=False):
 
-    # for fast model loading
-    org_kaiming_uniform = torch.nn.init.kaiming_uniform_
-    org_uniform = torch.nn.init.uniform_
-    org_normal = torch.nn.init.normal_
-    def skip(*args, **kwargs):
-        pass
-    torch.nn.init.kaiming_uniform_ = skip
-    torch.nn.init.uniform_ = skip
-    torch.nn.init.normal_ = skip
+    # # for fast model loading
+    # org_kaiming_uniform = torch.nn.init.kaiming_uniform_
+    # org_uniform = torch.nn.init.uniform_
+    # org_normal = torch.nn.init.normal_
+    # def skip(*args, **kwargs):
+    #     pass
+    # torch.nn.init.kaiming_uniform_ = skip
+    # torch.nn.init.uniform_ = skip
+    # torch.nn.init.normal_ = skip
 
     model = None
     if model_id is not None:
@@ -211,13 +219,13 @@ def load_hqq_model(model_id, device_map, use_cache=False, inference=False):
         model = simple_dispatch_model(model, device_map)
         model.config.use_cache = use_cache
         clean_up()
-        print(f'{model_id} :  {torch.cuda.max_memory_reserved() / 1024 / 1024}MB')
+        print(f'{model_id} : {torch.cuda.max_memory_reserved() / 1024 / 1024}MB')
         # if inference:
         #     prepare_for_inference(model, backend='gptq')
 
-    torch.nn.init.kaiming_uniform_ = org_kaiming_uniform
-    torch.nn.init.uniform_ = org_uniform
-    torch.nn.init.normal_ = org_normal
+    # torch.nn.init.kaiming_uniform_ = org_kaiming_uniform
+    # torch.nn.init.uniform_ = org_uniform
+    # torch.nn.init.normal_ = org_normal
 
     return model
 
@@ -243,22 +251,21 @@ def get_hfmodel(model_name_or_path: str,
                 dtype='auto',
                 trust_remote_code=False,
                 use_cache=False,
-                **kwargs
-                ):
+                **kwargs):
 
     # assert kwargs.get('attn_implementation') in ['hf', 'ft']        ## hf : huggingface, ft : faster transformer
     
-    # for fast model loading
-    org_kaiming_uniform = torch.nn.init.kaiming_uniform_
-    org_uniform = torch.nn.init.uniform_
-    org_normal = torch.nn.init.normal_
+    # # for fast model loading
+    # org_kaiming_uniform = torch.nn.init.kaiming_uniform_
+    # org_uniform = torch.nn.init.uniform_
+    # org_normal = torch.nn.init.normal_
 
-    def skip(*args, **kwargs):
-        pass
+    # def skip(*args, **kwargs):
+    #     pass
 
-    torch.nn.init.kaiming_uniform_ = skip
-    torch.nn.init.uniform_ = skip
-    torch.nn.init.normal_ = skip
+    # torch.nn.init.kaiming_uniform_ = skip
+    # torch.nn.init.uniform_ = skip
+    # torch.nn.init.normal_ = skip
     
     # ft = False
     # if kwargs.get('attn_implementation') == 'ft':
@@ -281,9 +288,9 @@ def get_hfmodel(model_name_or_path: str,
     #     convert_model_to_ft(model)
     #     replace_generate_functions()
 
-    torch.nn.init.kaiming_uniform_ = org_kaiming_uniform
-    torch.nn.init.uniform_ = org_uniform
-    torch.nn.init.normal_ = org_normal
+    # torch.nn.init.kaiming_uniform_ = org_kaiming_uniform
+    # torch.nn.init.uniform_ = org_uniform
+    # torch.nn.init.normal_ = org_normal
     
     return model
 

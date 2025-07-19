@@ -141,8 +141,8 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     # Loop through each batch
     # for i, inputs in enumerate(loader):
     for i, (inputs, attention_mask, labels) in enumerate(loader):
-        # outputs = model(inputs)
-        outputs = model(inputs, attention_mask=attention_mask)
+        outputs = model(inputs)
+        # outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
 
         # Shift logits and labels for next token prediction
@@ -156,19 +156,18 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
         if loss_func == 'cross_entropy':
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(shift_logits, shift_labels)
-            # loss = loss.float() * seqlen * lm_logits.shape[0]
-            loss = loss.float() * cur_seqlen
+            
         elif loss_func == 'jsd':
             assert dense_logits_list != None
             loss_fct = JSD()
             dense_logits = dense_logits_list[i].reshape(-1, shift_logits.size(-1)).contiguous()
             loss = loss_fct(shift_logits, dense_logits, mask=mask)
-            # loss = loss.float() * seqlen * lm_logits.shape[0]
-            loss = loss.float() * cur_seqlen
-            seqlens.append(cur_seqlen)
 
         else:
             raise NotImplementedError(f'{loss_func} is not implemented')
+        # loss = loss.float() * seqlen * lm_logits.shape[0]
+        loss = loss.float() * cur_seqlen
+        seqlens.append(cur_seqlen)
 
         # Append to list of negative log likelihoods
         losses.append(loss)

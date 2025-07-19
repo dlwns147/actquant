@@ -23,7 +23,12 @@
         "model": "model", 
         "layers": "model.layers",
         "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"]
+        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"],
+        "vocab_size": 152064,
+        "hidden_size": 3584,
+        "max_position_embeddings": 32768,
+        "head_dim": 128,
+        "n_norm": 57
     },
 
     "Qwen2.5-7B-Instruct": {
@@ -50,7 +55,12 @@
         "model": "model", 
         "layers": "model.layers",
         "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"]
+        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"],
+        "vocab_size": 152064,
+        "hidden_size": 3584,
+        "max_position_embeddings": 32768,
+        "head_dim": 128,
+        "n_norm": 57
     },
 
     "Qwen2.5-14B": {
@@ -77,7 +87,12 @@
         "model": "model", 
         "layers": "model.layers",
         "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"]
+        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"],
+        "vocab_size": 152064,
+        "hidden_size": 5120,
+        "max_position_embeddings": 32768,
+        "head_dim": 128,
+        "n_norm": 97
     },
 
     "Qwen2.5-14B-Instruct": {
@@ -104,7 +119,12 @@
         "model": "model", 
         "layers": "model.layers",
         "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"]
+        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"],
+        "vocab_size": 152064,
+        "hidden_size": 5120,
+        "max_position_embeddings": 32768,
+        "head_dim": 128,
+        "n_norm": 97
     },
 
     "Qwen2.5-32B": {
@@ -131,7 +151,12 @@
         "model": "model", 
         "layers": "model.layers",
         "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"]
+        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"],
+        "vocab_size": 152064,
+        "hidden_size": 5120,
+        "max_position_embeddings": 32768,
+        "head_dim": 128,
+        "n_norm": 129
     },
 
     "Qwen2.5-32B-Instruct": {
@@ -158,7 +183,12 @@
         "model": "model", 
         "layers": "model.layers",
         "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"]
+        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"],
+        "vocab_size": 152064,
+        "hidden_size": 5120,
+        "max_position_embeddings": 32768,
+        "head_dim": 128,
+        "n_norm": 129
     },
 
     "Qwen2.5-72B": {
@@ -185,6 +215,11 @@
         "model": "model", 
         "layers": "model.layers",
         "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"]
+        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"],
+        "vocab_size": 152064,
+        "hidden_size": 8192,
+        "max_position_embeddings": 32768,
+        "head_dim": 128,
+        "n_norm": 161
     }
 }

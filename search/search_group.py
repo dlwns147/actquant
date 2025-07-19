@@ -146,6 +146,7 @@ class Search:
             quant_model_paths=self.quant_model_paths,
             outlier=torch.load(outlier_path) if outlier_path else None,
             seqlen=kwargs.pop('seqlen', 2048),
+            min_seqlen=kwargs.pop('min_seqlen', 0),
             n_sample=kwargs.pop('n_sample', 128),
             datasets=[self.dataset],
             data_batch_size=kwargs.pop('data_batch_size', 1),
@@ -636,6 +637,8 @@ if __name__ == '__main__':
                         help='sample number of the calibration set')
     parser.add_argument('--seqlen', type=int, default=2048,
                         help='sequential length of the calibaration (train) set')
+    parser.add_argument('--min_seqlen', type=int, default=0,
+                        help='minimum sequential length of the calibaration gsm8k set')
     parser.add_argument('--metric', type=str, default='ppl',
                         help='which metric predictor model to fit (ppl/loss/gsm8k)')
     parser.add_argument('--data_batch_size', type=int, default=1,

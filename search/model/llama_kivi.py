@@ -208,12 +208,12 @@ class LlamaKIVIAttention(nn.Module):
 
             if self.config.use_flash:
                 attn_output = _flash_attention_forward(
-                    query_states.transpose(1, 2),
-                    key_states.transpose(1, 2),
-                    value_states.transpose(1, 2),
-                    # attention_mask,
-                    None,
-                    q_len,
+                    query_states=query_states.transpose(1, 2),
+                    key_states=key_states.transpose(1, 2),
+                    value_states=value_states.transpose(1, 2),
+                    # attention_mask=attention_mask,
+                    attention_mask=None,
+                    query_length=q_len,
                     position_ids=position_ids,
                     dropout=0.0,
                     sliding_window=getattr(self, "sliding_window", None),
@@ -229,7 +229,6 @@ class LlamaKIVIAttention(nn.Module):
                 attn_output = torch.nn.functional.scaled_dot_product_attention(
                     query_states.contiguous() if query_states.device.type == "cuda"  and causal_mask is not None else query_states,
                     repeat_kv(key_states, self.num_key_value_groups).contiguous() if query_states.device.type == "cuda" and causal_mask is not None else repeat_kv(key_states, self.num_key_value_groups),
-                    # repeat_kv(value_states, self.num_key_value_groups).contiguous() if query_states.device.type == "cuda" and causal_mask is not None  else repeat_kv(key_states, self.num_key_value_groups),
                     repeat_kv(value_states, self.num_key_value_groups).contiguous() if query_states.device.type == "cuda" and causal_mask is not None else repeat_kv(value_states, self.num_key_value_groups),
                     attn_mask=causal_mask,
                     dropout_p=self.attention_dropout if self.training else 0.0,

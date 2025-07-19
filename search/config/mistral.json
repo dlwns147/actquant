@@ -23,7 +23,12 @@
         "model": "model", 
         "layers": "model.layers",
         "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "lm_head"]
+        "post_layer": ["model.norm", "lm_head"],
+        "norm_shape": 4096,
+        "n_norm": 65,
+        "head_shape": [32768, 4096],
+        "pe_shape": [32768, 128],
+        "embed_shape": [4096, 32768]
     },
 
     "Mistral-7B-Instruct-v0.3": {
@@ -50,6 +55,11 @@
         "model": "model", 
         "layers": "model.layers",
         "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "lm_head"]
+        "post_layer": ["model.norm", "lm_head"],
+        "vocab_size": 32768,
+        "hidden_size": 4096,
+        "max_position_embeddings": 32768,
+        "head_dim": 128,
+        "n_norm": 65
     }
 }

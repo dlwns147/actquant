@@ -96,7 +96,7 @@ def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_
     
 
 
-def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None, ignore_index=-100):
+def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, min_seqlen=0, cache_dir=None, ignore_index=-100):
     traindata = load_dataset('gsm8k', 'main', split='train', cache_dir=cache_dir)
     traindata = traindata.shuffle(seed=seed)    
     count = 0
@@ -109,8 +109,8 @@ def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cac
         input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
         len_prompt_target = input_ids.shape[-1]
         len_prompt = len(tokenizer(prompt)["input_ids"])
-        print(f'len_prompt_target: {len_prompt_target}, len_prompt: {len_prompt}, len_target: {len_prompt_target - len_prompt}')
-        if len_prompt_target > seqlen:
+        print(f'count: {count}, len_prompt_target: {len_prompt_target}, len_prompt: {len_prompt}, len_target: {len_prompt_target - len_prompt}')
+        if len_prompt_target > seqlen or len_prompt_target < min_seqlen:
             continue
         input_ids = torch.column_stack([input_ids, torch.zeros((1, seqlen - len_prompt_target), dtype=int)])
         attention_mask = torch.column_stack([attention_mask, torch.zeros((1, seqlen - len_prompt_target), dtype=int)])
@@ -138,7 +138,7 @@ def get_trainloaders(name, n_sample=128, seed=0, seqlen=2048, model='', batch_si
     if 'gsm8k' in name:
         return get_gsm8k_trainenc(seed, n_sample, seqlen, model, tokenizer, batch_size, cache_dir=cache_dir)
 
-def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, batch_size=1, tokenizer=None, model='', cache_dir=None):
+def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0, batch_size=1, tokenizer=None, model='', cache_dir=None):
     if tokenizer is None:
         tokenizer = get_tokenizer(model, cache_dir=cache_dir)
     if train:
@@ -147,7 +147,7 @@ def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, batch_size=1
         if 'c4' in name:
             return get_c4_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
         if 'gsm8k' in name:
-            return get_gsm8k_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
+            return get_gsm8k_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, min_seqlen=min_seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
     else:
         if 'wikitext2' in name:
             return get_wikitext2(tokenizer=tokenizer, batch_size=batch_size, seqlen=seqlen, cache_dir=cache_dir)
