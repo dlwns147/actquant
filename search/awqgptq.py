@@ -14,11 +14,12 @@ from evaluator import LlamaEvaluator
 from tqdm import tqdm
 import csv
 from matplotlib import pyplot as plt
-from utils.func import init_accelerator, clean_up, get_net_info
+from utils.func import init_accelerator, clean_up, process_dtype, get_net_info
 from utils.eval import measure_latency, eval_zeroshot
 from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
 from quant.model import get_quantized_model
+from model.replace import replace_model
 import warnings
 from time import time
 warnings.simplefilter("ignore")
@@ -78,6 +79,7 @@ def main(args):
     accelerator, device_map = init_accelerator(args.gpu_id, config)
 
     model_id = f'{args.model_path}/{args.model_name}'
+    dtype = process_dtype(args.dtype)
 
     use_awq_or_gptq = 'awq' in args.method or 'gptq' in args.method
     method = 'awq' if 'awq' in args.method else 'gptq' if 'gptq' in args.method else None
@@ -105,6 +107,7 @@ def main(args):
         datasets=args.datasets,
         device_map=device_map,
         bits=bits,
+        dtype=dtype,
         group_size=group_size,
         residual_length=args.residual_length,
         use_flash=args.use_flash,
@@ -116,29 +119,45 @@ def main(args):
     # arch['w'] = 
     arch = {'w': {linear: [args.w_bits] * config['n_block'] for linear in config['linear']}}
     if args.k_bits is not None:
-        arch['k'] = [args.k_bits] * config['n_block']
-        
+        arch['k'] = [[args.k_bits, args.k_group_size]] * config['n_block']
     if args.v_bits is not None:
-        arch['v'] = [args.v_bits] * config['n_block']
+        arch['v'] = [[args.v_bits, args.v_group_size]] * config['n_block']
     accelerator.print(arch)
     
     w_bits = np.concatenate(list(arch['w'].values()))
     do_owq = ((w_bits - w_bits.astype(int)).sum() != 0)
     print(f'do_owq : {do_owq}, use_awq_or_gptq : {use_awq_or_gptq}')
     if use_awq_or_gptq:
-        model = get_quantized_model(method, arch, model_id, device_map, config=config, group_size=args.w_group_size, prune='layer_prune' in args.method, do_owq=do_owq, owq_path=args.outlier_path, clip_asym=args.clip_asym)
+        model = get_quantized_model(method, arch, model_id, device_map, config=config, group_size=args.w_group_size, dtype=dtype, do_owq=do_owq, owq_path=args.outlier_path, clip_asym=args.clip_asym)
+        if ('k' in arch and 'v' in arch):
+            model.config.k_bits = [x[0] for x in arch['k']]
+            model.config.v_bits = [x[0] for x in arch['v']]
+            model.config.k_group_size = [x[1] for x in arch['k']]
+            model.config.v_group_size = [x[1] for x in arch['v']]
+            
+            model.config.use_flash = args.use_flash
+            model.config.residual_length = args.residual_length 
+            model.config.quant_kv_output = args.quant_kv_output
+            model.config.k_quant_per = args.k_quant_per
+            model.config.v_quant_per = args.v_quant_per
+
+            model = replace_model(model, model.config)
     else:
         model = evaluator.sample(arch)
 
     if args.datasets:
         model.config.residual_length = 0
         model.config.quant_kv_output = True
+        use_cache = model.config.use_cache
+        model.config.use_cache = False
 
         metric, complexity = evaluator.eval(arch=arch, metric='ppl', model=model, accelerator=accelerator)
         # accelerator.print(arch)
         print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}\n')
+        model.config.use_cache = use_cache
 
     if args.pass_key_file:
+        model.config.quant_kv_output = False
         # method_name = f"K{config.k_bits}V{config.v_bits} KiVi"
         print( "-----------------------------------" )
         enc = get_tokenizer(model_id)
@@ -255,6 +274,8 @@ if __name__ == '__main__':
                         help='file path to supernet weights')
     parser.add_argument('--config', type=str, default='config/llama.json',
                         help='')
+    parser.add_argument('--dtype', type=str, default='auto', choices=['float16', 'float', 'fp16', 'bfloat16', 'bfloat', 'bf16', 'auto'],
+                        help='')
     # parser.add_argument('--bits', type=int, default=2,
     #                     help='')
     # parser.add_argument('--group_size', type=int, default=128,
@@ -274,14 +295,14 @@ if __name__ == '__main__':
     parser.add_argument('--v_group_size', type=int, default=128, 
                         help='')
     
-    parser.add_argument('--residual_length', type=int, default=128, 
-                        help='')
-    parser.add_argument('--use_flash', action='store_true', help='')
-
+    parser.add_argument('--quant_kv_output', action='store_true', help='')
     parser.add_argument('--k_quant_per', type=str, choices=['channel', 'token'], 
                         help='')
     parser.add_argument('--v_quant_per', type=str, choices=['channel', 'token'], 
                         help='')
+    parser.add_argument('--residual_length', type=int, default=128, 
+                        help='')
+    parser.add_argument('--use_flash', action='store_true', help='')
 
 
     parser.add_argument('--clip_asym', action='store_true', help='')

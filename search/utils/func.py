@@ -35,19 +35,23 @@ def get_correlation(prediction, target):
 def compute_bits(arch, config, group_size, target='w'):
     memory_usage = 0
     if target == 'w':
-        c_group_size = group_size[target]
+        n_param = 0
+        w_group_size = group_size[target]
         for linear, linear_bits in arch[target].items():
             out_dim, in_dim = map(int, config['linear_shape'][linear])
-            if c_group_size == -1:
-                c_group_size = in_dim
-            assert in_dim % c_group_size == 0
+            n_param += out_dim * in_dim * len(linear_bits)
+            linear_group_size = in_dim if w_group_size == -1 else w_group_size
+            assert in_dim % linear_group_size == 0
             for bits in linear_bits:
                 memory_usage += out_dim * in_dim * bits
                 if bits < 16:
-                    memory_usage += (in_dim // c_group_size) * out_dim * 32 # scale + zero point
+                    memory_usage += (in_dim // linear_group_size) * out_dim * 32 # scale + zero point
         return memory_usage / config['model_numel']
+        # return memory_usage / n_param
     
     elif target == 'k' or target == 'v':
+        bits_list, group_size_list = [x[0] for x in arch[target]], [x[1] for x in arch[target]]
+        return np.mean(bits_list).item() + np.mean(32 / np.array(group_size_list)).item()
         if len(group_size[target]) == 1:
             # c_group_size = group_size[target]
             # if c_group_size == -1:
@@ -63,7 +67,9 @@ def compute_bits(arch, config, group_size, target='w'):
             raise NotImplementedError
 
     elif target =='kv':
-        # import pdb; pdb.set_trace()
+        k_bits_list, k_group_size_list = [x[0] for x in arch['k']], [x[1] for x in arch['k']]
+        v_bits_list, v_group_size_list = [x[0] for x in arch['v']], [x[1] for x in arch['v']]
+        return np.mean(k_bits_list + v_bits_list).item() + np.mean(32 / np.array(k_group_size_list + v_group_size_list)).item()
         if len(group_size['k']) == 1:
             # k_group_size = config['linear_shape'][config['k_linear']][0] if group_size['k'] == -1 else group_size['k']
             # v_group_size = config['linear_shape'][config['v_linear']][0] if group_size['v'] == -1 else group_size['v']
@@ -79,7 +85,7 @@ def compute_bits(arch, config, group_size, target='w'):
     else:
         raise NotImplementedError
 
-def compute_memory(arch, config, group_size, n_token=0):
+def compute_memory(arch, config, group_size, n_token=0, residual_length=0):
     weight_memory = 0
     for linear, linear_bits in arch['w'].items():
         w_group_size = group_size['w']
@@ -124,14 +130,14 @@ def compute_params(arch, config):
             
     return params / total_params
 
-def get_net_info(arch, config, group_size, n_token=0):
+def get_net_info(arch, config, group_size, n_token=0, residual_length=0):
     net_info = {}
     net_info['wbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='w') if 'w' in arch else 0
     # net_info['abits'] = compute_bits(arch, config, 'activation') if 'activation' in arch else 0
     net_info['kbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='k') if 'k' in arch else 0
     net_info['vbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='v') if 'v' in arch else 0
     net_info['kvbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='kv') if 'v' in arch and 'k' in arch else 0
-    net_info['memory'] = compute_memory(arch=arch, config=config, group_size=group_size, n_token=n_token) if 'w' in arch and 'k' in arch and 'v' in arch else 0
+    net_info['memory'] = compute_memory(arch=arch, config=config, group_size=group_size, n_token=n_token, residual_length=residual_length) if 'w' in arch and 'k' in arch and 'v' in arch else 0
     
     return net_info
 
@@ -305,3 +311,13 @@ def load_outlier(model, outlier, config):
             if key in outlier:
                 outlier[f'{blk_idx}.{linear}'] = [outlier[key], get_fp16_channel(getsubattr(getblock(model, config)[blk_idx], linear), outlier[key])]
     return outlier
+
+def process_dtype(dtype):
+    if dtype in ['float16', 'float', 'fp16']:
+        return torch.float16
+    elif dtype in ['bfloat16', 'bfloat', 'bf16']:
+        return torch.bfloat16
+    elif dtype == 'auto':
+        return 'auto'
+    else:
+        raise NotImplementedError(dtype)

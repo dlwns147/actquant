@@ -15,7 +15,7 @@ from tqdm import tqdm
 from time import time
 import csv
 from matplotlib import pyplot as plt
-from utils.func import init_accelerator, get_net_info, clean_up
+from utils.func import init_accelerator, get_net_info, clean_up, process_dtype
 from utils.eval import measure_latency, eval_zeroshot
 from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
@@ -77,6 +77,7 @@ def main(args):
         config = json.load(f)[args.model_name]
     
     accelerator, device_map = init_accelerator(args.gpu_id, config)
+    dtype = process_dtype(args.dtype)
 
     with open(args.expr, 'r') as f:
         result_json = json.load(open(args.expr))
@@ -187,6 +188,7 @@ def main(args):
         n_sample=args.n_sample,
         datasets=args.datasets,
         device_map=device_map,
+        dtype=dtype,
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
         group_size=group_size,
         residual_length=args.residual_length,
@@ -207,7 +209,7 @@ def main(args):
         print(f'do_owq : {do_owq}, use_awq_gptq_owq : {use_awq_gptq_owq}')
         if use_awq_gptq_owq:
             method = 'awq' if 'awq' in args.method else 'gptq' if 'gptq' in args.method else 'owq' if 'owq' in args.method else None
-            model = get_quantized_model(method, arch, model_id, device_map, config=config, prune='layer_prune' in args.method, do_owq=do_owq, owq_path=args.outlier_path)
+            model = get_quantized_model(method, arch, model_id, device_map, dtype=dtype, config=config, do_owq=do_owq, owq_path=args.outlier_path)
         else:
             model = evaluator.sample(arch)
             
@@ -222,6 +224,7 @@ def main(args):
             print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}')
 
         if args.pass_key_file:
+            model.config.quant_kv_output = False
             # method_name = f"K{config.k_bits}V{config.v_bits} KiVi"
             print( "-----------------------------------" )
             enc = get_tokenizer(model_id)
@@ -350,6 +353,8 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default='',
                         help='file path to supernet weights')
     parser.add_argument('--config', type=str, default='config/llama.json',
+                        help='')
+    parser.add_argument('--dtype', type=str, default='auto', choices=['float16', 'float', 'fp16', 'bfloat16', 'bfloat', 'bf16', 'auto'],
                         help='')
     parser.add_argument('--comp_obj', type=str, nargs='+', default=['bits'], 
                         help='second objective to optimize simultaneously')

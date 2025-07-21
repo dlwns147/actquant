@@ -21,7 +21,7 @@ def replace_model(model, config):
         model.model = MistralKIVIModel(model.model, config)
         layers = model.model.layers
         for i in range(len(layers)):
-            # if type(layers[i]) == LlamaDecoderLayer:
+            # if type(layers[i]) == MistralDecoderLayer:
             layers[i].self_attn = MistralKIVIAttention(layers[i].self_attn, config)
     
     elif isinstance(model, Qwen2ForCausalLM):
@@ -29,7 +29,7 @@ def replace_model(model, config):
         model.model = Qwen2KIVIModel(model.model, config)
         layers = model.model.layers
         for i in range(len(layers)):
-            # if type(layers[i]) == LlamaDecoderLayer:
+            # if type(layers[i]) == Qwen2DecoderLayer:
             layers[i].self_attn = Qwen2KIVIAttention(layers[i].self_attn, config)
     else:
         raise NotImplementedError

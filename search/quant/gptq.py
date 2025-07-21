@@ -22,8 +22,8 @@ def quantize(x, scale, zero, maxq):
 
 
 class GPTQ(BASE):
-    def __init__(self, model_name, config, arch, device_map, group_size, dev='cuda', prune=False, do_owq=False, owq=None, **kwargs):
-        super().__init__(model_name, config, arch, device_map=device_map, group_size=group_size, dev=dev, prune=prune, do_owq=do_owq, owq=owq)
+    def __init__(self, model_name, config, arch, device_map, group_size, dtype='auto', dev='cuda', prune=False, do_owq=False, owq=None, **kwargs):
+        super().__init__(model_name, config, arch, device_map=device_map, group_size=group_size, dtype=dtype, dev=dev, prune=prune, do_owq=do_owq, owq=owq)
         self.method = 'gptq'
 
         if do_owq:

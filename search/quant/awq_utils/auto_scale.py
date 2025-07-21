@@ -6,6 +6,7 @@ from transformers.models.bloom.modeling_bloom import BloomBlock, BloomGelu
 from transformers.models.opt.modeling_opt import OPTDecoderLayer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RMSNorm
+from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralRMSNorm
 from transformers.activations import GELUActivation
 from model.skip_llama import LlamaDecoderSkipLayer
 
@@ -257,7 +258,7 @@ def auto_scale_block(module, module_kwargs, q_config, input_feat, do_owq, module
                 )
             )
     
-    elif isinstance(module, Qwen2DecoderLayer):
+    elif isinstance(module, (Qwen2DecoderLayer, MistralDecoderLayer)):
         # attention input
         scales_list.append(
             _auto_get_scale(
@@ -341,7 +342,7 @@ def apply_scale(module, scales_list, input_feat_dict=None):
         if isinstance(prev_op, nn.Linear):
             assert len(layers) == 1
             scale_fc_fc(prev_op, layers[0], scales)
-        elif isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm, Qwen2RMSNorm)):
+        elif isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm, Qwen2RMSNorm, MistralRMSNorm)):
             scale_ln_fcs(prev_op, layers, scales)
         elif isinstance(prev_op, (nn.GELU, BloomGelu, GELUActivation)):
             new_module = ScaledActivation(prev_op, scales)

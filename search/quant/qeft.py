@@ -19,9 +19,9 @@ import transformers
 
 from .base import BASE, get_owq_calib_dataset
     
-class OWQ(BASE):
-    def __init__(self, model_name, config, arch, device_map, group_size=128, dev='cuda', prune=False, do_owq=False, owq=None, **kwargs):
-        super().__init__(model_name, config, arch, device_map=device_map, group_size=group_size, dev=dev, prune=prune, do_owq=do_owq, owq=owq)
+class QEFT(BASE):
+    def __init__(self, model_name, config, arch, device_map, group_size=128, dtype='auto', dev='cuda', prune=False, do_owq=False, owq=None, **kwargs):
+        super().__init__(model_name, config, arch, device_map=device_map, group_size=group_size, dtype=dtype, dev=dev, prune=prune, do_owq=do_owq, owq=owq)
         self.method = 'owq'
 
 

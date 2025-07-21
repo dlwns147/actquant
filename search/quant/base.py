@@ -2,9 +2,7 @@ import random
 
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel, AutoTokenizer
-from transformers import AutoModelForCausalLM
-from transformers.models.llama.modeling_llama import LlamaForCausalLM
+from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from utils.func import load_outlier
 import gc
@@ -107,26 +105,28 @@ def get_owq_calib_dataset(data="c4", tokenizer=None, n_samples=128, seed=0, seql
     return trainloader
 
 class BASE:
-    def __init__(self, model_name, config, arch, device_map, dev='cuda', group_size=128, prune=False, do_owq=False, outlier_path=None, **kwargs):
+    def __init__(self, model_name, config, arch, device_map, dev='cuda', group_size=128, dtype='auto', prune=False, do_owq=False, outlier_path=None, **kwargs):
         self.model_name = model_name
         self.config = config
         self.dev = dev
+        self.dtype = dtype
         self.device_map = device_map
         self.arch = arch
 
         self.prune = prune
         self.do_owq = do_owq
-        self.outlier_path = None
+        self.outlier_path = outlier_path
         self.group_size = group_size
+        self.owq = None
         if do_owq:
             if isinstance(outlier_path, str):
                 self.owq = torch.load(outlier_path)
             else:
                 self.owq = outlier_path
-        self.load_model(device_map='cpu')
+        self.load_model(device_map='cpu', dtype=dtype)
         print(f'groupsize : {group_size}')
         
-    def load_model(self, device_map='auto', use_kivi=True, use_cache=False):
+    def load_model(self, device_map='auto', dtype='auto', use_kivi=True, use_cache=False):
         if hasattr(self, 'model'):
             del self.model
             gc.collect()
@@ -135,7 +135,7 @@ class BASE:
         model_config = AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
         # model_config.use_cache = use_cache
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, 
-                                                torch_dtype='auto',
+                                                torch_dtype=dtype,
                                                 device_map=device_map,
                                                 low_cpu_mem_usage=True,
                                                 trust_remote_code=True, 

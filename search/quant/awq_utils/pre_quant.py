@@ -10,6 +10,7 @@ from transformers.models.bloom.modeling_bloom import BloomForCausalLM
 from transformers.models.opt.modeling_opt import OPTForCausalLM
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+from transformers.models.mistral.modeling_mistral import MistralForCausalLM
 # from tinychat.models import LlavaLlamaForCausalLM
 
 # from .auto_scale import auto_scale_block, apply_scale
@@ -27,7 +28,7 @@ def get_named_linears(module):
 
 
 def get_blocks(model):
-    if model.__class__.__name__ in ["LlamaForCausalLM", "Qwen2ForCausalLM"]:
+    if model.__class__.__name__ in ["LlamaForCausalLM", "Qwen2ForCausalLM", "MistralForCausalLM"]:
         layers = model.model.layers
     elif model.__class__.__name__ == "LlavaLlamaForCausalLM":
         # layers = [model.model.layers, model.model.vision_tower.vision_tower.vision_model.encoder.layers]
@@ -50,7 +51,7 @@ def get_blocks(model):
 
 
 def move_embed(model, device):
-    if isinstance(model, (LlamaForCausalLM, Qwen2ForCausalLM)):
+    if isinstance(model, (LlamaForCausalLM, Qwen2ForCausalLM, MistralForCausalLM)):
         model.model.embed_tokens = model.model.embed_tokens.to(device)
         model.model.norm = model.model.norm.to(device)
         if hasattr(model.model, 'rotary_emb'):
@@ -103,7 +104,6 @@ def run_awq(
         # otherwise attention_mask will always be on cpu.
         model.transformer.bias = model.transformer.bias.to("cuda")
 
-
     assert arch is not None, "arch is not provided"
 
     # if samples is None:
@@ -117,8 +117,7 @@ def run_awq(
     inps = []
     layer_kwargs = {}
 
-    layers[0] = layers[0].to("cuda")
-    
+    layers[0] = layers[0].to("cuda")    
 
     class Catcher(nn.Module):
         def __init__(self, module):
@@ -151,8 +150,7 @@ def run_awq(
         "clip": [],
     }
 
-    # import pdb; pdb.set_trace()
-    # solve layer by layer
+    # solve layer by layer    
     for i in tqdm(range(len(layers)), desc="Running AWQ..."):
         layer = layers[i]
         layer = layer.cuda()
@@ -227,9 +225,6 @@ def run_awq(
 
         # Haotian: check activation replacement
         del input_feat
-        gc.collect()
-        torch.cuda.empty_cache()
-    
         layer = layer.cpu()
         gc.collect()
         torch.cuda.empty_cache()

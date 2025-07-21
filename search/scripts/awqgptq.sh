@@ -48,7 +48,8 @@ DATASETS="wikitext2 c4"
 # TARGET_COMP_OBJ=bits
 # TARGET_BITS_LIST=(2 3 4)
 
-W_BITS=16
+# W_BITS=16
+W_BITS=4
 W_GROUP_SIZE=128
 
 K_BITS=2
@@ -68,9 +69,9 @@ K_QUANT_PER=channel
 V_QUANT_PER=token
 
 # BATCH_SIZE=1
-# BATCH_SIZE=4
+BATCH_SIZE=4
 # BATCH_SIZE=16
-BATCH_SIZE=32
+# BATCH_SIZE=32
 
 NUM_FEWSHOT=0
 # NUM_FEWSHOT=5
@@ -88,9 +89,11 @@ N_PROC=1
 
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} awqgptq.py \
 --gpu_id ${DEVICES} \
+--method ${METHOD} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
 --config ${CONFIG} \
+--dtype ${DTYPE} \
 --w_bits ${W_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
@@ -98,20 +101,21 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --v_bits ${V_BITS} \
 --k_quant_per ${K_QUANT_PER} \
 --v_quant_per ${V_QUANT_PER} \
+--quant_kv_output \
 --use_flash \
 -n ${N} \
 --save ${SAVE} \
---pass_key_file ${PASS_KEY_FILE} \
-# --method ${METHOD} \
-# --datasets ${DATASETS} \
-# --zeroshot \
-# --tasks ${TASKS} \
-# --zeroshot_batch_size ${BATCH_SIZE} \
+--clip_asym \
+--datasets ${DATASETS} \
+--zeroshot \
+--tasks ${TASKS} \
+--zeroshot_batch_size ${BATCH_SIZE} \
+--long_bench \
+--long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
+--long_bench_config ${LONG_BENCH_CONFIG} \
+# --pass_key_file ${PASS_KEY_FILE} \
 # --num_fewshot ${NUM_FEWSHOT}
-# --long_bench \
-# --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
-# --long_bench_config ${LONG_BENCH_CONFIG} \
-# --clip_asym
+
 
 # --k_group_size ${KV_GROUP_SIZE} \
 # --v_group_size ${KV_GROUP_SIZE} \

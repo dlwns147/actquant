@@ -26,7 +26,7 @@ def main(args):
     accelerator, device_map = init_accelerator(args.gpu_id, config)
 
     model_id = f'{args.model_path}/{args.model_name}'
-    group_size = {'w': args.w_group_size, 'k': args.k_group_size, 'v': args.v_group_size}
+    group_size = {'w': args.w_group_size, 'k': [args.k_group_size], 'v': [args.v_group_size]}
 
     evaluator = LlamaEvaluator(
         config,
@@ -62,7 +62,7 @@ def main(args):
     if awq_gptq_owq:
         method = 'awq' if 'awq' in args.method else 'gptq' if 'gptq' in args.method else 'owq' if 'owq' in args.method else None
         model_config = AutoConfig.from_pretrained(model_id)
-        model = get_quantized_model(method, arch, model_id, device_map, config=config, prune='layer_prune' in args.method, do_owq=do_owq, owq_path=args.outlier_path)
+        model = get_quantized_model(method, arch, model_id, device_map, config=model_config, prune='layer_prune' in args.method, do_owq=do_owq, owq_path=args.outlier_path)
     else:
         model = evaluator.sample(arch)
     del evaluator

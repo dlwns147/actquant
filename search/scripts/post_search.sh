@@ -95,10 +95,14 @@ COMP_OBJ_VAL=(3.0)
 # COMP_OBJ_VAL=(2.5)
 # COMP_OBJ_VAL=(2.35)
 # COMP_OBJ_VAL=(2.3)
+COMP_OBJ_THRESHOLD=0.005
 
+COMP_OBJ=(memory)
+COMP_OBJ_VAL=(3.0)
+COMP_OBJ_THRESHOLD=0.005
 
 # COMP_OBJ_THRESHOLD=0.01
-COMP_OBJ_THRESHOLD=0.005
+
 # PREFER="metric#0.0 ${TARGET_COMP_OBJ}#${TARGET_COMP_OBJ_VAL}"
 
 PREFER_LIST=("metric#0.0")
@@ -163,6 +167,7 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
 --config ${CONFIG} \
+--dtype ${DTYPE} \
 --comp_obj ${COMP_OBJ} \
 --comp_obj_min ${MIN_COMP_OBJ} \
 --comp_obj_max ${MAX_COMP_OBJ} \
