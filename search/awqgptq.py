@@ -129,7 +129,7 @@ def main(args):
     print(f'do_owq : {do_owq}, use_awq_or_gptq : {use_awq_or_gptq}')
     if use_awq_or_gptq:
         model = get_quantized_model(method, arch, model_id, device_map, config=config, group_size=args.w_group_size, dtype=dtype, do_owq=do_owq, owq_path=args.outlier_path, clip_asym=args.clip_asym)
-        if ('k' in arch and 'v' in arch):
+        if (args.k_bits < 16 and args.v_bits < 16):
             model.config.k_bits = [x[0] for x in arch['k']]
             model.config.v_bits = [x[0] for x in arch['v']]
             model.config.k_group_size = [x[1] for x in arch['k']]

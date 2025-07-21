@@ -86,7 +86,7 @@ class LlamaEvaluator:
                 # with accelerator.main_process_first():
                 self.model = load_hqq_model(quant_model_paths[np.argmax(bits['w'])], device_map, inference)
 
-                if ('k' in bits or 'v' in bits):
+                if (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
                     self.model.config.k_bits = [max(bits['k'])] * config['n_block']
                     self.model.config.v_bits = [max(bits['v'])] * config['n_block']
                     self.model.config.k_group_size = [max(group_size['k'][-1])] * config['n_block']
@@ -110,7 +110,7 @@ class LlamaEvaluator:
             # self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
             self.model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
             
-            if ('k' in bits or 'v' in bits):
+            if (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
                 self.model.config.k_bits = [max(bits['k'])] * config['n_block']
                 self.model.config.v_bits = [max(bits['v'])] * config['n_block']
                 
