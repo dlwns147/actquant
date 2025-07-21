@@ -15,9 +15,11 @@ def compute_mem(args):
     }
     group_size={'w': args.w_group_size, 'k': args.k_group_size, 'v': args.v_group_size}
     
-    mem = get_net_info(arch, config, group_size, args.n_token)['memory']
+    complexity = get_net_info(arch, config, group_size, args.n_token)
+    mem = complexity['memory']
     for k, v in arch.items():
         print(f'{k}: {v}')
+    print(f'complexity: {complexity}')
     print(f'model: {args.model_path}/{args.model_name}, n_token: {args.n_token} | MEM: {mem} B = {(mem / 1024):.3f} KB = {(mem / (1024 * 1024)):.3f} MB = {(mem / (1024 * 1024 * 1024)):.3f} GB')
     
 if __name__ == '__main__':

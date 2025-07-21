@@ -46,8 +46,8 @@ def compute_bits(arch, config, group_size, target='w'):
                 memory_usage += out_dim * in_dim * bits
                 if bits < 16:
                     memory_usage += (in_dim // linear_group_size) * out_dim * 32 # scale + zero point
-        return memory_usage / config['model_numel']
-        # return memory_usage / n_param
+        # return memory_usage / config['model_numel']
+        return memory_usage / n_param
     
     elif target == 'k' or target == 'v':
         bits_list, group_size_list = [x[0] for x in arch[target]], [x[1] for x in arch[target]]

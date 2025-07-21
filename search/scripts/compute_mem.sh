@@ -1,14 +1,14 @@
-MODEL_PATH=/SSD/huggingface/meta-llama
-MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
-CONFIG=config/llama.json
-
-# MODEL_PATH=/SSD/huggingface/Qwen
-# MODEL_NAME=Qwen2.5-7B-Instruct
-# # MODEL_NAME=Qwen2.5-14B-Instruct
-# # DTYPE=bfloat16
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=Llama-3.1-8B-Instruct
 # DTYPE=float16
-# CONFIG=config/qwen2.json
+# CONFIG=config/llama.json
+
+MODEL_PATH=/SSD/huggingface/Qwen
+MODEL_NAME=Qwen2.5-7B-Instruct
+# MODEL_NAME=Qwen2.5-14B-Instruct
+# DTYPE=bfloat16
+DTYPE=float16
+CONFIG=config/qwen2.json
 
 # MODEL_PATH=/SSD/huggingface/mistralai
 # MODEL_NAME=Mistral-7B-Instruct-v0.3
@@ -16,11 +16,11 @@ CONFIG=config/llama.json
 # DTYPE=float16
 # CONFIG=config/mistral.json
 
-# W_BITS=2
+W_BITS=2
 # W_BITS=3
-W_BITS=4
-# W_GROUP_SIZE=128
-W_GROUP_SIZE=-1
+# W_BITS=4
+W_GROUP_SIZE=128
+# W_GROUP_SIZE=-1
 
 # K_BITS=2
 # V_BITS=2
@@ -39,8 +39,11 @@ V_GROUP_SIZE=128
 
 RESIDUAL_LENGTH=128
 
-# N_TOKEN=1024
-N_TOKEN=1048576
+N_TOKEN=1024
+# N_TOKEN=1048576
+
+N_TOKEN_LIST=(1024 1048576)
+
 
 python compute_mem.py \
 --model_path ${MODEL_PATH} \

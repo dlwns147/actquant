@@ -190,7 +190,7 @@ def main(args):
         model.config.residual_length = args.residual_length
         model.config.quant_kv_output = False
         
-        results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks, batch_size=args.zeroshot_batch_size, num_fewshot=args.num_fewshot)
+        results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks, batch_size=args.lm_eval_batch_size, num_fewshot=args.num_fewshot)
         
         task = list(results.keys())     
         total_result = []
@@ -362,7 +362,7 @@ if __name__ == '__main__':
     parser.add_argument('--tasks', type=str, nargs='+', default=['piqa','winogrande','hellaswag','arc_challenge','arc_easy', 'lambada_openai', 'boolq'])
     parser.add_argument('--zeroshot_csv_file', type=str, default=None,
                         help='')
-    parser.add_argument('--zeroshot_batch_size', type=int, default=64,
+    parser.add_argument('--lm_eval_batch_size', type=int, default=64,
                         help='')
     parser.add_argument('--num_fewshot', type=int, default=None,
                         help='')
