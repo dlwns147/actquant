@@ -32,16 +32,12 @@ CONFIG=config/llama.json
 
 # METHOD=hqq
 # METHOD_TEXT=hqq
-
-# METHOD=awq
-# METHOD_TEXT=awq
-
+METHOD=awq
+METHOD_TEXT=awq
 # METHOD="awq layer_prune"
 # METHOD_TEXT=awq_layer_prune
-
-METHOD=fp16
-METHOD_TEXT=fp16
-
+# METHOD=fp16
+# METHOD_TEXT=fp16
 
 W_BITS="2 3 4"
 W_BITS_TEXT="234"
@@ -56,14 +52,14 @@ QSCALE=false
 K_BITS="2 4"
 K_BITS_TEXT="24"
 # K_GROUP_SIZE=128
-K_GROUP_SIZE=("32 64 128" "128")
-K_GROUP_SIZE_TEXT=3264128128
+K_GROUP_SIZE=("32 64 128" "32 64 128")
+K_GROUP_SIZE_TEXT=3264128x2
 
 V_BITS="2 4"
 V_BITS_TEXT="24"
 V_GROUP_SIZE=128
-V_GROUP_SIZE=("32 64 128" "128")
-V_GROUP_SIZE_TEXT=3264128128
+V_GROUP_SIZE=("32 64 128" "32 64 128")
+V_GROUP_SIZE_TEXT=3264128x2
 
 RESIDUAL_LENGTH=128
 K_QUANT_PER=channel
@@ -81,27 +77,24 @@ QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 N_OUTLIER=32
 OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.pth
 
-# # COMP_OBJ="wbits kvbits"
 # COMP_OBJ=(wbits kvbits)
 # COMP_OBJ_TEXT="wkv"
-# # COMP_OBJ_VAL="3.0 3.0"
 # COMP_OBJ_VAL=(2.5 2.5)
 
-# COMP_OBJ="kvbits"
-COMP_OBJ=(kvbits)
-COMP_OBJ_TEXT=kv
-# COMP_OBJ_VAL="3.0 3.0"
-COMP_OBJ_VAL=(3.0)
-# COMP_OBJ_VAL=(2.5)
-# COMP_OBJ_VAL=(2.35)
-# COMP_OBJ_VAL=(2.3)
-COMP_OBJ_THRESHOLD=0.005
+# COMP_OBJ=(kvbits)
+# COMP_OBJ_VAL=(3.0)
+# COMP_OBJ_THRESHOLD=0.005
 
 COMP_OBJ=(memory)
-COMP_OBJ_VAL=(3.0)
-COMP_OBJ_THRESHOLD=0.005
 
-# COMP_OBJ_THRESHOLD=0.01
+# COMP_OBJ_VAL=(5878849536)
+# COMP_OBJ_VAL=(5862072320)
+# N_TOKEN=1024
+
+# COMP_OBJ_VAL=(42350419968)
+COMP_OBJ_VAL=(25170550784)
+N_TOKEN=1048576
+COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
 
 # PREFER="metric#0.0 ${TARGET_COMP_OBJ}#${TARGET_COMP_OBJ_VAL}"
 
@@ -124,15 +117,18 @@ MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
-
 DATASETS="wikitext2 c4"
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
 TASKS="coqa gsm8k truthfulqa"
 # TASKS="coqa truthfulqa"
 
+LM_EVAL_BATCH_SIZE=32
+
 EXPR_FOLDER=save/search/quant
 
-EXPR_FILE=2506030600_Llama-3.1-8B-Instruct_kv_loss_hqq_iter_50_n_iter_50_w16k24v24bits_w128k3264128128v3264128128gs_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_32sample_rbf/iter_27.stats
+# EXPR_FILE=2507191514_Llama-3.1-8B-Instruct_memory_loss_hqq_iter_200_n_iter_50_w234k24v24bits_w128k3264128x2v3264128x2gs_128res_len_k_channel_v_token_obj_1_1e99_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_0minseq_1024token_rbf/iter_200.stats
+EXPR_FILE=2507191514_Llama-3.1-8B-Instruct_memory_loss_hqq_iter_200_n_iter_50_w234k24v24bits_w128k3264128x2v3264128x2gs_128res_len_k_channel_v_token_obj_1_1e99_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_0minseq_1048576token_rbf/iter_200.stats
+# EXPR_FILE=2506030600_Llama-3.1-8B-Instruct_kv_loss_hqq_iter_50_n_iter_50_w16k24v24bits_w128k3264128128v3264128128gs_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_32sample_rbf/iter_27.stats
 
 # EXPR_FILE=2505290559_Llama-2-13b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_50.stats
 # EXPR_FILE=2505290559_Llama-2-13b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_80.stats
@@ -162,8 +158,7 @@ N=1
 
 N_PROC=1
 # N_PROC=2
-CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} post_search.py \
---gpu_id ${DEVICES} \
+ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
 --config ${CONFIG} \
@@ -175,14 +170,11 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --k_bits ${K_BITS} \
 --v_bits ${V_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
---k_group_size ${K_GROUP_SIZE[0]} \
---k_group_size ${K_GROUP_SIZE[1]} \
---v_group_size ${V_GROUP_SIZE[0]} \
---v_group_size ${V_GROUP_SIZE[1]} \
 --residual_length ${RESIDUAL_LENGTH} \
 --k_quant_per ${K_QUANT_PER} \
 --v_quant_per ${V_QUANT_PER} \
 --use_flash \
+--n_token ${N_TOKEN} \
 -n ${N} \
 --debug \
 --expr ${EXPR_FOLDER}/${EXPR_FILE} \
@@ -191,9 +183,22 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --datasets ${DATASETS} \
 --zeroshot \
 --tasks ${TASKS} \
---long_bench \
---long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
---long_bench_config ${LONG_BENCH_CONFIG}
+--lm_eval_batch_size ${LM_EVAL_BATCH_SIZE}"
+for g in "${K_GROUP_SIZE[@]}"
+do
+    ARGS+=" --k_group_size ${g} "
+done
+
+for g in "${V_GROUP_SIZE[@]}"
+do
+    ARGS+="--v_group_size ${g} "
+done
+
+CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} post_search.py ${ARGS}
+
+# --long_bench \
+# --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
+# --long_bench_config ${LONG_BENCH_CONFIG}
 
 # --pass_key_file ${PASS_KEY_FILE} \
 # --long_bench_e
@@ -227,12 +232,6 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 # TARGET_BITS_RANGE="${MIN_BITS} ${MAX_BITS}"
 # QMODEL_PATHS=("/SSD/awq/${MODEL_NAME}_w2_g64_fake_${SCALE_BITS}bit_128gs_awq.pt" "/SSD/awq/${MODEL_NAME}_w3_g${GROUP_SIZE}_fake_${SCALE_BITS}bit_awq.pt" "/SSD/awq/${MODEL_NAME}_w4_g${GROUP_SIZE}_fake_${SCALE_BITS}bit_awq.pt")
 
-# METHOD=owq
-# SMALL_WBITS=2.1
-# SMALL_MODEL_PATH=/SSD/owq/${MODEL_NAME}_${SMALL_WBITS}_wikitext2_fake.pth
-
-# LARGE_WBITS=4.1
-# LARGE_MODEL_PATH=/SSD/owq/${MODEL_NAME}_${LARGE_WBITS}_wikitext2.pth
 
 # METHOD=awq
 # METHOD_TEXT=awq

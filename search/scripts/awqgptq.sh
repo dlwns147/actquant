@@ -2,17 +2,17 @@ DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-MODEL_PATH=/SSD/huggingface/meta-llama
-MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
-CONFIG=config/llama.json
-
-# MODEL_PATH=/SSD/huggingface/Qwen
-# MODEL_NAME=Qwen2.5-7B-Instruct
-# # MODEL_NAME=Qwen2.5-14B-Instruct
-# # DTYPE=bfloat16
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=Llama-3.1-8B-Instruct
 # DTYPE=float16
-# CONFIG=config/qwen2.json
+# CONFIG=config/llama.json
+
+MODEL_PATH=/SSD/huggingface/Qwen
+MODEL_NAME=Qwen2.5-7B-Instruct
+# MODEL_NAME=Qwen2.5-14B-Instruct
+# DTYPE=bfloat16
+DTYPE=float16
+CONFIG=config/qwen2.json
 
 # MODEL_PATH=/SSD/huggingface/mistralai
 # MODEL_NAME=Mistral-7B-Instruct-v0.3
@@ -95,8 +95,8 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --method ${METHOD} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
---config ${CONFIG} \
 --dtype ${DTYPE} \
+--config ${CONFIG} \
 --w_bits ${W_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \

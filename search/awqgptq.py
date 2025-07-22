@@ -335,6 +335,7 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--n_sample', type=int, default=128,
                         help='')
+    
     # parser.add_argument('--debug', action='store_true', help='')
     # parser.add_argument('--sec_obj', type=str, default='bits',
     #                     help='second objective to optimize simultaneously')
@@ -362,7 +363,7 @@ if __name__ == '__main__':
     parser.add_argument('--tasks', type=str, nargs='+', default=['piqa','winogrande','hellaswag','arc_challenge','arc_easy', 'lambada_openai', 'boolq'])
     parser.add_argument('--zeroshot_csv_file', type=str, default=None,
                         help='')
-    parser.add_argument('--lm_eval_batch_size', type=int, default=64,
+    parser.add_argument('--lm_eval_batch_size', type=int, default=None,
                         help='')
     parser.add_argument('--num_fewshot', type=int, default=None,
                         help='')

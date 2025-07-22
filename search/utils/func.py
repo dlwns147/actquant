@@ -51,7 +51,7 @@ def compute_bits(arch, config, group_size, target='w'):
     
     elif target == 'k' or target == 'v':
         bits_list, group_size_list = [x[0] for x in arch[target]], [x[1] for x in arch[target]]
-        return np.mean(bits_list).item() + np.mean(32 / np.array(group_size_list)).item()
+        return np.mean(bits_list).item() + (np.mean(32 / np.array(group_size_list)).item() if 0 not in group_size_list else 0)
         if len(group_size[target]) == 1:
             # c_group_size = group_size[target]
             # if c_group_size == -1:
@@ -69,7 +69,7 @@ def compute_bits(arch, config, group_size, target='w'):
     elif target =='kv':
         k_bits_list, k_group_size_list = [x[0] for x in arch['k']], [x[1] for x in arch['k']]
         v_bits_list, v_group_size_list = [x[0] for x in arch['v']], [x[1] for x in arch['v']]
-        return np.mean(k_bits_list + v_bits_list).item() + np.mean(32 / np.array(k_group_size_list + v_group_size_list)).item()
+        return np.mean(k_bits_list + v_bits_list).item() + (np.mean(32 / np.array(k_group_size_list + v_group_size_list)).item() if 0 not in k_group_size_list and 0 not in v_group_size_list else 0)
         if len(group_size['k']) == 1:
             # k_group_size = config['linear_shape'][config['k_linear']][0] if group_size['k'] == -1 else group_size['k']
             # v_group_size = config['linear_shape'][config['v_linear']][0] if group_size['v'] == -1 else group_size['v']

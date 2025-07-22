@@ -87,7 +87,7 @@ def main(args):
     n_comp_obj = len(args.comp_obj)
     # assert n_comp_obj == len(archive[0][2:])
     subnets, metric = [v[0] for v in archive], [v[1] for v in archive]
-    comp_obj = [[get_net_info(n, config, group_size)[obj] for n in subnets] for obj in args.comp_obj]
+    comp_obj = [[get_net_info(n, config, group_size, n_token=args.n_token)[obj] for n in subnets] for obj in args.comp_obj]
     sort_idx = np.argsort(metric)
     F = np.column_stack((metric, *comp_obj))[sort_idx, :]
     n_comp_obj_min, n_comp_obj_max = len(args.comp_obj_min), len(args.comp_obj_max)
@@ -256,7 +256,7 @@ def main(args):
             model.config.residual_length = args.residual_length
             model.config.quant_kv_output = False
             
-            results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks)
+            results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks, batch_size=args.lm_eval_batch_size)
             
             task = list(results.keys())
             total_result = []
@@ -411,6 +411,8 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--n_sample', type=int, default=128,
                         help='')
+    parser.add_argument('--n_token', type=int, default=0, 
+                        help='target sequence length for memory calculation')
     parser.add_argument('--debug', action='store_true', help='')
     parser.add_argument('--datasets', type=str, nargs='+', default=[], 
                         help='')
@@ -426,6 +428,8 @@ if __name__ == '__main__':
     parser.add_argument('--latency', action='store_true', help='')
     parser.add_argument('--zeroshot', action='store_true', help='')
     parser.add_argument('--tasks', type=str, nargs='+', default=['coqa', 'gsm8k', 'truthfulqa'])
+    parser.add_argument('--lm_eval_batch_size', type=int, default=None,
+                        help='')
     parser.add_argument('--long_bench', action='store_true', help='')
     parser.add_argument('--long_bench_e', action='store_true',
                         help='number of architectures desired')
