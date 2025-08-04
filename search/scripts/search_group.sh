@@ -2,10 +2,10 @@ DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-MODEL_PATH=/SSD/huggingface/meta-llama
-MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
-CONFIG=config/llama.json
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=Llama-3.1-8B-Instruct
+# DTYPE=float16
+# CONFIG=config/llama.json
 
 # MODEL_PATH=/SSD/huggingface/Qwen
 # # MODEL_NAME=Qwen2.5-7B
@@ -18,24 +18,23 @@ CONFIG=config/llama.json
 # DTYPE=float16
 # CONFIG=config/qwen2.json
 
-# MODEL_PATH=/SSD/huggingface/mistralai
-# # MODEL_NAME=Mistral-7B-v0.3
-# MODEL_NAME=Mistral-7B-Instruct-v0.3
-# # DTYPE=bfloat16
-# DTYPE=float16
-# CONFIG=config/mistral.json
+MODEL_PATH=/SSD/huggingface/mistralai
+MODEL_NAME=Mistral-7B-Instruct-v0.3
+# DTYPE=bfloat16
+DTYPE=float16
+CONFIG=config/mistral.json
 
 # METHOD="hqq layer_prune"
 # METHOD_TEXT="hqq_layer_prune"
 METHOD="hqq"
 METHOD_TEXT="hqq"
 
-W_BITS="2 3 4"
-W_BITS_TEXT="234"
+# W_BITS="2 3 4"
+# W_BITS_TEXT="234"
 # W_BITS="4"
 # W_BITS_TEXT="4"
-# W_BITS=16
-# W_BITS_TEXT=16
+W_BITS=16
+W_BITS_TEXT=16
 AXIS=1
 W_GROUP_SIZE=128
 QSCALE=false
@@ -97,23 +96,24 @@ RESIDUAL_LENGTH=128
 # COMP_OBJ_MAX=5
 # COMP_OBJ_MAX_TEXT=5
 
-# COMP_OBJ=kvbits
-# COMP_OBJ_TEXT=kv
-# COMP_OBJ_MIN=${K_BITS:0:1}
-# COMP_OBJ_MIN_TEXT=${K_BITS:0:1}
-# COMP_OBJ_MAX=5
-# COMP_OBJ_MAX_TEXT=5
+COMP_OBJ=kvbits
+COMP_OBJ_TEXT=kv
+COMP_OBJ_MIN=${K_BITS:0:1}
+COMP_OBJ_MIN_TEXT=${K_BITS:0:1}
+COMP_OBJ_MAX=5
+COMP_OBJ_MAX_TEXT=5
 
 # N_TOKEN=0
 
-COMP_OBJ=memory
-COMP_OBJ_TEXT=memory
-COMP_OBJ_MIN=1
-COMP_OBJ_MIN_TEXT=1
-COMP_OBJ_MAX=1e99
-COMP_OBJ_MAX_TEXT=1e99
-# N_TOKEN=1024
-N_TOKEN=1048576
+# COMP_OBJ=memory
+# COMP_OBJ_TEXT=memory
+# COMP_OBJ_MIN=1
+# COMP_OBJ_MIN_TEXT=1
+# COMP_OBJ_MAX=1e99
+# COMP_OBJ_MAX_TEXT=1e99
+
+N_TOKEN=1024
+# N_TOKEN=1048576
 
 QMODEL_PATHS_LIST=()
 for B in ${W_BITS}
@@ -138,42 +138,43 @@ LOSS_FUNC=jsd
 
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_${LOSS_FUNC}/loss
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_${LOSS_FUNC}/loss
-SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_jsd/loss
+# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_jsd/loss
+SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128x2v128x2group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_gsm8k_32sample_256seqlen_0minseq_jsd/loss
 
 
 # PREDICTOR=mlp
 PREDICTOR=rbf
 # PREDICTOR=gp
 
-DATASET=wikitext2
-# DATASET=c4
-N_SAMPLE=32
-# N_SAMPLE=128
-SEQLEN=2048
-DATA_BATCH_SIZE=1
-MIN_SEQLEN=0
-
-# DATASET=gsm8k
+# DATASET=wikitext2
+# # DATASET=c4
 # N_SAMPLE=32
-# SEQLEN=256
-# DATA_BATCH_SIZE=8
+# # N_SAMPLE=128
+# SEQLEN=2048
+# DATA_BATCH_SIZE=1
 # MIN_SEQLEN=0
+
+DATASET=gsm8k
+N_SAMPLE=32
+SEQLEN=256
+DATA_BATCH_SIZE=8
+MIN_SEQLEN=0
 # MIN_SEQLEN=192
 
 # N_DOE=100
 # N_DOE=300
 
-N_DOE=300
-ITER=200
-N_ITER=50
+# N_DOE=300
+# ITER=200
+# N_ITER=50
 
 # N_DOE=150
 # ITER=100
 # N_ITER=50
 
-# N_DOE=100
-# ITER=100
-# N_ITER=30
+N_DOE=100
+ITER=100
+N_ITER=30
 
 # N_DOE=400
 # ITER=200
@@ -224,7 +225,6 @@ N_PROC=1
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
---method ${METHOD} \
 --quant_model_paths ${QMODEL_PATHS} \
 --w_bits ${W_BITS} \
 --k_bits ${K_BITS} \
@@ -263,6 +263,7 @@ ARGS="--gpu_id ${DEVICES} \
 --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
 --verbosity ${VERBOSITY} \
 --num_fewshot ${NUM_FEWSHOT}"
+# --method ${METHOD} \
 for g in "${K_GROUP_SIZE[@]}"
 do
     ARGS+=" --k_group_size ${g} "

@@ -219,7 +219,7 @@ def main(args):
             model.config.quant_kv_output = True
 
             metric = evaluator.eval(arch=arch, metric='ppl', model=model, accelerator=accelerator)[0] if args.datasets else 0
-            complexity = get_net_info(arch, config, group_size)
+            complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
             # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
             print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}')
 
