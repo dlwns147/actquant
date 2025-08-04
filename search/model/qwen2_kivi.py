@@ -92,8 +92,8 @@ class Qwen2KIVIAttention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if self.config.quant_kv_output:
-            key_states = fake_quant(key_states, self.config.k_group_size[self.layer_idx], self.config.k_bits[self.layer_idx], self.config.k_quant_per)
-            value_states = fake_quant(value_states, self.config.v_group_size[self.layer_idx], self.config.v_bits[self.layer_idx], self.config.v_quant_per)
+            key_states = fake_quant(key_states, self.config.k_group_size[self.layer_idx], self.config.k_bits[self.layer_idx], self.config.k_quant_per, attention_mask=attention_mask)
+            value_states = fake_quant(value_states, self.config.v_group_size[self.layer_idx], self.config.v_bits[self.layer_idx], self.config.v_quant_per, attention_mask=attention_mask)
 
         # assert self.num_key_value_groups == 1
         # [bsz, nh, t, hd]

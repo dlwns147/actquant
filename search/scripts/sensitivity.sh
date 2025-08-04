@@ -14,7 +14,6 @@ PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 # CONFIG=config/qwen2.json
 
 MODEL_PATH=/SSD/huggingface/mistralai
-# MODEL_NAME=Mistral-7B-v0.3
 MODEL_NAME=Mistral-7B-Instruct-v0.3
 # DTYPE=bfloat16
 DTYPE=float16
@@ -59,8 +58,8 @@ LOSS_FUNC=jsd
 DATASET=gsm8k
 N_SAMPLE=32
 SEQLEN=256
-DATA_BATCH_SIZE=1
-# DATA_BATCH_SIZE=8
+# DATA_BATCH_SIZE=1
+DATA_BATCH_SIZE=8
 MIN_SEQLEN=0
 # MIN_SEQLEN=192
 
@@ -76,6 +75,7 @@ TARGET="w k v"
 
 N_PROC=1
 ARGS="--gpu_id ${DEVICES} \
+--method ${METHOD} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
 --target ${TARGET} \
@@ -98,7 +98,6 @@ ARGS="--gpu_id ${DEVICES} \
 --dataset ${DATASET} \
 --use_flash"
 
-# --method ${METHOD} \
 # --eval_ppl
 # --outlier_bits ${OUTLIER_BITS} \
 # --outlier_path ${OUTLIER_PATH} \

@@ -112,7 +112,7 @@ def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, min
         len_prompt_target = input_ids.shape[-1]
         len_prompt = len(tokenizer(prompt)["input_ids"])
         # print(f'prompt|{prompt}, target|{target}')
-        print(f'{prompt + target}')
+        # print(f'{prompt + target}')
         print(f'count: {count}, len_prompt_target: {len_prompt_target}, len_prompt: {len_prompt}, len_target: {len_prompt_target - len_prompt}')
         if len_prompt_target > seqlen or len_prompt_target < min_seqlen:
             continue

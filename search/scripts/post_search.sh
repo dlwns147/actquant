@@ -179,7 +179,6 @@ ARGS="--gpu_id ${DEVICES} \
 --debug \
 --expr ${EXPR_FOLDER}/${EXPR_FILE} \
 --prefer ${PREFER} \
---use_flash \
 --datasets ${DATASETS} \
 --zeroshot \
 --tasks ${TASKS} \

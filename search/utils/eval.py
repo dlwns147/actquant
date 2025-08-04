@@ -115,8 +115,8 @@ def get_logits(model, loader):
     # for inputs in loader:
     for inputs, attention_mask, labels in loader:
 
-        # outputs = model(inputs)
-        outputs = model(inputs, attention_mask=attention_mask)
+        outputs = model(inputs)
+        # outputs = model(inputs, attention_mask=attention_mask)
         # lm_logits = outputs.logits
         lm_logits = outputs.logits[:, :-1, :].contiguous().detach()
         dense_logits_list.append(lm_logits)
@@ -141,8 +141,8 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     # Loop through each batch
     # for i, inputs in enumerate(loader):
     for i, (inputs, attention_mask, labels) in enumerate(loader):
-        outputs = model(inputs)
-        # outputs = model(inputs, attention_mask=attention_mask)
+        # outputs = model(inputs)
+        outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
 
         # Shift logits and labels for next token prediction

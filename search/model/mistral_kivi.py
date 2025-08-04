@@ -80,8 +80,8 @@ class MistralKIVIAttention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if self.config.quant_kv_output:
-            key_states = fake_quant(key_states, self.config.k_group_size[self.layer_idx], self.config.k_bits[self.layer_idx], self.config.k_quant_per)
-            value_states = fake_quant(value_states, self.config.v_group_size[self.layer_idx], self.config.v_bits[self.layer_idx], self.config.v_quant_per)
+            key_states = fake_quant(key_states, self.config.k_group_size[self.layer_idx], self.config.k_bits[self.layer_idx], self.config.k_quant_per, attention_mask=attention_mask)
+            value_states = fake_quant(value_states, self.config.v_group_size[self.layer_idx], self.config.v_bits[self.layer_idx], self.config.v_quant_per, attention_mask=attention_mask)
 
         # if past_key_value is not None:
         #     # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -100,7 +100,7 @@ class MistralKIVIAttention(nn.Module):
 
             # update key cache
             if key_states_full.shape[-2] == self.config.residual_length:
-                assert self.config.residual_length % self.config.k_group_size[self.layer_idx] == 0
+                assert self.config.residual_length % self.config.k_group_size[self.layer_idx] == 0, f"self.config.residual_length % self.config.k_group_size[self.layer_idx]: {self.config.residual_length % self.config.k_group_size[self.layer_idx]}"
                 key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(key_states_full.transpose(2, 3).contiguous(), self.config.k_group_size[self.layer_idx], self.config.k_bits[self.layer_idx])
                 key_states_full = None
                 if key_states_quant_trans is not None:
@@ -146,7 +146,7 @@ class MistralKIVIAttention(nn.Module):
 
             # update value cache
             if value_full_length > self.config.residual_length:
-                assert value_full_length == self.config.residual_length + 1
+                assert value_full_length == self.config.residual_length + 1,f"value_full_length: {value_full_length}, self.config.residual_length: {self.config.residual_length}"
                 value_states_quant_new, scale, mn = triton_quantize_and_pack_along_last_dim(value_states_full[:, :, :1, :].contiguous(), self.config.v_group_size[self.layer_idx], self.config.v_bits[self.layer_idx])
                 value_states_full = value_states_full[:, :, 1:, :].contiguous()
                 if value_states_quant is not None:
