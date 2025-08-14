@@ -7,7 +7,7 @@ import gc
 import torch
 import torch.nn as nn
 from .data import *
-from .loss import JSD
+from .loss import JSD, KLD, TopK
 
 
 # Function to evaluate perplexity (ppl) on a specified model and tokenizer
@@ -127,7 +127,7 @@ def get_logits(model, loader):
 
 
 @torch.no_grad()
-def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, ignore_index=-100):
+def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, ignore_index=-100, k=10):
     # Get input IDs
     # testenc = testenc.input_ids
 
@@ -150,18 +150,33 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
         shift_logits = shift_logits.reshape(-1, shift_logits.size(-1))
         shift_labels = labels[:, 1:].reshape(-1)
         mask = torch.where(shift_labels == ignore_index, False, True)
+        if key_token_list is not None:
+            key_token_mask = torch.zeros(len(mask), dtype=torch.bool, device=mask.device)
+            key_token_mask[key_token_list[i]] = True 
+            mask[~key_token_mask] = False
         cur_seqlen = mask.sum()
         
         # Compute loss
         if loss_func == 'cross_entropy':
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits, shift_labels)
+            loss_fct = nn.CrossEntropyLoss(ignore_index=ignore_index)
+            loss = loss_fct(shift_logits[mask], shift_labels[mask])
+        
+        elif loss_func == 'kld':
+            assert dense_logits_list != None
+            loss_fct = KLD()
+            dense_logits = dense_logits_list[i].reshape(-1, shift_logits.size(-1)).contiguous()
+            loss = loss_fct(shift_logits[mask], dense_logits[mask])
             
         elif loss_func == 'jsd':
             assert dense_logits_list != None
             loss_fct = JSD()
             dense_logits = dense_logits_list[i].reshape(-1, shift_logits.size(-1)).contiguous()
-            loss = loss_fct(shift_logits, dense_logits, mask=mask)
+            loss = loss_fct(shift_logits[mask], dense_logits[mask])
+            
+        elif loss_func == 'topk':
+            assert dense_logits_list != None
+            loss_fct = TopK
+            loss = loss_fct(shift_logits[mask], shift_labels[mask], k=k)
 
         else:
             raise NotImplementedError(f'{loss_func} is not implemented')
@@ -183,12 +198,12 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
     # accelerator.wait_for_everyone()
     if metric == 'ppl':
         return eval_ppl(model, accelerator, loader, seqlen=seqlen)
     elif metric == 'loss':
-        return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list)
+        return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list)
     elif 'gsm8k' in metric:
         return eval_zeroshot(model, tokenizer, task_list=[metric], limit=limit, batch_size=batch_size, num_fewshot=num_fewshot, verbosity=verbosity, task_manager=task_manager, task_dict=task_dict)
     else:

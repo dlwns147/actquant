@@ -136,30 +136,25 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 # LOSS_FUNC=cross_entropy
 LOSS_FUNC=jsd
 
-# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_${LOSS_FUNC}/loss
-# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_${LOSS_FUNC}/loss
-# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_jsd/loss
-SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128x2v128x2group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_gsm8k_32sample_256seqlen_0minseq_jsd/loss
-
 
 # PREDICTOR=mlp
 PREDICTOR=rbf
 # PREDICTOR=gp
 
-# DATASET=wikitext2
-# # DATASET=c4
+DATASET=wikitext2
+# DATASET=c4
 # N_SAMPLE=32
-# # N_SAMPLE=128
-# SEQLEN=2048
-# DATA_BATCH_SIZE=1
-# MIN_SEQLEN=0
-
-DATASET=gsm8k
-N_SAMPLE=32
-SEQLEN=256
-DATA_BATCH_SIZE=8
+N_SAMPLE=128
+SEQLEN=2048
+DATA_BATCH_SIZE=1
 MIN_SEQLEN=0
-# MIN_SEQLEN=192
+
+# DATASET=gsm8k
+# N_SAMPLE=32
+# SEQLEN=256
+# DATA_BATCH_SIZE=8
+# MIN_SEQLEN=0
+# # MIN_SEQLEN=192
 
 # N_DOE=100
 # N_DOE=300
@@ -208,6 +203,22 @@ LIMIT=100
 
 # VERBOSITY='FATAL'
 VERBOSITY='INFO'
+
+# TRUNC_LEN=512
+TRUNC_LEN=256
+# SLIDING_WINDOW=128
+SLIDING_WINDOW=64
+
+ALPHA=2
+BETA=-2
+
+# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_${LOSS_FUNC}/loss
+# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_${LOSS_FUNC}/loss
+# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_jsd/loss
+# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128x2v128x2group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_gsm8k_32sample_256seqlen_0minseq_jsd/loss
+SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_wikitext2_128sample_${SEQLEN}seqlen_${MIN_SEQLEN}minseq_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta_${LOSS_FUNC}/loss
+
+
 
 SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${METHOD_TEXT}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_PER}_v_${V_QUANT_PER}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${DATA_BATCH_SIZE}bs_${N_SAMPLE}sample_${SEQLEN}seq_${MIN_SEQLEN}minseq_${N_TOKEN}token_${PREDICTOR}
 # SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${METHOD_TEXT}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_PER}_v_${V_QUANT_PER}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}_${LM_EVAL_BATCH_SIZE}bs_${LIMIT}limit_${NUM_FEWSHOT}few
@@ -262,7 +273,12 @@ ARGS="--gpu_id ${DEVICES} \
 --limit ${LIMIT} \
 --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
 --verbosity ${VERBOSITY} \
---num_fewshot ${NUM_FEWSHOT}"
+--num_fewshot ${NUM_FEWSHOT} \
+--use_key_token \
+--trunc_len ${TRUNC_LEN} \
+--sliding_window ${SLIDING_WINDOW} \
+--alpha ${ALPHA} \
+--beta ${BETA}"
 # --method ${METHOD} \
 for g in "${K_GROUP_SIZE[@]}"
 do

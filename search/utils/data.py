@@ -8,7 +8,7 @@ class TokenizerWrapper:
     def __init__(self, input_ids):
         self.input_ids = input_ids
 
-def get_tokenizer(model, cache_dir=None):
+def get_tokenizer(model, use_fast=False, cache_dir=None):
     # if "llama" in model.lower():
     #     tokenizer = LlamaTokenizer.from_pretrained(model, use_fast=False, cache_dir=cache_dir)
     #     # fix for transformer 4.28.0.dev0 compatibility
@@ -20,7 +20,7 @@ def get_tokenizer(model, cache_dir=None):
     #             pass
     # else:
     #     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False, cache_dir=cache_dir)
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False, cache_dir=cache_dir)
+    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=use_fast, cache_dir=cache_dir)
     return tokenizer
 
 def get_wikitext2(tokenizer, seqlen=2048, batch_size=1, cache_dir=None):

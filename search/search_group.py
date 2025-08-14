@@ -103,6 +103,12 @@ class Search:
         self.n_token = kwargs.pop('n_token', 0)
         if 'memory' in self.comp_obj:
             assert self.n_token > 0, "n_token should be bigger than 0 when using memory objective."
+            
+        self.use_key_token = kwargs.pop('use_key_token', False)
+        self.trunc_len = kwargs.pop('trunc_len', 512)
+        self.sliding_window = kwargs.pop('sliding_window', 128)
+        self.alpha = kwargs.pop('alpha', 2)
+        self.beta = kwargs.pop('beta', -2)
 
         self.sensitivity_result_path = kwargs.pop('sensitivity_result_path', '')
         total_module = dict()
@@ -164,7 +170,12 @@ class Search:
             num_fewshot=self.num_fewshot,
             task_manager=self.task_manager,
             task_dict=self.task_dict,
-            verbosity=self.verbosity
+            verbosity=self.verbosity,
+            use_key_token=self.use_key_token,
+            trunc_len=self.trunc_len,
+            sliding_window=self.sliding_window,
+            alpha=self.alpha,
+            beta=self.beta
         )
         self.search_space = LlamaGroupSizeSearchSpace(
             bits=self.bits,
@@ -692,6 +703,17 @@ if __name__ == '__main__':
     
     parser.add_argument('--n_token', type=int, default=0, 
                         help='target sequence length for memory calculation')
+
+    
+    parser.add_argument('--use_key_token', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
+    parser.add_argument('--trunc_len', type=int, default=512, 
+                        help='truncation length for long PPL/JSD calculation')
+    parser.add_argument('--sliding_window', type=int, default=128, 
+                        help='sliding_window length for long PPL/JSD calculation')
+    parser.add_argument('--alpha', type=int, default=2, 
+                        help='Long-short distance (LSD) threshold for long PPL/JSD calculation')
+    parser.add_argument('--beta', type=int, default=-2, 
+                        help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
     
     cfgs = parser.parse_args()
     main(cfgs)

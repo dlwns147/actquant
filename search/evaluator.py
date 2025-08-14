@@ -3,6 +3,7 @@ import math
 from utils.func import *
 from utils.data import get_loader
 from utils.eval import eval_metric, get_logits, eval_zeroshot, get_tokenizer
+from utils.loss import get_key_token_list
 from model.replace import replace_model
  
 
@@ -44,6 +45,11 @@ class LlamaEvaluator:
                  task_manager=None,
                  task_dict=None,
                  verbosity='FATAL',
+                 use_key_token=False,
+                 trunc_len=512,
+                 sliding_window=128,
+                 alpha=2,
+                 beta=-2,                 
                  **kwargs):
         
         # model_id = os.path.join(model_path, model_name)
@@ -58,12 +64,15 @@ class LlamaEvaluator:
         self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, batch_size=data_batch_size, train=False, seqlen=seqlen)) for dataset in datasets}
 
         self.loss_func = loss_func
+        self.dense_logits = {dataset: None for dataset in self.train_loaders.keys()}
+        self.key_token_list = {dataset: None for dataset in self.train_loaders.keys()}
         self.outlier = dict()
-        if loss_func == 'jsd' or outlier is not None:
+        
+        if loss_func in ['jsd', 'kld', 'topk'] or outlier is not None or use_key_token:
             # model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', device_map=device_map, low_cpu_mem_usage=True)
             model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
 
-            if loss_func == 'jsd':
+            if loss_func in ['jsd', 'kld', 'topk']:
                 self.dense_logits = {dataset: get_logits(model, loader) for dataset, loader in self.train_loaders.items()}
 
             if outlier is not None:
@@ -73,11 +82,17 @@ class LlamaEvaluator:
                             key = f'{config["layers"]}.{blk_idx}.{linear}'
                             if key in outlier:
                                 self.outlier[f'{blk_idx}.{linear}'] = [outlier[key], get_fp16_channel(getsubattr(getblock(model, config)[blk_idx], linear), outlier[key])]
+
+            if use_key_token:
+                self.key_token_list = {dataset: get_key_token_list(model=model, tokenizer=get_tokenizer(model_id, use_fast=True), loader=loader, trunc_len=trunc_len, sliding_window=sliding_window, alpha=alpha, beta=beta) for dataset, loader in self.train_loaders.items()}
+                for dataset in self.train_loaders:
+                    n_key_token = sum([len(key_token) for key_token in self.key_token_list[dataset]])
+                    n_key_token = sum(accelerator.gather_for_metrics([n_key_token], use_gather_object=True))
+                    accelerator.print(f'dataset: {dataset}, n_key_token: {n_key_token}')
+                    accelerator.wait_for_everyone()
+
             del model
             clean_up()
-
-        if loss_func != 'jsd':
-            self.dense_logits = {dataset: None for dataset in self.train_loaders.keys()}
 
         self.quant_models = list()
         if 'hqq' in method:
@@ -149,6 +164,13 @@ class LlamaEvaluator:
         self.task_manager = task_manager
         self.task_dict = task_dict
         self.verbosity = verbosity
+        
+        self.use_key_token = use_key_token
+        self.trunc_len = trunc_len
+        self.sliding_window = sliding_window
+        self.alpha = alpha
+        self.beta = beta
+
         accelerator.wait_for_everyone()
 
     def sample(self, arch):
@@ -220,7 +242,8 @@ class LlamaEvaluator:
                                 loader=loader, 
                                 seqlen=self.seqlen, 
                                 loss_func=loss_func, 
-                                dense_logits_list=self.dense_logits[dataset] if self.loss_func=='jsd' else None, 
+                                dense_logits_list=self.dense_logits[dataset] if self.loss_func in ['jsd', 'kld', 'topk'] else None, 
+                                key_token_list=self.key_token_list[dataset] if self.use_key_token else None, 
                                 num_fewshot=self.num_fewshot, 
                                 limit=self.limit,
                                 batch_size=self.lm_eval_batch_size,

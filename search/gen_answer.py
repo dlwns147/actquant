@@ -6,16 +6,14 @@ import os
 
 # import numpy as np
 import torch
-# import gc
 import json
 import csv
 import time
-# from accelerate import Accelerator
+
+from datasets import 
 
 from evaluator import LlamaEvaluator
 from utils.func import init_accelerator, set_seed
-# from utils.eval import load_and_eval_ppl, eval_zeroshot
-# from transformers import AutoModelForCausalLM
 import warnings
 warnings.simplefilter("ignore")
 
@@ -30,54 +28,16 @@ def sensitivity(args):
         config,
         accelerator=accelerator,
         model_id=f'{args.model_path}/{args.model_name}',
-        method=args.method,
-        # quant_model_bits=self.quant_model_bits,
-        quant_model_paths=args.quant_model_paths,
-        outlier=torch.load(args.outlier_path) if args.outlier_path else None,
-        seqlen=args.seqlen,
-        min_seqlen=args.min_seqlen,
-        n_sample=args.n_sample,
-        data_batch_size=args.data_batch_size,
-        datasets=[args.dataset],
-        loss_func=args.loss_func,
+        # seqlen=args.seqlen,
+        # min_seqlen=args.min_seqlen,
+        # n_sample=args.n_sample,
+        # data_batch_size=args.data_batch_size,
+        datasets=[],
         device_map=device_map,
-        bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
-        group_size={'w': args.w_group_size, 'k': args.k_group_size, 'v': args.v_group_size},
-        residual_length=args.residual_length,
-        use_flash=args.use_flash,
-        quant_kv_output=args.quant_kv_output,
-        k_quant_per=args.k_quant_per,
-        v_quant_per=args.v_quant_per,
-        use_key_token=args.use_key_token,
-        trunc_len=args.trunc_len,
-        sliding_window=args.sliding_window,
-        alpha=args.alpha,
-        beta=args.beta
     )
     
-    n_block = config['n_block']
-    ppl = 0
-    loss_list = dict()
-    ppl_list = dict()
-    # arch = {'linear': {l: [max(args.quant_model_bits)] * n_block for lg in config['linear'] for l in lg.split(',')}, 'layer': {l: [1]* n_block for l in config['layer']}}
-    arch = {
-        'w': {l: [max(args.w_bits)] * n_block for lg in config['linear'] for l in lg.split(',')},
-        'k': [[max(args.k_bits), min(args.k_group_size[-1])]] * n_block,
-        'v': [[max(args.v_bits), min(args.v_group_size[-1])]] * n_block,
-    }
     
-    for target in args.target:
-        if target == 'w':
-            ppl_list[target] = dict()
-            for linear in config['linear']:
-                for block_idx in range(n_block):
-                    ppl_list[target][f'{block_idx}.{linear}'] = 0
-        else:
-            ppl_list[target] = dict()
-            for i in range(n_block):
-                ppl_list[target][str(i)] = 0
-    # accelerator.print(f'arch : {arch}')
-
+    
     start_point = time.time()
     for target in args.target:
         loss_list[target] = dict()
@@ -203,16 +163,8 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--outlier_path', type=str, default='',
                         help='')
-        
-    parser.add_argument('--use_key_token', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
-    parser.add_argument('--trunc_len', type=int, default=512, 
-                        help='truncation length for long PPL/JSD calculation')
-    parser.add_argument('--sliding_window', type=int, default=128, 
-                        help='sliding_window length for long PPL/JSD calculation')
-    parser.add_argument('--alpha', type=int, default=2, 
-                        help='Long-short distance (LSD) threshold for long PPL/JSD calculation')
-    parser.add_argument('--beta', type=int, default=-2, 
-                        help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
+    # parser.add_argument('--threshold', type=float, default=1.5,
+    #                     help='')
 
 
     cfgs = parser.parse_args()

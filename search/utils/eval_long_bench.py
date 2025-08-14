@@ -72,6 +72,12 @@ def build_chat(tokenizer, prompt, model_name):
             }
         ]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    else:
+        messages = [
+            {"role": "user", "content": prompt},
+        ]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        
     return prompt
 
 def post_process(response, model_name):
