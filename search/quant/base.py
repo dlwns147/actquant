@@ -9,8 +9,8 @@ import gc
 
 import sys
 sys.path.append('..')
-from model import skip_llama
-from model.replace import replace_model
+# from model import skip_llama
+# from model.replace import replace_model
 
 def get_awq_calib_dataset(data="pileval", tokenizer=None, n_samples=512, block_size=512):
     if data == "pileval":
@@ -151,21 +151,21 @@ class BASE:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def prune_model(self):
-        self.model = skip_llama.block_replace(self.model)
+    # def prune_model(self):
+    #     self.model = skip_llama.block_replace(self.model)
 
-        # "layer": {"self_attn": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], 
-                    # "mlp": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]}
+    #     # "layer": {"self_attn": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], 
+    #                 # "mlp": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]}
 
-        for block_name in self.arch['layer'].keys():
-            if block_name == 'self_attn':
-                skip_block = skip_llama.skip_attn
-            elif block_name == 'mlp':
-                skip_block = skip_llama.skip_mlp
+    #     for block_name in self.arch['layer'].keys():
+    #         if block_name == 'self_attn':
+    #             skip_block = skip_llama.skip_attn
+    #         elif block_name == 'mlp':
+    #             skip_block = skip_llama.skip_mlp
 
-            for idx, use in enumerate(self.arch['layer'][block_name]):
-                if use == 0:        ## skip the block
-                    skip_block(self.model, idx, reuse=False)
+    #         for idx, use in enumerate(self.arch['layer'][block_name]):
+    #             if use == 0:        ## skip the block
+    #                 skip_block(self.model, idx, reuse=False)
 
 
     # def get_calib_dataset(self):

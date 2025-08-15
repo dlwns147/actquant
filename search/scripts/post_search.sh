@@ -27,17 +27,17 @@ CONFIG=config/llama.json
 # DTYPE=float16
 # CONFIG=config/mistral.json
 
-# METHOD="hqq layer_prune"
-# METHOD_TEXT="hqq_layer_prune"
+# W_METHOD="hqq layer_prune"
+# W_METHOD_TEXT="hqq_layer_prune"
 
-# METHOD=hqq
-# METHOD_TEXT=hqq
-METHOD=awq
-METHOD_TEXT=awq
-# METHOD="awq layer_prune"
-# METHOD_TEXT=awq_layer_prune
-# METHOD=fp16
-# METHOD_TEXT=fp16
+# W_METHOD=hqq
+# W_METHOD_TEXT=hqq
+W_METHOD=awq
+W_METHOD_TEXT=awq
+# W_METHOD="awq layer_prune"
+# W_METHOD_TEXT=awq_layer_prune
+# W_METHOD=fp16
+# W_METHOD_TEXT=fp16
 
 W_BITS="2 3 4"
 W_BITS_TEXT="234"
@@ -49,21 +49,22 @@ AXIS=1
 W_GROUP_SIZE=128
 QSCALE=false
 
+# KV_METHOD="hqq"
+KV_METHOD="kivi"
+
 K_BITS="2 4"
 K_BITS_TEXT="24"
-# K_GROUP_SIZE=128
-K_GROUP_SIZE=("32 64 128" "32 64 128")
-K_GROUP_SIZE_TEXT=3264128x2
+K_GROUP_SIZE=("128" "128")
+K_GROUP_SIZE_TEXT=128x2
 
 V_BITS="2 4"
 V_BITS_TEXT="24"
-V_GROUP_SIZE=128
-V_GROUP_SIZE=("32 64 128" "32 64 128")
-V_GROUP_SIZE_TEXT=3264128x2
+V_GROUP_SIZE=("128" "128")
+V_GROUP_SIZE_TEXT=128x2
 
 RESIDUAL_LENGTH=128
-K_QUANT_PER=channel
-V_QUANT_PER=token
+K_QUANT_SCHEME=channel
+V_QUANT_SCHEME=token
 
 QMODEL_PATHS_LIST=()
 for B in ${W_BITS}
@@ -87,13 +88,14 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 
 COMP_OBJ=(memory)
 
-# COMP_OBJ_VAL=(5878849536)
-# COMP_OBJ_VAL=(5862072320)
-# N_TOKEN=1024
+COMP_OBJ_VAL=(5878849536)
+COMP_OBJ_VAL=(5862072320)
+N_TOKEN=1024
 
 # COMP_OBJ_VAL=(42350419968)
-COMP_OBJ_VAL=(25170550784)
-N_TOKEN=1048576
+# COMP_OBJ_VAL=(25170550784)
+# N_TOKEN=1048576
+
 COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
 
 # PREFER="metric#0.0 ${TARGET_COMP_OBJ}#${TARGET_COMP_OBJ_VAL}"
@@ -126,8 +128,9 @@ LM_EVAL_BATCH_SIZE=32
 
 EXPR_FOLDER=save/search/quant
 
-# EXPR_FILE=2507191514_Llama-3.1-8B-Instruct_memory_loss_hqq_iter_200_n_iter_50_w234k24v24bits_w128k3264128x2v3264128x2gs_128res_len_k_channel_v_token_obj_1_1e99_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_0minseq_1024token_rbf/iter_200.stats
-EXPR_FILE=2507191514_Llama-3.1-8B-Instruct_memory_loss_hqq_iter_200_n_iter_50_w234k24v24bits_w128k3264128x2v3264128x2gs_128res_len_k_channel_v_token_obj_1_1e99_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_0minseq_1048576token_rbf/iter_200.stats
+# EXPR_FILE=2508151038_Llama-3.1-8B-Instruct_kv_loss_w_fp16_kv_kivi_iter_100_n_iter_30_w16k234v234bits_w-1k64128x3v64128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0minseq_1024token_rbf_256trunc_64sw_2alpha_-2beta/iter_23.stats
+EXPR_FILE=2507191514_Llama-3.1-8B-Instruct_memory_loss_hqq_iter_200_n_iter_50_w234k24v24bits_w128k3264128x2v3264128x2gs_128res_len_k_channel_v_token_obj_1_1e99_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_0minseq_1024token_rbf/iter_200.stats
+# EXPR_FILE=2507191514_Llama-3.1-8B-Instruct_memory_loss_hqq_iter_200_n_iter_50_w234k24v24bits_w128k3264128x2v3264128x2gs_128res_len_k_channel_v_token_obj_1_1e99_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_0minseq_1048576token_rbf/iter_200.stats
 # EXPR_FILE=2506030600_Llama-3.1-8B-Instruct_kv_loss_hqq_iter_50_n_iter_50_w16k24v24bits_w128k3264128128v3264128128gs_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_32sample_rbf/iter_27.stats
 
 # EXPR_FILE=2505290559_Llama-2-13b-hf_kv_loss_hqq_iter_100_n_iter_50_w16k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_128sample_rbf/iter_50.stats
@@ -147,8 +150,8 @@ EXPR_FILE=2507191514_Llama-3.1-8B-Instruct_memory_loss_hqq_iter_200_n_iter_50_w2
 # EXPR_FILE=2411211754_Llama-2-7b-hf_bits_loss_hqq_iter_300_nsga2_234_obj_2_4_jsd_mut_0.05_layer_prune_1.0_1.0/iter_299.stats
 
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}
-# LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE}gs_${K_QUANT_PER}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE}gs_${V_QUANT_PER}_r${RESIDUAL_LENGTH}
-LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_PER}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_PER}_r${RESIDUAL_LENGTH}
+# LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
+LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONG_BENCH_CONFIG=utils/long_bench_config
 LONG_BENCH_TASK=""
 
@@ -161,6 +164,8 @@ N_PROC=1
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
+--w_method ${W_METHOD} \
+--kv_method ${KV_METHOD} \
 --config ${CONFIG} \
 --dtype ${DTYPE} \
 --comp_obj ${COMP_OBJ} \
@@ -171,9 +176,8 @@ ARGS="--gpu_id ${DEVICES} \
 --v_bits ${V_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
---k_quant_per ${K_QUANT_PER} \
---v_quant_per ${V_QUANT_PER} \
---use_flash \
+--k_quant_scheme ${K_QUANT_SCHEME} \
+--v_quant_scheme ${V_QUANT_SCHEME} \
 --n_token ${N_TOKEN} \
 -n ${N} \
 --debug \

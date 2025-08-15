@@ -4,7 +4,8 @@ from utils.func import *
 from utils.data import get_loader
 from utils.eval import eval_metric, get_logits, get_tokenizer
 from utils.loss import get_key_token_list
-from model.replace import replace_kv_cache 
+from model.replace import replace_kv_cache
+from quant.model import get_quantized_model
 
 # from model.skip_llama import block_replace
 # from monkeypatch.ftllama_modeling import convert_model_to_ft
@@ -56,6 +57,9 @@ class LlamaEvaluator:
         self.method = method
         self.model = None
         self.group_size = group_size
+        self.model_id = model_id
+        self.device_map = device_map
+        self.dtype = dtype
         self.tokenizer = get_tokenizer(model_id)
         n_block = int(config['n_block'])
         # self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
@@ -159,6 +163,12 @@ class LlamaEvaluator:
         self.task_dict = task_dict
         self.verbosity = verbosity
         
+        self.k_quant_scheme = k_quant_scheme
+        self.v_quant_scheme = v_quant_scheme
+        self.residual_length = residual_length
+        self.quant_kv_output = quant_kv_output
+        self.packing = packing
+        
         self.use_key_token = use_key_token
         self.trunc_len = trunc_len
         self.sliding_window = sliding_window
@@ -169,7 +179,8 @@ class LlamaEvaluator:
 
     def sample(self, arch):
         # self.validate_arch(arch)
-        if 'hqq' in self.method['w'] or 'awq' in self.method['w'] or 'gptq' in self.method['w'] or 'qeft' in self.method['w']:
+        # if 'hqq' in self.method['w'] or 'awq' in self.method['w'] or 'gptq' in self.method['w'] or 'qeft' in self.method['w']:
+        if 'hqq' in self.method['w']:
             for linear_group, linear_group_bits in arch['w'].items():
                 for blk_idx, bits in enumerate(linear_group_bits):
                     flag = False
@@ -191,6 +202,23 @@ class LlamaEvaluator:
 
                     if not flag:
                         raise NotImplementedError(f'{linear_group}: {linear_group_bits} is not available')
+                    
+        elif 'awq' in self.method['w'] or 'gptq' in self.method['w'] or 'qeft' in self.method['w']:
+            w_method = 'awq' if 'awq' in self.method['w'] else 'gptq' if 'gptq' in self.method['w'] else 'qeft' if 'qeft' in self.method['w'] else None
+            self.model = get_quantized_model(w_method, arch, self.model_id, self.device_map, dtype=self.dtype, config=self.config, do_owq='qeft' in self.method['w'], owq_path=self.outlier)
+            # self.model = get_hfmodel(self.model_id, self.device_map, self.dtype, use_cache=False)
+            self.model.eval()
+            # if (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
+            if self.method['kv'] in ['hqq', 'kivi']:
+                self.model = replace_kv_cache(model=self.model,
+                                            tokenizer=self.tokenizer,
+                                            method=self.method['kv'],
+                                            n_block=int(self.config['n_block']),
+                                            k_quant_scheme=self.k_quant_scheme,
+                                            v_quant_scheme=self.v_quant_scheme,
+                                            residual_length=self.residual_length,
+                                            packing=self.packing,
+                                            quant_kv_output=self.quant_kv_output)
         
         if self.method['kv'] == 'hqq':
             if 'k' in arch:

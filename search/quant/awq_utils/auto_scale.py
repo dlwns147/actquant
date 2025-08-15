@@ -8,7 +8,7 @@ from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMS
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RMSNorm
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralRMSNorm
 from transformers.activations import GELUActivation
-from model.skip_llama import LlamaDecoderSkipLayer
+# from model.skip_llama import LlamaDecoderSkipLayer
 
 from .qmodule import ScaledActivation
 from .module import get_op_by_name, get_op_name, set_op_by_name, is_owq
@@ -186,8 +186,9 @@ def auto_scale_block(module, module_kwargs, q_config, input_feat, do_owq, module
 
     scales_list = []  # return the searched scales
 
-    if isinstance(module, LlamaDecoderLayer) or isinstance(module, LlamaDecoderSkipLayer):
-        if isinstance(module, LlamaDecoderLayer) or module.attn_skipped is False:
+    if isinstance(module, LlamaDecoderLayer):
+    # if isinstance(module, LlamaDecoderLayer) or isinstance(module, LlamaDecoderSkipLayer):
+        # if isinstance(module, LlamaDecoderLayer) or module.attn_skipped is False:
             # attention input
             scales_list.append(
                 _auto_get_scale(
@@ -226,7 +227,7 @@ def auto_scale_block(module, module_kwargs, q_config, input_feat, do_owq, module
                         # outlier=outlier,
                     )
                 )
-        if isinstance(module, LlamaDecoderLayer) or module.mlp_skipped is False:
+        # if isinstance(module, LlamaDecoderLayer) or module.mlp_skipped is False:
             # fc1
             scales_list.append(
                 _auto_get_scale(

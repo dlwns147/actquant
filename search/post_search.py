@@ -20,6 +20,7 @@ from utils.eval import measure_latency, eval_zeroshot
 from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
 from quant.model import get_quantized_model
+from model.replace import replace_kv_cache
 import gc
 import warnings
 warnings.simplefilter("ignore")
@@ -171,7 +172,7 @@ def main(args):
         print(f'Selected arch[{idx}] {args.comp_obj}: {pf[idx, 1:].tolist()}, metric: {pf[idx, 0].item():.4f}')
 
     model_id = f'{args.model_path}/{args.model_name}'
-    use_awq_gptq_owq = 'awq' in args.method or 'gptq' in args.method or 'owq' in args.method
+    use_awq_gptq_owq = 'awq' in args.w_method or 'gptq' in args.w_method or 'owq' in args.w_method
     
     if use_awq_gptq_owq:
         args.quant_model_bits = []
@@ -181,7 +182,7 @@ def main(args):
         config,
         accelerator=accelerator,
         model_id=model_id,
-        method=args.method,
+        method={'w': args.w_method, 'kv': args.kv_method},
         quant_model_paths=args.quant_model_paths,
         outlier=torch.load(args.outlier_path) if args.outlier_path else None,
         seqlen=args.seqlen,
@@ -193,8 +194,8 @@ def main(args):
         group_size=group_size,
         residual_length=args.residual_length,
         use_flash=args.use_flash,
-        k_quant_per=args.k_quant_per,
-        v_quant_per=args.v_quant_per,
+        k_quant_scheme=args.k_quant_scheme,
+        v_quant_scheme=args.v_quant_scheme,
     )
 
     for idx in tqdm(I):
@@ -207,11 +208,12 @@ def main(args):
         weight_bits = np.concatenate(list(arch['w'].values()))
         do_owq = ((weight_bits - weight_bits.astype(int)).sum() != 0)
         print(f'do_owq : {do_owq}, use_awq_gptq_owq : {use_awq_gptq_owq}')
-        if use_awq_gptq_owq:
-            method = 'awq' if 'awq' in args.method else 'gptq' if 'gptq' in args.method else 'owq' if 'owq' in args.method else None
-            model = get_quantized_model(method, arch, model_id, device_map, dtype=dtype, config=config, do_owq=do_owq, owq_path=args.outlier_path)
-        else:
-            model = evaluator.sample(arch)
+        # if use_awq_gptq_owq:
+        #     w_method = 'awq' if 'awq' in args.w_method else 'gptq' if 'gptq' in args.w_method else 'owq' if 'owq' in args.w_method else None
+        #     evaluator.model = get_quantized_model(w_method, arch, model_id, device_map, dtype=dtype, config=config, do_owq=do_owq, owq_path=args.outlier_path)
+            # model = get_quantized_model(w_method, arch, model_id, device_map, dtype=dtype, config=config, do_owq=do_owq, owq_path=args.outlier_path)
+        # else:
+        model = evaluator.sample(arch)
             
         print(f'Selected arch[{idx}] {args.comp_obj}: {pf[idx, 1:]}, metric: {pf[idx, 0]:.4f}')
         if args.datasets:
@@ -364,9 +366,12 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--gpu_id', type=str, default='0',
                         help='id of available gpus')
-    parser.add_argument('--method', type=str, nargs='+', default=[],
-                        help='')
     parser.add_argument('--quant_model_paths', type=str, nargs='+', default=[], 
+                        help='')
+    
+    parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
+                        help='')
+    parser.add_argument('--kv_method', type=str, default='kivi', choices=['hqq', 'kivi'],
                         help='')
     
     parser.add_argument('--w_bits', type=int, nargs='+', default=[], 
@@ -391,9 +396,9 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--use_flash', action='store_true', help='')
 
-    parser.add_argument('--k_quant_per', type=str, choices=['channel', 'token'], 
+    parser.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
-    parser.add_argument('--v_quant_per', type=str, choices=['channel', 'token'], 
+    parser.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
 
     parser.add_argument('--save', type=str, default='.tmp',
