@@ -30,7 +30,7 @@ def sensitivity(args):
         config,
         accelerator=accelerator,
         model_id=f'{args.model_path}/{args.model_name}',
-        method=args.method,
+        method={'w': args.w_method, 'kv': args.kv_method},
         # quant_model_bits=self.quant_model_bits,
         quant_model_paths=args.quant_model_paths,
         outlier=torch.load(args.outlier_path) if args.outlier_path else None,
@@ -44,15 +44,16 @@ def sensitivity(args):
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
         group_size={'w': args.w_group_size, 'k': args.k_group_size, 'v': args.v_group_size},
         residual_length=args.residual_length,
-        use_flash=args.use_flash,
+        # use_flash=args.use_flash,
         quant_kv_output=args.quant_kv_output,
-        k_quant_per=args.k_quant_per,
-        v_quant_per=args.v_quant_per,
+        k_quant_scheme=args.k_quant_scheme,
+        v_quant_scheme=args.v_quant_scheme,
         use_key_token=args.use_key_token,
         trunc_len=args.trunc_len,
         sliding_window=args.sliding_window,
         alpha=args.alpha,
-        beta=args.beta
+        beta=args.beta,
+        packing=args.packing
     )
     
     n_block = config['n_block']
@@ -173,11 +174,11 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--residual_length', type=int, default=128, 
                         help='')
-    parser.add_argument('--use_flash', action='store_true', help='')
+    # parser.add_argument('--use_flash', action='store_true', help='')
     parser.add_argument('--quant_kv_output', action='store_true', help='')
-    parser.add_argument('--k_quant_per', type=str, choices=['channel', 'token'], 
+    parser.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
-    parser.add_argument('--v_quant_per', type=str, choices=['channel', 'token'], 
+    parser.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
     parser.add_argument('--dataset', type=str, default='wikitext2',
                         help='dataset')
@@ -195,7 +196,9 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--result_path', type=str, default='',
                         help='')
-    parser.add_argument('--method', type=str, nargs='+', default=[],
+    parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
+                        help='')
+    parser.add_argument('--kv_method', type=str, default='kivi', choices=['hqq', 'kivi'],
                         help='')
     parser.add_argument('--eval_ppl', action='store_true')
     parser.add_argument('--loss_func', type=str, default='cross_entropy', help='')
@@ -213,6 +216,8 @@ if __name__ == '__main__':
                         help='Long-short distance (LSD) threshold for long PPL/JSD calculation')
     parser.add_argument('--beta', type=int, default=-2, 
                         help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
+    
+    parser.add_argument('--packing', action='store_true', help='Packing the quantized kv cache')
 
 
     cfgs = parser.parse_args()

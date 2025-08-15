@@ -48,7 +48,7 @@ class Search:
         # self.latency = self.sec_obj if "cpu" in self.sec_obj or "gpu" in self.sec_obj else None
         self.loss_func = kwargs.pop('loss_func', 'jsd')
 
-        self.method = kwargs.pop('method', '')
+        self.method = {'w': kwargs.pop('w_method', ['fp16']), 'kv': kwargs.pop('kv_method', 'kivi')}
         self.quant_model_paths = kwargs.pop('quant_model_paths', [])
         # self.quant_model_bits = kwargs.pop('quant_model_bits', [])
 
@@ -125,7 +125,7 @@ class Search:
                         total_module[target] = list(map(int, module_list)) if target in ['k', 'v'] else module_list
                         total_sensitivity[target] = sensitivity
             total_sensitivity_list = np.nan_to_num(np.concatenate(list(total_sensitivity.values())), nan=float('inf'))
-            upper_bound = np.median(total_sensitivity_list) * 2
+            upper_bound = np.median(total_sensitivity_list) * kwargs.pop('sensitivity_threshold', 2)
             print(f'upper_bound: {upper_bound}')
             pass_idx_list = np.where(total_sensitivity_list > upper_bound)[0].tolist()
 
@@ -160,10 +160,10 @@ class Search:
             bits=bits,
             group_size=self.group_size,
             residual_length=self.residual_length,
-            use_flash=kwargs.pop('use_flash', False),
+            # use_flash=kwargs.pop('use_flash', False),
             quant_kv_output=kwargs.pop('quant_kv_output', True),
-            k_quant_per=kwargs.pop('k_quant_per', 'channel'),
-            v_quant_per=kwargs.pop('v_quant_per', 'token'),
+            k_quant_scheme=kwargs.pop('k_quant_scheme', 'channel'),
+            v_quant_scheme=kwargs.pop('v_quant_scheme', 'token'),
             n_token=self.n_token,
             limit=self.limit,
             lm_eval_batch_size=self.lm_eval_batch_size,
@@ -603,6 +603,12 @@ if __name__ == '__main__':
                         help='file path to supernet weights')
     parser.add_argument('--quant_model_paths', type=str, nargs='+', default=[], 
                         help='')
+    
+    parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
+                        help='')
+    parser.add_argument('--kv_method', type=str, default='kivi', choices=['hqq', 'kivi'],
+                        help='')
+    
     parser.add_argument('--w_bits', type=int, nargs='+', default=[], 
                         help='')
     parser.add_argument('--k_bits', type=int, nargs='+', default=[2, 4], 
@@ -619,12 +625,12 @@ if __name__ == '__main__':
     
     parser.add_argument('--residual_length', type=int, default=128, 
                         help='')
-    parser.add_argument('--use_flash', action='store_true', help='')
+    # parser.add_argument('--use_flash', action='store_true', help='')
 
     parser.add_argument('--quant_kv_output', action='store_true', help='')
-    parser.add_argument('--k_quant_per', type=str, choices=['channel', 'token'], 
+    parser.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
-    parser.add_argument('--v_quant_per', type=str, choices=['channel', 'token'], 
+    parser.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
     
     parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'memory'], 
@@ -676,8 +682,7 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--ga_algorithm', type=str, default='nsga2',
                         help='')
-    parser.add_argument('--method', type=str, nargs='+', default=[],
-                        help='')
+
     parser.add_argument('--max_value', type=float, default=50,
                         help='')
     parser.add_argument('--crossover_prob', type=float, default=0.9,
@@ -700,6 +705,8 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--save_iter', type=int, default=1, 
                         help='')
+    parser.add_argument('--sensitivity_threshold', type=int, default=2,
+                        help='')
     
     parser.add_argument('--n_token', type=int, default=0, 
                         help='target sequence length for memory calculation')
@@ -714,6 +721,8 @@ if __name__ == '__main__':
                         help='Long-short distance (LSD) threshold for long PPL/JSD calculation')
     parser.add_argument('--beta', type=int, default=-2, 
                         help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
+    
+    parser.add_argument('--packing', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
     
     cfgs = parser.parse_args()
     main(cfgs)

@@ -19,19 +19,23 @@ DTYPE=float16
 # DTYPE=float16
 # CONFIG=config/mistral.json
 
-# METHOD="hqq"
-METHOD="fp16"
+W_METHOD="hqq"
+W_METHOD_TEXT="hqq"
+W_BITS="2 4"
+W_BITS_TEXT="24"
+W_GROUP_SIZE=128
 
-# W_BITS="2 4"
-# W_BITS_TEXT="24"
-# W_GROUP_SIZE=128
-
-W_BITS="16"
-W_BITS_TEXT="16"
-W_GROUP_SIZE=-1
+# W_METHOD="fp16"
+# W_METHOD_TEXT="fp16"
+# W_BITS="16"
+# W_BITS_TEXT="16"
+# W_GROUP_SIZE=-1
 
 AXIS=1
 # W_GROUP_SIZE=("128" "128")
+
+# KV_METHOD="hqq"
+KV_METHOD="kivi"
 
 K_BITS="2 4"
 K_BITS_TEXT="24"
@@ -71,9 +75,9 @@ MIN_SEQLEN=0
 # # MIN_SEQLEN=192
 
 RESIDUAL_LENGTH=0
-K_QUANT_PER=channel
-# K_QUANT_PER=token
-V_QUANT_PER=token
+K_QUANT_SCHEME=channel
+# K_QUANT_SCHEME=token
+V_QUANT_SCHEME=token
 
 # TRUNC_LEN=512
 TRUNC_LEN=256
@@ -83,11 +87,11 @@ SLIDING_WINDOW=64
 ALPHA=2
 BETA=-2
 
-# RESULT_PATH=csv/sensitivity/${MODEL_NAME}_${METHOD}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}group_size_${AXIS}axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_${DATASET}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}minseq_${LOSS_FUNC}
-RESULT_PATH=csv/sensitivity/${MODEL_NAME}_${METHOD}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}group_size_${AXIS}axis_k_${K_QUANT_PER}_v_${V_QUANT_PER}_${DATASET}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}minseq_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta_${LOSS_FUNC}
+# RESULT_PATH=csv/sensitivity/${MODEL_NAME}_${METHOD}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}group_size_${AXIS}axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_${DATASET}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}minseq_${LOSS_FUNC}
+RESULT_PATH=csv/sensitivity/${MODEL_NAME}_w_${W_METHOD_TEXT}_kv_${KV_METHOD}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}group_size_${AXIS}axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_${DATASET}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}minseq_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta_${LOSS_FUNC}
 
-# TARGET="w k v"
-TARGET="k v"
+TARGET="w k v"
+# TARGET="k v"
 
 
 N_PROC=1
@@ -96,14 +100,16 @@ ARGS="--gpu_id ${DEVICES} \
 --model_name ${MODEL_NAME} \
 --target ${TARGET} \
 --quant_model_paths ${QMODEL_PATHS} \
+--w_method ${W_METHOD} \
+--kv_method ${KV_METHOD} \
 --w_bits ${W_BITS} \
 --k_bits ${K_BITS} \
 --v_bits ${V_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
 --quant_kv_output \
---k_quant_per ${K_QUANT_PER} \
---v_quant_per ${V_QUANT_PER} \
+--k_quant_scheme ${K_QUANT_SCHEME} \
+--v_quant_scheme ${V_QUANT_SCHEME} \
 --n_sample ${N_SAMPLE} \
 --data_batch_size ${DATA_BATCH_SIZE} \
 --seqlen ${SEQLEN} \
@@ -112,14 +118,12 @@ ARGS="--gpu_id ${DEVICES} \
 --config ${CONFIG} \
 --loss_func ${LOSS_FUNC} \
 --dataset ${DATASET} \
---use_flash \
 --use_key_token \
 --trunc_len ${TRUNC_LEN} \
 --sliding_window ${SLIDING_WINDOW} \
 --alpha ${ALPHA} \
 --beta ${BETA}"
 
-# --method ${METHOD} \
 # --eval_ppl
 # --outlier_bits ${OUTLIER_BITS} \
 # --outlier_path ${OUTLIER_PATH} \

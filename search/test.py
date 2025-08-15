@@ -5,9 +5,9 @@ from utils.data import get_loader
 from utils.eval import get_tokenizer
 from utils.func import load_hqq_model, get_hfmodel
 from utils.loss import compute_longppl, get_key_token_list
-from model.replace import replace_model
+# from model.replace import replace_kv_cache
 
-from datasets import load_dataset
+# from datasets import load_dataset
 
 # model_path = 'meta-llama'
 # model_name = 'Llama-3.1-8B-Instruct'

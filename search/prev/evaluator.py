@@ -2,9 +2,12 @@ import numpy as np
 import math
 from utils.func import *
 from utils.data import get_loader
-from utils.eval import eval_metric, get_logits, get_tokenizer
+from utils.eval import eval_metric, get_logits, eval_zeroshot, get_tokenizer
 from utils.loss import get_key_token_list
-from model.replace import replace_kv_cache 
+from model.replace import replace_model
+
+from model.KIVICache import KIVICacheConfig
+ 
 
 # from model.skip_llama import block_replace
 # from monkeypatch.ftllama_modeling import convert_model_to_ft
@@ -14,7 +17,7 @@ class LlamaEvaluator:
     def __init__(self,  
                  config,
                  accelerator,
-                 method={},
+                 method=[],
                  model_id='',
                  quant_model_paths=[],
                 #  quant_model_bits=[],
@@ -37,8 +40,7 @@ class LlamaEvaluator:
                  quant_kv_output=False,
                  k_quant_scheme='channel',
                  v_quant_scheme='token',
-                 packing=False,
-                #  use_flash=False,
+                 use_flash=False,
                  limit=20,
                  num_fewshot=None,
                  lm_eval_batch_size=1,
@@ -49,7 +51,7 @@ class LlamaEvaluator:
                  trunc_len=512,
                  sliding_window=128,
                  alpha=2,
-                 beta=-2,
+                 beta=-2,                 
                  **kwargs):
         
         # model_id = os.path.join(model_path, model_name)
@@ -57,7 +59,6 @@ class LlamaEvaluator:
         self.model = None
         self.group_size = group_size
         self.tokenizer = get_tokenizer(model_id)
-        n_block = int(config['n_block'])
         # self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
 
         # with accelerator.main_process_first():
@@ -77,7 +78,7 @@ class LlamaEvaluator:
                 self.dense_logits = {dataset: get_logits(model, loader) for dataset, loader in self.train_loaders.items()}
 
             if outlier is not None:
-                for blk_idx in range(n_block):
+                for blk_idx in range(int(config['n_block'])):
                     for linear_group in config['linear']:
                         for linear in linear_group.split(','):
                             key = f'{config["layers"]}.{blk_idx}.{linear}'
@@ -96,43 +97,51 @@ class LlamaEvaluator:
             clean_up()
 
         self.quant_models = list()
-        if 'hqq' in method['w']:
+        if 'hqq' in method:
             self.quant_model_bits = bits['w']
             if quant_model_paths and bits['w']:
                 # with accelerator.main_process_first():
                 self.model = load_hqq_model(quant_model_paths[np.argmax(bits['w'])], device_map, inference)
 
                 if (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
-                    self.model = replace_kv_cache(model=self.model,
-                                                tokenizer=self.tokenizer,
-                                                method=method['kv'],
-                                                n_block=n_block,
-                                                k_quant_scheme=k_quant_scheme,
-                                                v_quant_scheme=v_quant_scheme,
-                                                residual_length=residual_length,
-                                                packing=packing,
-                                                quant_kv_output=quant_kv_output)
+                    self.model.config.k_bits = [max(bits['k'])] * config['n_block']
+                    self.model.config.v_bits = [max(bits['v'])] * config['n_block']
+                    self.model.config.k_group_size = [max(group_size['k'][-1])] * config['n_block']
+                    self.model.config.v_group_size = [max(group_size['v'][-1])] * config['n_block']
+                    self.model.config.use_flash = use_flash
+
+                    self.model.config.residual_length = residual_length 
+                    self.model.config.quant_kv_output = quant_kv_output
+                    self.model.config.k_quant_scheme = k_quant_scheme
+                    self.model.config.v_quant_scheme = v_quant_scheme
+
+                    self.model = replace_model(self.model, self.model.config)
+                                               
 
                 self.remove_linears(self.model, config)
-                self.quant_models = [load_hqq_model(p, device_map) for p in quant_model_paths]                
-        
-        elif 'fp16' in method['w']:
+                self.quant_models = [load_hqq_model(p, device_map) for p in quant_model_paths]
+                
+        elif 'awq' in method or 'gptq' in method or 'owq' in method:
+            pass
+
+        else:
             # self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
             self.model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
             
             if (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
-                self.model = replace_kv_cache(model=self.model,
-                                            tokenizer=self.tokenizer,
-                                            method=method['kv'],
-                                            n_block=n_block,
-                                            k_quant_scheme=k_quant_scheme,
-                                            v_quant_scheme=v_quant_scheme,
-                                            residual_length=residual_length,
-                                            packing=packing,
-                                            quant_kv_output=quant_kv_output)
+                self.model.config.k_bits = [max(bits['k'])] * config['n_block']
+                self.model.config.v_bits = [max(bits['v'])] * config['n_block']
                 
-        elif not ('awq' in method['w'] or 'gptq' in method['w'] or 'qeft' in method['w']):
-            raise NotImplementedError(method['w'])
+                self.model.config.k_group_size = [max(group_size['k'][-1])] * config['n_block']
+                self.model.config.v_group_size = [max(group_size['v'][-1])] * config['n_block']
+                self.model.config.use_flash = use_flash
+
+                self.model.config.residual_length = residual_length 
+                self.model.config.quant_kv_output = quant_kv_output
+                self.model.config.k_quant_scheme = k_quant_scheme
+                self.model.config.v_quant_scheme = v_quant_scheme
+
+                self.model = replace_model(self.model, self.model.config)
 
         # if 'layer_prune' in method and self.model is not None:
         #     self.model = block_replace(self.model)
@@ -169,7 +178,7 @@ class LlamaEvaluator:
 
     def sample(self, arch):
         # self.validate_arch(arch)
-        if 'hqq' in self.method['w'] or 'awq' in self.method['w'] or 'gptq' in self.method['w'] or 'qeft' in self.method['w']:
+        if 'hqq' in self.method or 'awq' in self.method or 'gptq' in self.method or 'owq' in self.method:
             for linear_group, linear_group_bits in arch['w'].items():
                 for blk_idx, bits in enumerate(linear_group_bits):
                     flag = False
@@ -191,24 +200,22 @@ class LlamaEvaluator:
 
                     if not flag:
                         raise NotImplementedError(f'{linear_group}: {linear_group_bits} is not available')
-        
-        if self.method['kv'] == 'hqq':
-            if 'k' in arch:
-                self.model.generation_config.cache_config['k_bits'] = [x[0] for x in arch['k']]
-                self.model.generation_config.cache_config['k_group_size'] = [x[1] for x in arch['k']]
-            if 'v' in arch:
-                self.model.generation_config.cache_config['v_bits'] = [x[0] for x in arch['v']]
-                self.model.generation_config.cache_config['v_group_size'] = [x[1] for x in arch['v']]
-        elif self.method['kv'] == 'kivi':
-            if 'k' in arch:
-                self.model.config.kivi_config.k_bits = [x[0] for x in arch['k']]
-                self.model.config.kivi_config.k_group_size = [x[1] for x in arch['k']]
+                    
+        if 'k' in arch:
+            if type(arch['k'][0]) in [int, float]:
+                self.model.config.k_bits = arch['k']
+            elif type(arch['k'][0]) is list:
+                self.model.config.k_bits = [x[0] for x in arch['k']]
+                self.model.config.k_group_size = [x[1] for x in arch['k']]
 
-            if 'v' in arch:
-                self.model.config.kivi_config.v_bits = [x[0] for x in arch['v']]
-                self.model.config.kivi_config.v_group_size = [x[1] for x in arch['v']]
-        else:
-            raise NotImplementedError(self.method['kv'])
+        if 'v' in arch:
+            if type(arch['v'][0]) in [int, float]:
+                self.model.config.v_bits = arch['v']
+            elif type(arch['v'][0]) is list:
+                self.model.config.v_bits = [x[0] for x in arch['v']]
+                self.model.config.v_group_size = [x[1] for x in arch['v']]
+            else:
+                raise NotImplementedError
         
         return self.model
     
@@ -259,3 +266,19 @@ class LlamaEvaluator:
                 for linear in linear_group.split(','):
                     delsubattr(blk, linear)
         clean_up()
+
+    def eval_woo(self, accelerator, arch, model, metric, loss_func='cross_entropy'):
+        # if metric == 'latency':
+        #     measure_latency(model=self.sample(arch))
+        if metric == 'ppl':
+            loaders = self.test_loaders
+        elif metric == 'loss':
+            loaders = self.train_loaders
+        else:
+            raise NotImplementedError(f"metric should be 'ppl' or 'loss', not {metric}")
+        metric_list = dict()
+        for dataset, loader in loaders.items():
+            metric_list[dataset] = eval_metric(model=model, accelerator=accelerator, metric=metric, loader=loader, seqlen=self.seqlen, loss_func=loss_func, dense_logits_list=self.dense_logits[dataset])
+        complexity = get_net_info(arch, self.config, self.latency_table)
+        # torch.cuda.empty_cache()
+        return metric_list, complexity
