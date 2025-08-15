@@ -117,7 +117,8 @@ def find_key_token(text, evaluator_model, evaluator_tokenizer, trunc_len, slidin
             # loss_full = loss_f(output_full.logits[0, start_token+trunc_len-1: start_token+trunc_len+sliding_window-1, :], input_ids[0, start_token+trunc_len: start_token+trunc_len+sliding_window])
             # loss_short = loss_f(output_short.logits[0, trunc_len-1: trunc_len+sliding_window-1, :], input_ids_short[0, trunc_len: trunc_len+sliding_window])
 
-            loss_discrepancy = (torch.logical_and((loss_short - loss_full) > alpha, loss_full < (beta * -1))).squeeze()
+            # loss_discrepancy = (torch.logical_and((loss_short - loss_full) > alpha, loss_full < (beta * -1))).squeeze()
+            loss_discrepancy = (torch.logical_and((loss_short - loss_full) > alpha, loss_full < (beta * -1))).flatten()
 
             for i, is_key in enumerate(loss_discrepancy):
                 if is_key:
