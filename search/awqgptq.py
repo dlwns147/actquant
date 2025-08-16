@@ -18,8 +18,8 @@ from utils.func import init_accelerator, clean_up, process_dtype, get_net_info
 from utils.eval import measure_latency, eval_zeroshot
 from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
-from quant.model import get_quantized_model
-from model.replace import replace_model
+# from quant.model import get_quantized_model
+# from model.replace import replace_model
 import warnings
 from time import time
 warnings.simplefilter("ignore")
@@ -81,8 +81,8 @@ def main(args):
     model_id = f'{args.model_path}/{args.model_name}'
     dtype = process_dtype(args.dtype)
 
-    use_awq_or_gptq = 'awq' in args.method or 'gptq' in args.method
-    method = 'awq' if 'awq' in args.method else 'gptq' if 'gptq' in args.method else None
+    # use_awq_or_gptq = 'awq' in args.w_method or 'gptq' in args.w_method
+    # method = 'awq' if 'awq' in args.method else 'gptq' if 'gptq' in args.method else None
     bits = {'w': [args.w_bits]}
     if args.k_bits is not None:
         bits['k'] = [args.k_bits]
@@ -91,15 +91,14 @@ def main(args):
         
     group_size = {'w': args.w_group_size, 'k': [[args.k_group_size]], 'v': [[args.v_group_size]]}
     
-    if use_awq_or_gptq:
-        args.quant_model_bits = []
+    if 'hqq' not in args.w_method:
         args.quant_model_paths = []
 
     evaluator = LlamaEvaluator(
         config,
         accelerator=accelerator,
         model_id=model_id,
-        method=args.method,
+        method={'w': args.w_method, 'kv': args.kv_method},
         quant_model_paths=args.quant_model_paths,
         outlier=torch.load(args.outlier_path) if args.outlier_path else None,
         seqlen=args.seqlen,
@@ -110,9 +109,9 @@ def main(args):
         dtype=dtype,
         group_size=group_size,
         residual_length=args.residual_length,
-        use_flash=args.use_flash,
-        k_quant_per=args.k_quant_per,
-        v_quant_per=args.v_quant_per,
+        # use_flash=args.use_flash,
+        k_quant_scheme=args.k_quant_scheme,
+        v_quant_scheme=args.v_quant_scheme,
     )
 
     arch = dict()
@@ -124,40 +123,30 @@ def main(args):
         arch['v'] = [[args.v_bits, args.v_group_size]] * config['n_block']
     accelerator.print(arch)
     
-    w_bits = np.concatenate(list(arch['w'].values()))
-    do_owq = ((w_bits - w_bits.astype(int)).sum() != 0)
-    print(f'do_owq : {do_owq}, use_awq_or_gptq : {use_awq_or_gptq}')
-    if use_awq_or_gptq:
-        model = get_quantized_model(method, arch, model_id, device_map, config=config, group_size=args.w_group_size, dtype=dtype, do_owq=do_owq, owq_path=args.outlier_path, clip_asym=args.clip_asym)
-        if (args.k_bits < 16 and args.v_bits < 16):
-            model.config.k_bits = [x[0] for x in arch['k']]
-            model.config.v_bits = [x[0] for x in arch['v']]
-            model.config.k_group_size = [x[1] for x in arch['k']]
-            model.config.v_group_size = [x[1] for x in arch['v']]
-            
-            model.config.use_flash = args.use_flash
-            model.config.residual_length = args.residual_length 
-            model.config.quant_kv_output = args.quant_kv_output
-            model.config.k_quant_per = args.k_quant_per
-            model.config.v_quant_per = args.v_quant_per
-
-            model = replace_model(model, model.config)
-    else:
-        model = evaluator.sample(arch)
+    model = evaluator.sample(arch)
 
     if args.datasets:
-        model.config.residual_length = 0
+        if args.kv_method == 'kivi':
+            model.config.kivi_config.residual_length = 0
+        elif args.kv_method == 'hqq':
+            model.generation_config.cache_config = 0
         model.config.quant_kv_output = True
-        use_cache = model.config.use_cache
         model.config.use_cache = False
 
         metric, complexity = evaluator.eval(arch=arch, metric='ppl', model=model, accelerator=accelerator)
         # accelerator.print(arch)
-        print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}\n')
-        model.config.use_cache = use_cache
+        print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}')
 
     if args.pass_key_file:
+        clean_up()
+        # model.config.residual_length = args.residual_length
+        if args.kv_method == 'kivi':
+            model.config.kivi_config.residual_length = args.residual_length
+        elif args.kv_method == 'hqq':
+            model.generation_config.cache_config = args.residual_length
         model.config.quant_kv_output = False
+        model.config.use_cache = True
+        
         # method_name = f"K{config.k_bits}V{config.v_bits} KiVi"
         print( "-----------------------------------" )
         enc = get_tokenizer(model_id)
@@ -187,8 +176,13 @@ def main(args):
     
     if args.zeroshot:
         clean_up()
-        model.config.residual_length = args.residual_length
+        # model.config.residual_length = args.residual_length
+        if args.kv_method == 'kivi':
+            model.config.kivi_config.residual_length = args.residual_length
+        elif args.kv_method == 'hqq':
+            model.generation_config.cache_config = args.residual_length
         model.config.quant_kv_output = False
+        model.config.use_cache = True
         
         results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks, batch_size=args.lm_eval_batch_size, num_fewshot=args.num_fewshot)
         
@@ -218,6 +212,14 @@ def main(args):
 
     if args.long_bench:
         clean_up()
+        # model.config.residual_length = args.residual_length
+        if args.kv_method == 'kivi':
+            model.config.kivi_config.residual_length = args.residual_length
+        elif args.kv_method == 'hqq':
+            model.generation_config.cache_config = args.residual_length
+        model.config.quant_kv_output = False
+        model.config.use_cache = True
+        
         long_bench_start = time()
         pred_long_bench(model, tokenizer=get_tokenizer(model_id), save_path=args.long_bench_result_path, long_bench_config=args.long_bench_config, e=args.long_bench_e)
         eval_long_bench(args.long_bench_result_path, args.long_bench_e)
@@ -232,38 +234,9 @@ def main(args):
         with open(os.path.join(args.long_bench_result_path, "pred_e" if args.long_bench_e else "pred", 'result.txt'), 'w') as f:
             for sentence in sentences:
                 f.write(sentence)
-        
-    if use_awq_or_gptq:
-        del model
-        clean_up()
 
     print(args)
-    exit()
-
-    sentences = []
-    for k, v in vars(args).items():
-        sentences.append(f"{k}: {v}\n")
-    sentences.append("\n")
-    for a, c, p in zip(arch_list, complexity_list, ppl_list):
-        sentences.append(f"arch: {a}, bits: {c:.4f}, ppl: {p}\n")
-
-    with open(os.path.join(args.save, args.results_file), 'w') as f:
-        for sentence in sentences:
-            f.write(sentence)
-
-    with open(os.path.join(args.save, args.results_csv_file), 'w') as f:
-        writer = csv.writer(f)
-        writer.writerow(['arch', 'bits', 'params', 'sparsity', 'metric', 'latency'] + args.datasets)
-        for a, b, p, s, m, l, ppl in zip(arch_list, bits_list, param_list, sparsity_list, metric_list, latency_list, ppl_list):
-            writer.writerow([a, b, p, s, m, l] + list(ppl.values()))
-
-    with open(os.path.join(args.save, args.results_arch_file), 'w') as f:
-        json.dump({'archive': [[a, c, p] for a, c, p in zip(arch_list, complexity_list, ppl_list)]}, f, ensure_ascii=False, indent=4)
-
     return
-
-
-
 
 
 if __name__ == '__main__':
@@ -281,6 +254,11 @@ if __name__ == '__main__':
     # parser.add_argument('--group_size', type=int, default=128,
     #                     help='')
     
+    parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
+                        help='')
+    parser.add_argument('--kv_method', type=str, default='kivi', choices=['hqq', 'kivi'],
+                        help='')
+    
     parser.add_argument('--w_bits', type=int, default=4, 
                         help='')
     parser.add_argument('--k_bits', type=int, default=None, 
@@ -296,13 +274,13 @@ if __name__ == '__main__':
                         help='')
     
     parser.add_argument('--quant_kv_output', action='store_true', help='')
-    parser.add_argument('--k_quant_per', type=str, choices=['channel', 'token'], 
+    parser.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
-    parser.add_argument('--v_quant_per', type=str, choices=['channel', 'token'], 
+    parser.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
     parser.add_argument('--residual_length', type=int, default=128, 
                         help='')
-    parser.add_argument('--use_flash', action='store_true', help='')
+    # parser.add_argument('--use_flash', action='store_true', help='')
 
 
     parser.add_argument('--clip_asym', action='store_true', help='')
@@ -314,10 +292,8 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--gpu_id', type=str, default='0',
                         help='id of available gpus')
-    parser.add_argument('--method', type=str, nargs='+', default=[],
-                        help='')
-    parser.add_argument('--quant_model_bits', type=float, nargs='+', default=[], 
-                        help='')
+    # parser.add_argument('--method', type=str, nargs='+', default=[],
+    #                     help='')
     parser.add_argument('--quant_model_paths', type=str, nargs='+', default=[], 
                         help='')
     parser.add_argument('--save', type=str, default='.tmp',

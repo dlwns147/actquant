@@ -172,10 +172,9 @@ def main(args):
         print(f'Selected arch[{idx}] {args.comp_obj}: {pf[idx, 1:].tolist()}, metric: {pf[idx, 0].item():.4f}')
 
     model_id = f'{args.model_path}/{args.model_name}'
-    use_awq_gptq_owq = 'awq' in args.w_method or 'gptq' in args.w_method or 'owq' in args.w_method
+    # use_awq_gptq_owq = 'awq' in args.w_method or 'gptq' in args.w_method or 'owq' in args.w_method
     
-    if use_awq_gptq_owq:
-        args.quant_model_bits = []
+    if 'hqq' not in args.w_method:
         args.quant_model_paths = []
 
     evaluator = LlamaEvaluator(
@@ -193,7 +192,7 @@ def main(args):
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
         group_size=group_size,
         residual_length=args.residual_length,
-        use_flash=args.use_flash,
+        # use_flash=args.use_flash,
         k_quant_scheme=args.k_quant_scheme,
         v_quant_scheme=args.v_quant_scheme,
     )
@@ -205,9 +204,9 @@ def main(args):
         # arch['linear'] = {linear: [4] * config['n_block'] for linear in config['linear']}
         accelerator.print(arch)
         
-        weight_bits = np.concatenate(list(arch['w'].values()))
-        do_owq = ((weight_bits - weight_bits.astype(int)).sum() != 0)
-        print(f'do_owq : {do_owq}, use_awq_gptq_owq : {use_awq_gptq_owq}')
+        # weight_bits = np.concatenate(list(arch['w'].values()))
+        # do_owq = ((weight_bits - weight_bits.astype(int)).sum() != 0)
+        # print(f'do_owq : {do_owq}, use_awq_gptq_owq : {use_awq_gptq_owq}')
         # if use_awq_gptq_owq:
         #     w_method = 'awq' if 'awq' in args.w_method else 'gptq' if 'gptq' in args.w_method else 'owq' if 'owq' in args.w_method else None
         #     evaluator.model = get_quantized_model(w_method, arch, model_id, device_map, dtype=dtype, config=config, do_owq=do_owq, owq_path=args.outlier_path)
@@ -316,11 +315,7 @@ def main(args):
             with open(os.path.join(args.long_bench_result_path, "pred_e" if args.long_bench_e else "pred", 'result.txt'), 'w') as f:
                 for sentence in sentences:
                     f.write(sentence)
-        
-        if use_awq_gptq_owq:
-            del model
-            clean_up()
-
+                    
     print(args)
     return
 
@@ -420,7 +415,7 @@ if __name__ == '__main__':
     
     parser.add_argument('--residual_length', type=int, default=128, 
                         help='')
-    parser.add_argument('--use_flash', action='store_true', help='')
+    # parser.add_argument('--use_flash', action='store_true', help='')
 
     parser.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
