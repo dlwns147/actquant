@@ -217,8 +217,12 @@ def main(args):
             
         print(f'Selected arch[{idx}] {args.comp_obj}: {pf[idx, 1:]}, metric: {pf[idx, 0]:.4f}')
         if args.datasets:
-            model.config.residual_length = 0
+            if args.kv_method == 'kivi':
+                model.config.kivi_config.residual_length = 0
+            elif args.kv_method == 'hqq':
+                model.generation_config.cache_config = 0
             model.config.quant_kv_output = True
+            model.config.use_cache = False
 
             metric = evaluator.eval(arch=arch, metric='ppl', model=model, accelerator=accelerator)[0] if args.datasets else 0
             complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
@@ -226,7 +230,15 @@ def main(args):
             print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}')
 
         if args.pass_key_file:
+            clean_up()
+            # model.config.residual_length = args.residual_length
+            if args.kv_method == 'kivi':
+                model.config.kivi_config.residual_length = args.residual_length
+            elif args.kv_method == 'hqq':
+                model.generation_config.cache_config = args.residual_length
             model.config.quant_kv_output = False
+            model.config.use_cache = True
+            
             # method_name = f"K{config.k_bits}V{config.v_bits} KiVi"
             print( "-----------------------------------" )
             enc = get_tokenizer(model_id)
@@ -255,8 +267,13 @@ def main(args):
         
         if args.zeroshot:
             clean_up()
-            model.config.residual_length = args.residual_length
+            # model.config.residual_length = args.residual_length
+            if args.kv_method == 'kivi':
+                model.config.kivi_config.residual_length = args.residual_length
+            elif args.kv_method == 'hqq':
+                model.generation_config.cache_config = args.residual_length
             model.config.quant_kv_output = False
+            model.config.use_cache = True
             
             results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks, batch_size=args.lm_eval_batch_size)
             
@@ -275,8 +292,14 @@ def main(args):
         
         if args.long_bench:
             clean_up()
-            model.config.residual_length = args.residual_length
+            # model.config.residual_length = args.residual_length
+            if args.kv_method == 'kivi':
+                model.config.kivi_config.residual_length = args.residual_length
+            elif args.kv_method == 'hqq':
+                model.generation_config.cache_config = args.residual_length
             model.config.quant_kv_output = False
+            model.config.use_cache = True
+            
             # if len(args.long_bench_task) == 0 and not args.long_bench_task_e:
             #     args.long_bench_task = []
             long_bench_start = time()

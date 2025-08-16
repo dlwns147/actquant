@@ -186,7 +186,10 @@ ARGS="--gpu_id ${DEVICES} \
 --datasets ${DATASETS} \
 --zeroshot \
 --tasks ${TASKS} \
---lm_eval_batch_size ${LM_EVAL_BATCH_SIZE}"
+--lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
+--long_bench \
+--long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
+--long_bench_config ${LONG_BENCH_CONFIG}"
 for g in "${K_GROUP_SIZE[@]}"
 do
     ARGS+=" --k_group_size ${g} "
@@ -199,9 +202,6 @@ done
 
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} post_search.py ${ARGS}
 
-# --long_bench \
-# --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
-# --long_bench_config ${LONG_BENCH_CONFIG}
 
 # --pass_key_file ${PASS_KEY_FILE} \
 # --long_bench_e

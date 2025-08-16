@@ -60,3 +60,43 @@ def replace_kv_cache(model,
         model.generation_config.pad_token_id = tokenizer.eos_token_id
 
     return model
+
+def set_cache_config(model,
+                    method='kivi',
+                    arch=None,
+                    n_block=-1,
+                    k_quant_scheme='channel',
+                    v_quant_scheme='token',
+                    residual_length=128,
+                    packing=False,
+                    quant_kv_output=False):
+    
+    if method == 'hqq':
+        model.config.cache_implementation = 'HQQ'
+        model.generation_config.cache_implementation = "quantized"
+        model.generation_config.cache_config = {
+            'backend': 'HQQ',
+            'k_bits': [16] * n_block,
+            'v_bits': [16] * n_block,
+            'k_group_size': [0] * n_block,
+            'v_group_size': [0] * n_block,  
+
+            'k_quant_scheme': k_quant_scheme,
+            'v_quant_scheme': v_quant_scheme,
+            'residual_length': residual_length,
+        }
+    elif method == 'kivi':
+        model.config.kivi_config = KIVICacheConfig(
+            k_bits=[16] * n_block,
+            v_bits=[16] * n_block,
+            k_group_size=[0] * n_block,
+            v_group_size=[0] * n_block,
+            k_quant_scheme=k_quant_scheme,
+            v_quant_scheme=v_quant_scheme,
+            residual_length=residual_length,
+            packing=packing,
+        )
+    else:
+        raise NotImplementedError(f"Unsupported kv cache method: {method}")
+    model.config.quant_kv_output = quant_kv_output
+    return model

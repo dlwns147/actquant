@@ -53,7 +53,8 @@ def build_chat(tokenizer, prompt, model_name):
     # For results in KIVI paper (Llama, Llama-Chat, Mistral-7B-v0.1), we do not apply any special treatment to the prompt.
     # For lmsys/longchat-7b-v1.5-32k and mistralai/Mistral-7B-Instruct-v0.2, we need to rewrite the prompt a little bit.
     # Update: we add the template for the new llama-3-instruct model
-    if "llama-3" in model_name.lower() and "instruct" in model_name.lower():
+    # if "llama-3" in model_name.lower() and "instruct" in model_name.lower():
+    if "instruct" in model_name.lower():
         messages = [
             {"role": "user", "content": prompt},
         ]
@@ -64,19 +65,19 @@ def build_chat(tokenizer, prompt, model_name):
         conv.append_message(conv.roles[0], prompt)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
-    elif "mistral-v0.2-instruct" in model_name.lower():
-        messages = [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    else:
-        messages = [
-            {"role": "user", "content": prompt},
-        ]
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    # elif "mistral-v0.2-instruct" in model_name.lower():
+    #     messages = [
+    #         {
+    #             "role": "user",
+    #             "content": prompt
+    #         }
+    #     ]
+    #     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    # else:
+    #     messages = [
+    #         {"role": "user", "content": prompt},
+    #     ]
+    #     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         
     return prompt
 
