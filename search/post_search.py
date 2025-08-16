@@ -274,6 +274,9 @@ def main(args):
             print(f'total_result: {total_result}')
         
         if args.long_bench:
+            clean_up()
+            model.config.residual_length = args.residual_length
+            model.config.quant_kv_output = False
             # if len(args.long_bench_task) == 0 and not args.long_bench_task_e:
             #     args.long_bench_task = []
             long_bench_start = time()
