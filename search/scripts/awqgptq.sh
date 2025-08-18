@@ -91,7 +91,7 @@ LM_EVAL_BATCH_SIZE=32
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${METHOD}_${BITS}
 SAVE=save/result/${TODAY}_test
 
-LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_pure_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
+LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONG_BENCH_CONFIG=utils/long_bench_config
 
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl

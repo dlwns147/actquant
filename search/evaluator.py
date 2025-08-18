@@ -205,7 +205,15 @@ class LlamaEvaluator:
                     
         elif 'awq' in self.method['w'] or 'gptq' in self.method['w'] or 'qeft' in self.method['w']:
             w_method = 'awq' if 'awq' in self.method['w'] else 'gptq' if 'gptq' in self.method['w'] else 'qeft' if 'qeft' in self.method['w'] else None
-            self.model = get_quantized_model(w_method, arch, self.model_id, self.device_map, dtype=self.dtype, config=self.config, do_owq='qeft' in self.method['w'], owq_path=self.outlier)
+            self.model = get_quantized_model(method=w_method,
+                                             arch=arch,
+                                             model_name=self.model_id,
+                                             device_map=self.device_map,
+                                             group_size=self.group_size['w'],
+                                             dtype=self.dtype,
+                                             config=self.config,
+                                             do_owq='qeft' in self.method['w'],
+                                             owq_path=self.outlier)
             # self.model = get_hfmodel(self.model_id, self.device_map, self.dtype, use_cache=False)
             self.model.eval()
             # if (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):

@@ -85,11 +85,13 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 # COMP_OBJ=(kvbits)
 # COMP_OBJ_VAL=(3.0)
 # COMP_OBJ_THRESHOLD=0.005
+# N_TOKEN=1024
 
 COMP_OBJ=(memory)
 
-COMP_OBJ_VAL=(5878849536)
-COMP_OBJ_VAL=(5862072320)
+# COMP_OBJ_VAL=(5878849536)
+# COMP_OBJ_VAL=(5862072320)
+COMP_OBJ_VAL=(4134019072)
 N_TOKEN=1024
 
 # COMP_OBJ_VAL=(42350419968)
@@ -107,7 +109,11 @@ MAX_COMP_OBJ_LIST=()
 for IDX in "${!COMP_OBJ[@]}"
 do
     PREFER_LIST+=( "${COMP_OBJ[$IDX]}#${COMP_OBJ_VAL[$IDX]}" )
-    MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
+    if [ "${COMP_OBJ[$IDX]}" == "memory" ]; then
+        MIN_COMP_OBJ_LIST+=( 0 )
+    elif [ "${COMP_OBJ[$IDX]}" == "kvbits" ]; then
+        MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
+    fi
     MAX_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} + $COMP_OBJ_THRESHOLD" | bc) )
 done
 
@@ -128,8 +134,9 @@ LM_EVAL_BATCH_SIZE=32
 
 EXPR_FOLDER=save/search/quant
 
+EXPR_FILE=2508171741_Llama-3.1-8B-Instruct_memory_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k234v234bits_w128k64128x3v64128x3gs_0res_len_k_channel_v_token_obj_1_1e99_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_1024token_rbf_256trunc_64sw/iter_200.stats
 # EXPR_FILE=2508151038_Llama-3.1-8B-Instruct_kv_loss_w_fp16_kv_kivi_iter_100_n_iter_30_w16k234v234bits_w-1k64128x3v64128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0minseq_1024token_rbf_256trunc_64sw_2alpha_-2beta/iter_23.stats
-EXPR_FILE=2507191514_Llama-3.1-8B-Instruct_memory_loss_hqq_iter_200_n_iter_50_w234k24v24bits_w128k3264128x2v3264128x2gs_128res_len_k_channel_v_token_obj_1_1e99_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_0minseq_1024token_rbf/iter_200.stats
+# EXPR_FILE=2507191514_Llama-3.1-8B-Instruct_memory_loss_hqq_iter_200_n_iter_50_w234k24v24bits_w128k3264128x2v3264128x2gs_128res_len_k_channel_v_token_obj_1_1e99_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_0minseq_1024token_rbf/iter_200.stats
 # EXPR_FILE=2507191514_Llama-3.1-8B-Instruct_memory_loss_hqq_iter_200_n_iter_50_w234k24v24bits_w128k3264128x2v3264128x2gs_128res_len_k_channel_v_token_obj_1_1e99_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_0minseq_1048576token_rbf/iter_200.stats
 # EXPR_FILE=2506030600_Llama-3.1-8B-Instruct_kv_loss_hqq_iter_50_n_iter_50_w16k24v24bits_w128k3264128128v3264128128gs_0res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_32sample_rbf/iter_27.stats
 
