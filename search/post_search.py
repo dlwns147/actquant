@@ -111,7 +111,6 @@ def main(args):
         for i in range(n_comp_obj):
             flag = np.logical_and(flag, np.logical_and(F[:, i + 1] >= args.comp_obj_min[i], F[:, i + 1] <= args.comp_obj_max[i]))
         range_idx = np.argwhere(flag).flatten()
-        import pdb; pdb.set_trace()
         print(f'range_idx : {len(range_idx)}')
         
         pf = F[range_idx, :]
