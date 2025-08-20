@@ -117,8 +117,9 @@ COMP_OBJ_MIN_TEXT=1
 COMP_OBJ_MAX=1e99
 COMP_OBJ_MAX_TEXT=1e99
 
-N_TOKEN=1024
-# N_TOKEN=1048576
+# N_TOKEN=1024
+# N_TOKEN=131072
+N_TOKEN=1048576
 
 QMODEL_PATHS_LIST=()
 for B in ${W_BITS}
@@ -138,8 +139,8 @@ OUTLIER_TEXT=234
 N_OUTLIER=32
 OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.pth
 
-LOSS_FUNC=cross_entropy
-# LOSS_FUNC=jsd
+# LOSS_FUNC=cross_entropy
+LOSS_FUNC=jsd
 
 
 # PREDICTOR=mlp
@@ -161,7 +162,8 @@ MIN_SEQLEN=0
 # MIN_SEQLEN=0
 # # MIN_SEQLEN=192
 
-N_DOE=300
+# N_DOE=400
+N_DOE=500
 ITER=200
 N_ITER=50
 
@@ -215,7 +217,7 @@ SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_${W_METHOD_TEXT}_kv_${KV_METHOD}_w${W_BITS_TEXT}k24v24bits_w${W_GROUP_SIZE}k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_${SEQLEN}seqlen_${MIN_SEQLEN}minseq_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta_${LOSS_FUNC}/loss
 
 
-
+# SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_w_${W_METHOD_TEXT}_kv_${KV_METHOD}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${DATA_BATCH_SIZE}bs_${N_SAMPLE}sample_${SEQLEN}seq_${MIN_SEQLEN}min_${N_TOKEN}token_${PREDICTOR}
 SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_w_${W_METHOD_TEXT}_kv_${KV_METHOD}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${DATA_BATCH_SIZE}bs_${N_SAMPLE}sample_${SEQLEN}seq_${MIN_SEQLEN}min_${N_TOKEN}token_${PREDICTOR}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw #_${ALPHA}alpha_${BETA}beta
 # SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${W_METHOD_TEXT}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}_${LM_EVAL_BATCH_SIZE}bs_${LIMIT}limit_${NUM_FEWSHOT}few
 # SAVE=save/search/quant/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_${W_METHOD_TEXT}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}k${K_BITS_TEXT}v${V_BITS_TEXT}bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE}v${V_GROUP_SIZE}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${N_SAMPLE}sample_${PREDICTOR}_${OUTLIER_TEXT}
@@ -270,13 +272,13 @@ ARGS="--gpu_id ${DEVICES} \
 --limit ${LIMIT} \
 --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
 --verbosity ${VERBOSITY} \
---num_fewshot ${NUM_FEWSHOT} \
---use_key_token \
---trunc_len ${TRUNC_LEN} \
---sliding_window ${SLIDING_WINDOW} \
---alpha ${ALPHA} \
---beta ${BETA}"
-
+--num_fewshot ${NUM_FEWSHOT}"
+#  \
+# --use_key_token \
+# --trunc_len ${TRUNC_LEN} \
+# --sliding_window ${SLIDING_WINDOW} \
+# --alpha ${ALPHA} \
+# --beta ${BETA}
 for g in "${K_GROUP_SIZE[@]}"
 do
     ARGS+=" --k_group_size ${g} "

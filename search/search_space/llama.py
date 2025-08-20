@@ -461,23 +461,31 @@ class LlamaGroupSizeSearchSpace:
     def initialize(self, n_doe, pool=[]):
         # sample one arch with least (lb of hyperparameters) and most complexity (ub of hyperparameters)
         data = []
-        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        if len(self.comp_obj) > 1:
-            data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-            n_doe -= 1
-            data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-            n_doe -= 1
+        for w_option in getattr(self, f'{self.config["linear"][0].split(".")[-1]}_option'):
+            for k_option in self.k_option:
+                for v_option in self.v_option:
+                    data.append(self.sample(w=[[w_option] for _ in self.config['linear']], k=[k_option], v=[v_option])[0])
+                    n_doe -= 1
+
+        # data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # if len(self.comp_obj) > 1:
+        #     data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        #     n_doe -= 1
+        #     data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        #     n_doe -= 1
         
         # for w_bits in self.q_proj_option:
         #     data.append(self.sample(w=[[w_bits]] * self.n_linear, k=[min(self.k_option)], v=[min(self.v_option)])[0])
