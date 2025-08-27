@@ -30,9 +30,10 @@ W_METHOD="hqq"
 W_METHOD_TEXT="hqq"
 W_BITS="4"
 W_BITS_TEXT="4"
+W_GROUP_SIZE=128
 # W_BITS="2 3 4"
 # W_BITS_TEXT="234"
-W_GROUP_SIZE=128
+# W_GROUP_SIZE=128
 
 # W_METHOD="fp16"
 # W_METHOD_TEXT="fp16"
@@ -378,4 +379,3 @@ ${ARGS}
 # COMP_OBJ_MAX_TEXT="555"
 
 # --iqr_threshold ${IQR_THRESHOLD} \
-                   
