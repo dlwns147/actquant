@@ -3,48 +3,30 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 
+# class JSD(nn.Module):
+#     def __init__(self, reduction='batchmean'):
+#         super(JSD, self).__init__()
+#         self.kl = nn.KLDivLoss(reduction=reduction, log_target=True)
+
+#     def forward(self, p: torch.tensor, q: torch.tensor):
+#         p, q = p.log_softmax(-1), q.log_softmax(-1)
+#         m = (0.5 * (p + q))
+#         return 0.5 * (self.kl(m, p) + self.kl(m, q))
+
 class JSD(nn.Module):
-    def __init__(self, reduction='batchmean'):
+    def __init__(self, reduction='batchmean', eps=1e-12):
         super(JSD, self).__init__()
         self.kl = nn.KLDivLoss(reduction=reduction, log_target=True)
+        self.eps = eps
 
     def forward(self, p: torch.tensor, q: torch.tensor):
-        p, q = p.log_softmax(-1), q.log_softmax(-1)
-        m = (0.5 * (p + q))
-        return 0.5 * (self.kl(m, p) + self.kl(m, q))
-
-class KLD(nn.Module):
-    def __init__(self, reduction='batchmean'):
-        super(KLD, self).__init__()
-        self.kl = nn.KLDivLoss(reduction=reduction, log_target=True)
-
-    def forward(self, p: torch.tensor, q: torch.tensor, ):
-        p, q = p.log_softmax(-1), q.log_softmax(-1)
-        return self.kl(p, q)
-
-class LongCrossEntropyLoss(nn.Module):
-    def __init__(self, reduction='batchmean', ignore_idx=-100):
-        self.func = nn.CrossEntropyLoss(reduction=reduction, ingnore_idx=ignore_idx)
-        
-    def forward(self, p: torch.tensor, q: torch.tensor):
-        return self.func(p, q)
-    
-class LongJSD(nn.Module):
-    def __init__(self, reduction='batchmean'):
-        super(JSD, self).__init__()
-        self.kl = nn.KLDivLoss(reduction=reduction, log_target=True)
-
-    def forward(self, p: torch.tensor, q: torch.tensor):
-        p, q = p.log_softmax(-1), q.log_softmax(-1)
-        m = (0.5 * (p + q))
-        return 0.5 * (self.kl(m, p) + self.kl(m, q))
-    
+        m = (0.5 * (p.softmax(-1) + q.softmax(-1))).clamp_min(self.eps).log()
+        return 0.5 * (self.kl(m, p.log_softmax(-1)) + self.kl(m, q.log_softmax(-1)))
 
 def TopK(p: torch.tensor, q: torch.tensor, k: int):
     p_topk, q_topk = p.topk(k, dim=-1, largest=True), q.topk(k, dim=-1, largest=True)
     pq = torch.cat((p_topk, q_topk), dim=-1)
     union, counts = pq.unique(dim=-1, return_inverse=False, return_counts=True)
-    import pdb; pdb.set_trace()
     intersection = pq[torch.where(counts.gt(1))]
     return (intersection / union).mean()
 
