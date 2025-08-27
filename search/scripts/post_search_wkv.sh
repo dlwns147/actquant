@@ -80,9 +80,9 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 
 COMP_OBJ=(wbits kvbits)
 COMP_OBJ_TEXT="wkv"
-COMP_OBJ_VAL=(3 3)
+COMP_OBJ_VAL=(3 3.25)
 # COMP_OBJ_VAL=(3 4.25)
-# COMP_OBJ_VAL=(4.25 3)
+# COMP_OBJ_VAL=(4.25 3.25)
 COMP_OBJ_THRESHOLD=0.005
 
 # COMP_OBJ=(kvbits)
@@ -249,4 +249,4 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 # do
 #     # QMODEL_PATHS+=( "/SSD/awq/${MODEL_NAME}_w${B}_g${GROUP_SIZE}_fake_${SCALE_BITS}bit_awq.pt" )
 #     QMODEL_PATHS+=( "/SSD/awq/${MODEL_NAME}_w${B}_g${GROUP_SIZE}_fake_${SCALE_BITS}scale_asym.pt" )
-# done      
+# done
