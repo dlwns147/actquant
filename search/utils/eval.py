@@ -7,7 +7,7 @@ import gc
 import torch
 import torch.nn as nn
 from .data import *
-from .loss import JSD, KLD, TopK
+from .loss import JSD, TopK
 
 
 # Function to evaluate perplexity (ppl) on a specified model and tokenizer
