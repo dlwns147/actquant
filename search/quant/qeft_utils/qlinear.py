@@ -6,6 +6,9 @@ import os
 # from qeft_utils.reorder import sparse_to_dense_ids
 from .reorder import sparse_to_dense_ids
 
+import warnings
+warnings.simplefilter("ignore")
+
 try:
     import qeft_cuda
 except:

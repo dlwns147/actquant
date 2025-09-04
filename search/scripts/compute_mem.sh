@@ -1,7 +1,7 @@
-# MODEL_PATH=/SSD/huggingface/meta-llama
-# MODEL_NAME=Llama-3.1-8B-Instruct
-# DTYPE=float16
-# CONFIG=config/llama.json
+MODEL_PATH=/SSD/huggingface/meta-llama
+MODEL_NAME=Llama-3.1-8B-Instruct
+DTYPE=float16
+CONFIG=config/llama.json
 
 # MODEL_PATH=/SSD/huggingface/Qwen
 # # MODEL_NAME=Qwen2.5-7B-Instruct
@@ -10,11 +10,11 @@
 # DTYPE=float16
 # CONFIG=config/qwen2.json
 
-MODEL_PATH=/SSD/huggingface/mistralai
-MODEL_NAME=Mistral-7B-Instruct-v0.3
-# DTYPE=bfloat16
-DTYPE=float16
-CONFIG=config/mistral.json
+# MODEL_PATH=/SSD/huggingface/mistralai
+# MODEL_NAME=Mistral-7B-Instruct-v0.3
+# # DTYPE=bfloat16
+# DTYPE=float16
+# CONFIG=config/mistral.json
 
 # # W_BITS=2
 # W_BITS=3
@@ -51,8 +51,8 @@ RESIDUAL_LENGTH=128
 # N_TOKEN=1024
 # N_TOKEN=1048576
 
-# N_TOKEN_LIST=(1024 131072 1048576)
-N_TOKEN_LIST=(131072)
+N_TOKEN_LIST=(1024 131072 1048576)
+# N_TOKEN_LIST=(131072)
 
 # W_BITS_LIST=(4 3 2)
 # W_GROUP_SIZE=128

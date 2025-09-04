@@ -14,7 +14,7 @@ import numpy as np
 #         return 0.5 * (self.kl(m, p) + self.kl(m, q))
 
 class JSD(nn.Module):
-    def __init__(self, reduction='batchmean', eps=1e-12):
+    def __init__(self, reduction='batchmean', eps=1e-7):
         super(JSD, self).__init__()
         self.kl = nn.KLDivLoss(reduction=reduction, log_target=True)
         self.eps = eps

@@ -30,10 +30,10 @@ CONFIG=config/llama.json
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
 
-# W_METHOD=hqq
-# W_METHOD_TEXT=hqq
-W_METHOD=awq
-W_METHOD_TEXT=awq
+W_METHOD=hqq
+W_METHOD_TEXT=hqq
+# W_METHOD=awq
+# W_METHOD_TEXT=awq
 # W_METHOD="awq layer_prune"
 # W_METHOD_TEXT=awq_layer_prune
 # W_METHOD=fp16
@@ -70,7 +70,7 @@ QMODEL_PATHS_LIST=()
 for B in ${W_BITS}
 do
     # QMODEL_PATHS_LIST+=( "/SSD/hqq/${MODEL_NAME}_${B}bit_${GROUP_SIZE}gs_${AXIS}axis_qscale_${QSCALE}_qzero_${QZERO}" )
-    QMODEL_PATHS_LIST+=( "/SSD/hqq/${MODEL_NAME}_${B}bit_${GROUP_SIZE}gs_${AXIS}axis_${DTYPE}" )
+    QMODEL_PATHS_LIST+=( "/SSD/hqq/${MODEL_NAME}_${B}bit_${W_GROUP_SIZE}gs_${AXIS}axis_${DTYPE}" )
 done
 # QMODEL_PATHS=( "/SSD/hqq/${MODEL_NAME}_2bit_64gs_${AXIS}axis_qscale_${QSCALE}_qzero_${QZERO}" "/SSD/hqq/${MODEL_NAME}_3bit_${GROUP_SIZE}gs_${AXIS}axis_qscale_${QSCALE}_qzero_${QZERO}" "/SSD/hqq/${MODEL_NAME}_4bit_${GROUP_SIZE}gs_${AXIS}axis_qscale_${QSCALE}_qzero_${QZERO}")
 QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
@@ -78,31 +78,33 @@ QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 N_OUTLIER=32
 OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.pth
 
-COMP_OBJ=(wbits kvbits)
-COMP_OBJ_TEXT="wkv"
-COMP_OBJ_VAL=(3 3.25)
-# COMP_OBJ_VAL=(3 4.25)
-# COMP_OBJ_VAL=(4.25 3.25)
-COMP_OBJ_THRESHOLD=0.005
+# COMP_OBJ=(wbits kvbits)
+# COMP_OBJ_TEXT="wkv"
+# COMP_OBJ_VAL=(3 3.25)
+# # COMP_OBJ_VAL=(3 4.25)
+# # COMP_OBJ_VAL=(4.25 3.25)
+# COMP_OBJ_THRESHOLD=0.005
 
 # COMP_OBJ=(kvbits)
 # COMP_OBJ_VAL=(3.0)
 # COMP_OBJ_THRESHOLD=0.005
 
-N_TOKEN=1024
-
-# COMP_OBJ=(memory)
-
-# COMP_OBJ_VAL=(5878849536)
-# COMP_OBJ_VAL=(5862072320)
-# COMP_OBJ_VAL=(4134019072)
 # N_TOKEN=1024
 
-# COMP_OBJ_VAL=(42350419968)
-# COMP_OBJ_VAL=(25170550784)
-# N_TOKEN=1048576
+COMP_OBJ=(memory)
 
-# COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
+# # COMP_OBJ_VAL=(5878849536) # LLama 3.1 8B
+# # COMP_OBJ_VAL=(5862072320) # LLama 3.1 8B
+# COMP_OBJ_VAL=(5666250752)
+# # COMP_OBJ_VAL=(4134019072) # LLama 3.1 8B
+# N_TOKEN=1024
+
+# COMP_OBJ_VAL=(42350419968) # LLama 3.1 8B
+COMP_OBJ_VAL=(25170550784) # LLama 3.1 8B
+# COMP_OBJ_VAL=(42137821184)
+# COMP_OBJ_VAL=(24957952000)
+N_TOKEN=1048576
+COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
 
 # PREFER="metric#0.0 ${TARGET_COMP_OBJ}#${TARGET_COMP_OBJ_VAL}"
 
@@ -113,11 +115,12 @@ MAX_COMP_OBJ_LIST=()
 for IDX in "${!COMP_OBJ[@]}"
 do
     PREFER_LIST+=( "${COMP_OBJ[$IDX]}#${COMP_OBJ_VAL[$IDX]}" )
-    if [ "${COMP_OBJ[$IDX]}" == "memory" ]; then
-        MIN_COMP_OBJ_LIST+=( 0 )
-    elif [[ "${COMP_OBJ[$IDX]}" == "kvbits" || "${COMP_OBJ[$IDX]}" == "wbits" ]]; then
-        MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
-    fi
+    # if [ "${COMP_OBJ[$IDX]}" == "memory" ]; then
+    #     MIN_COMP_OBJ_LIST+=( 0 )
+    # elif [[ "${COMP_OBJ[$IDX]}" == "kvbits" || "${COMP_OBJ[$IDX]}" == "wbits" ]]; then
+    #     MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
+    # fi
+    MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
     MAX_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} + $COMP_OBJ_THRESHOLD" | bc) )
 done
 
@@ -130,7 +133,15 @@ MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
-DATASETS="wikitext2 c4"
+# DATASETS="wikitext2 c4"
+# METRIC="ppl"
+
+DATASETS="wikitext2"
+METRIC="loss"
+
+LOSS_FUNC="jsd"
+# LOSS_FUNC="cross_entropy"
+
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
 # TASKS="coqa gsm8k truthfulqa"
 TASKS="coqa truthfulqa"
@@ -185,14 +196,18 @@ ARGS="--gpu_id ${DEVICES} \
 --n_token ${N_TOKEN} \
 --debug \
 --expr ${EXPR_FILE} \
---prefer ${PREFER} \
+--expr_comp_obj ${EXPR_COMP_OBJ} \
 --datasets ${DATASETS} \
---zeroshot \
---tasks ${TASKS} \
---lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
---long_bench \
---long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
---long_bench_config ${LONG_BENCH_CONFIG}"
+--metric ${METRIC} \
+--loss_func ${LOSS_FUNC} \
+--quant_model_paths ${QMODEL_PATHS}"
+# --zeroshot \
+# --tasks ${TASKS} \
+# --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
+# --long_bench \
+# --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
+# --long_bench_config ${LONG_BENCH_CONFIG}
+# --prefer ${PREFER} \
 for g in "${K_GROUP_SIZE[@]}"
 do
     ARGS+=" --k_group_size ${g} "
