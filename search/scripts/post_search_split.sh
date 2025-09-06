@@ -30,10 +30,10 @@ CONFIG=config/llama.json
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
 
-W_METHOD=hqq
-W_METHOD_TEXT=hqq
-# W_METHOD=awq
-# W_METHOD_TEXT=awq
+# W_METHOD=hqq
+# W_METHOD_TEXT=hqq
+W_METHOD=awq
+W_METHOD_TEXT=awq
 # W_METHOD="awq layer_prune"
 # W_METHOD_TEXT=awq_layer_prune
 # W_METHOD=fp16
@@ -121,10 +121,10 @@ do
     # elif [[ "${COMP_OBJ[$IDX]}" == "kvbits" || "${COMP_OBJ[$IDX]}" == "wbits" ]]; then
     #     MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
     # fi
-    # MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
-    # MAX_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} + $COMP_OBJ_THRESHOLD" | bc) )
-    MIN_COMP_OBJ_LIST+=( 1 )
-    MAX_COMP_OBJ_LIST+=( 1e99 )
+    MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
+    MAX_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} + $COMP_OBJ_THRESHOLD" | bc) )
+    # MIN_COMP_OBJ_LIST+=( 1 )
+    # MAX_COMP_OBJ_LIST+=( 1e99 )
 done
 
 
@@ -136,13 +136,16 @@ MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
-# DATASETS="wikitext2 c4"
-# METRIC="ppl"
+DATASETS="wikitext2 c4"
+DATASETS_TEXT="wikitext2_c4"
+METRIC="ppl"
+LOSS_FUNC="cross_entropy"
 
-DATASETS="wikitext2"
-METRIC="loss"
+# DATASETS="wikitext2"
+# DATASETS_TEXT="wikitext2"
+# METRIC="loss"
+# LOSS_FUNC="jsd"
 
-LOSS_FUNC="jsd"
 # LOSS_FUNC="cross_entropy"
 
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
@@ -154,22 +157,8 @@ LM_EVAL_BATCH_SIZE=32
 
 # EXPR_FOLDER=save/search/quant
 
-EXPR_FILE=( \
-    save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_150.stats \
-    save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
-)
-EXPR_FILE=$(IFS=" " ; echo "${EXPR_FILE[*]}")
-EXPR_COMP_OBJ="wbits kvbits"
-
-# EXPR_FILE=2505111531_Llama-2-7b-hf_wkv_loss_hqq_iter_200_w234k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_22_55_jsd_co_0.9_mut_0.1_wikitext2_32sample_rbf/iter_200.stats
-# EXPR_FILE=2505111134_Llama-2-7b-hf_wkv_loss_hqq_iter_200_w234k24v24bits_w128k128v128group_size_0res_len_k_channel_v_token_obj_22_55_jsd_co_0.9_mut_0.1_wikitext2_32sample_rbf/iter_200.stats
-
-# EXPR_FILE=2502101608_Llama-2-7b-hf_bits_loss_hqq_iter_300_234_obj_2_4.1_jsd_co_0.9_mut_0.1_wikitext2_32sample_rbf_outlier_234_mixed/iter_200.stats
-# EXPR_FILE=2502012035_Llama-2-7b-hf_bits_loss_hqq_layer_prune_iter_300_234_obj_1.99_4_jsd_co_0.9_mut_0.1_wikitext2_32sample_lp_0.001_1.0/iter_300.stats
-# EXPR_FILE=2501231721_Llama-2-13b-hf_bits_loss_hqq_iter_400_234_obj_2_4_jsd_co_0.9_mut_0.1_wikitext2_128sample/iter_400.stats
-# EXPR_FILE=2501231719_Llama-2-7b-hf_bits_loss_hqq_iter_300_234_obj_2_4_jsd_co_0.9_mut_0.1_wikitext2_128sample/iter_300.stats
-# EXPR_FILE=2501231756_Llama-2-7b-hf_bits_loss_hqq_iter_300_234_obj_2_4_jsd_co_0.9_mut_0.1_wikitext2_128sample_outlier/iter_300.stats
-# EXPR_FILE=2411211754_Llama-2-7b-hf_bits_loss_hqq_iter_300_nsga2_234_obj_2_4_jsd_mut_0.05_layer_prune_1.0_1.0/iter_299.stats
+W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_150.stats
+KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
 
 LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONG_BENCH_CONFIG=utils/long_bench_config
@@ -177,11 +166,12 @@ LONG_BENCH_TASK=""
 
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
+# N=1
+N=10
 RANDOM_SAMPLE=1000
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}
-SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${DATASETS}
+SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${DATASETS_TEXT}
 
-# N=1
 
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
@@ -202,21 +192,23 @@ ARGS="--gpu_id ${DEVICES} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
 --n_token ${N_TOKEN} \
 --debug \
---expr ${EXPR_FILE} \
---expr_comp_obj ${EXPR_COMP_OBJ} \
+--w_expr ${W_EXPR} \
+--kv_expr ${KV_EXPR} \
+--expr_front \
 --datasets ${DATASETS} \
 --metric ${METRIC} \
 --loss_func ${LOSS_FUNC} \
 --random_sample ${RANDOM_SAMPLE} \
 --save ${SAVE} \
---quant_model_paths ${QMODEL_PATHS}"
+--prefer ${PREFER} \
+-n ${N}"
+# --quant_model_paths ${QMODEL_PATHS} \
 # --zeroshot \
 # --tasks ${TASKS} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
 # --long_bench \
 # --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
 # --long_bench_config ${LONG_BENCH_CONFIG}
-# --prefer ${PREFER} \
 for g in "${K_GROUP_SIZE[@]}"
 do
     ARGS+=" --k_group_size ${g} "
@@ -230,7 +222,7 @@ done
 # -n ${N} \
 N_PROC=1
 # N_PROC=2
-CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} post_search_wkv.py ${ARGS}
+CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} post_search_split.py ${ARGS}
 
 # --save ${SAVE} \
 # --latency_table_file ${LATENCY_TABLE}

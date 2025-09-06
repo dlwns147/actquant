@@ -84,7 +84,8 @@ def main(args):
     group_size = {'w': args.w_group_size, 'k': args.k_group_size, 'v': args.v_group_size}
     archive_list = []
     subnets_list = []
-    # metric_list = []
+    metric_list = []
+    prev_metric_list = []
     F_list = []
     sort_idx_list = []
     for expr, comp_obj in zip(args.expr, args.expr_comp_obj):
@@ -96,7 +97,8 @@ def main(args):
     # assert n_comp_obj == len(archive[0][2:])
         subnets, metric = [v[0] for v in archive], [v[1] for v in archive]
         subnets_list.append(subnets)
-        # metric_list.append(metric)
+        metric_list.append(metric)
+        prev_metric_list.append(metric)
         comp_obj = [get_net_info(n, config, group_size)[comp_obj] for n in subnets]
 
         sort_idx = np.argsort(metric)
@@ -107,6 +109,7 @@ def main(args):
     if n_comp_obj == 1 and len(args.expr_comp_obj) == 2:
         subnets = []
         metric = []
+        prev_metric = []
         
         front0 = NonDominatedSorting().do(F_list[0], only_non_dominated_front=True)
         f0_list = F_list[0][front0]
@@ -150,20 +153,21 @@ def main(args):
                     
                 cur_metric = f0[0] + f1[0] - (f0[0] * f1[0])
                 metric.append(cur_metric)
+                prev_metric.append([f0[0], f1[0]])
                 subnets.append(arch)
         
         comp_obj = [get_net_info(a, config, group_size, n_token=args.n_token)[args.comp_obj[0]] for a in subnets] 
         sort_idx = np.argsort(metric)
         F = np.column_stack((metric, comp_obj))[sort_idx, :]
         # F_list.append(F)
-        F_list, sort_idx_list, subnets_list = [F], [sort_idx], [subnets]
+        F_list, sort_idx_list, subnets_list, metric_list, prev_metric_list = [F], [sort_idx], [subnets], [metric], [prev_metric]
         
         # wbits = [get_net_info(a, config, group_size, n_token=args.n_token)['wbits'] for a in subnets] 
         # kvbits = [get_net_info(a, config, group_size, n_token=args.n_token)['kvbits'] for a in subnets] 
         # print(f'wbits: {wbits}')
         # print(f'kvbits: {kvbits}')
     
-    pf_list, ps_list = [], []
+    pf_list, ps_list, pm_list, ppm_list = [], [], [], []
     if n_comp_obj_min > 0:
         for i, comp_obj in enumerate(args.comp_obj):
             range_idx = np.argwhere(np.logical_and(F_list[i][:, 1] >= args.comp_obj_min[i], F_list[i][:, 1]  <= args.comp_obj_max[i])).flatten()
@@ -171,26 +175,38 @@ def main(args):
             
             pf = F_list[i][range_idx, :]
             ps = np.array(subnets_list[i])[sort_idx_list[i]][range_idx]
+            pm = np.array(metric_list[i])[sort_idx_list[i]][range_idx]
+            ppm = np.array(prev_metric_list[i])[sort_idx_list[i]][range_idx]
             # wbits = [get_net_info(a, config, group_size, n_token=args.n_token)['wbits'] for a in ps] 
             # kvbits = [get_net_info(a, config, group_size, n_token=args.n_token)['kvbits'] for a in ps] 
             # print(f'wbits: {wbits}')
             # print(f'kvbits: {kvbits}')
             pf_list.append(pf)
             ps_list.append(ps)
+            pm_list.append(pm)
+            ppm_list.append(ppm)
 
     elif args.only_front:
         for i, comp_obj in enumerate(args.comp_obj):
             front = NonDominatedSorting().do(F_list[i], only_non_dominated_front=True)
             pf = F_list[i][front, :]
             ps = np.array(subnets_list[i])[sort_idx_list[i]][front]
+            pm = np.array(metric_list[i])[sort_idx_list[i]][front]
+            ppm = np.array(prev_metric_list[i])[sort_idx_list[i]][front]
             pf_list.append(pf)
             ps_list.append(ps)
+            pm_list.append(pm)
+            ppm_list.append(ppm)
 
     else:
         pf_list = F_list
         for i, comp_obj in enumerate(args.comp_obj):
             ps = np.array(subnets_list[i])[sort_idx_list[i]]
+            pm = np.array(metric_list[i])[sort_idx_list[i]]
+            ppm = np.array(prev_metric_list[i])[sort_idx_list[i]]
             ps_list.append(ps)
+            pm_list.append(pm)
+            ppm_list.append(ppm)
         
     I_list = []
     if args.high_tradeoff:   
@@ -217,8 +233,16 @@ def main(args):
         I_list.append(temp)
         
     else:
+        # comp_list = {c: [] for c in args.comp_obj}
+        comp_save_list = {c: [] for c in get_net_info({}, None, group_size=-1, n_token=0).keys()}
+        metric_save_list = {d: [] for d in args.datasets}
+        new_metric_save_list = {c: [] for c in args.comp_obj}
+        prev_metric_save_list = {c: {e_c: [] for e_c in args.expr_comp_obj} for c in args.comp_obj}
         for i, comp_obj in enumerate(args.comp_obj):
             I = list(range(len(pf_list[i])))
+            if args.random_sample is not None and args.random_sample < len(pf_list[i]):
+                front = np.random.choice(I, size=args.random_sample, replace=False)
+                front.sort()
             I_list.append(I)
         
 
@@ -262,19 +286,20 @@ def main(args):
     for idx_list in tqdm(I_list):
         for idx in idx_list:
             if args.comp_obj == ['wbits', 'kvbits']:
-                arch = {}
-                for i, comp_obj in enumerate(args.comp_obj):
-                    ps, idx = ps_list[i], idx_list[i]
-                    if comp_obj == 'wbits':
-                        arch['w'] = ps[idx]['w']
-                    elif comp_obj == 'kvbits':
-                        arch['k'] = ps[idx]['k']
-                        arch['v'] = ps[idx]['v']
-                    elif comp_obj == 'kbits':
-                        arch['k'] = ps[idx]['k']
-                    elif comp_obj == 'vbits':
-                        arch['v'] = ps[idx]['v']
-                accelerator.print(arch)
+                raise NotImplementedError
+                # arch = {}
+                # for i, comp_obj in enumerate(args.comp_obj):
+                #     ps, idx = ps_list[i], idx_list[i]
+                #     if comp_obj == 'wbits':
+                #         arch['w'] = ps[idx]['w']
+                #     elif comp_obj == 'kvbits':
+                #         arch['k'] = ps[idx]['k']
+                #         arch['v'] = ps[idx]['v']
+                #     elif comp_obj == 'kbits':
+                #         arch['k'] = ps[idx]['k']
+                #     elif comp_obj == 'vbits':
+                #         arch['v'] = ps[idx]['v']
+                # accelerator.print(arch)
                 
             elif args.comp_obj == ['memory']: 
                 arch = ps_list[0][idx]
@@ -304,7 +329,30 @@ def main(args):
                 metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func)[0] if args.datasets else 0
                 complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
                 # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
-                print(f'complexity: {complexity}, {args.metric}: {[p for p in metric.values()]}')
+                print(f'[{i}] complexity: {complexity}, {args.metric}: {[p for p in metric.values()]}, metric: {[m[idx].item() for m in metric_list]}, prev_metric: {[m[idx] for m in prev_metric_list]}')
+                if args.random_sample is not None and args.save and args.results_csv_file:
+                    for c in comp_save_list:
+                        comp_save_list[c].append(complexity[c])
+                    for d in args.datasets:
+                        metric_save_list[d].append(metric[d])
+                    for c_i, c in enumerate(args.comp_obj):
+                        new_metric_save_list[c].append(metric_list[c_i][idx].item())
+                    for c_i, c in enumerate(args.comp_obj):
+                        for p_i, expr_c in enumerate(args.expr_comp_obj):
+                            prev_metric_save_list[c][expr_c].append(prev_metric_list[c_i][idx][p_i])
+
+                    os.makedirs(args.save, exist_ok=True)
+                    with open(os.path.join(args.save, args.results_csv_file), 'w') as f:
+                        writer = csv.writer(f)
+                        for c in comp_save_list:
+                            writer.writerow(comp_save_list[c])
+                        for d in args.datasets:
+                            writer.writerow(metric_save_list[d])
+                        for c in args.comp_obj:
+                            writer.writerow(new_metric_save_list[c])
+                        for c in args.comp_obj:
+                            for e_c in args.expr_comp_obj:
+                                writer.writerow(prev_metric_save_list[c][e_c])
 
             if args.pass_key_file:
                 clean_up()
@@ -393,6 +441,10 @@ def main(args):
                 with open(os.path.join(args.long_bench_result_path, "pred_e" if args.long_bench_e else "pred", 'result.txt'), 'w') as f:
                     for sentence in sentences:
                         f.write(sentence)
+            
+            if 'awq' in args.w_method or 'gptq' in args.w_method or 'qeft' in args.w_method:
+                del model
+                clean_up()
                     
     print(args)
     return
@@ -505,7 +557,7 @@ if __name__ == '__main__':
     parser.add_argument('--loss_func', type=str, default='cross_entropy',
                         help='')
     
-    parser.add_argument('--save', type=str, default='.tmp',
+    parser.add_argument('--save', type=str, default='',
                         help='location of dir to save')
     parser.add_argument('--expr', type=str, nargs='+', default=[''],
                         help='')
@@ -553,6 +605,9 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--long_bench_task', type=str, nargs='+', default=[])
     parser.add_argument('--pass_key_file', type=str, default='',
+                        help='')
+    
+    parser.add_argument('--random_sample', type=int, default=None, 
                         help='')
 
 
