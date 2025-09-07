@@ -30,10 +30,10 @@ CONFIG=config/llama.json
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
 
-# W_METHOD=hqq
-# W_METHOD_TEXT=hqq
-W_METHOD=awq
-W_METHOD_TEXT=awq
+W_METHOD=hqq
+W_METHOD_TEXT=hqq
+# W_METHOD=awq
+# W_METHOD_TEXT=awq
 # W_METHOD="awq layer_prune"
 # W_METHOD_TEXT=awq_layer_prune
 # W_METHOD=fp16
@@ -140,10 +140,10 @@ do
     # elif [[ "${COMP_OBJ[$IDX]}" == "kvbits" || "${COMP_OBJ[$IDX]}" == "wbits" ]]; then
     #     MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
     # fi
-    MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
-    MAX_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} + $COMP_OBJ_THRESHOLD" | bc) )
-    # MIN_COMP_OBJ_LIST+=( 1 )
-    # MAX_COMP_OBJ_LIST+=( 1e99 )
+    # MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
+    # MAX_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} + $COMP_OBJ_THRESHOLD" | bc) )
+    MIN_COMP_OBJ_LIST+=( 1 )
+    MAX_COMP_OBJ_LIST+=( 1e99 )
 done
 
 
@@ -155,15 +155,15 @@ MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
-DATASETS="wikitext2 c4"
-DATASETS_TEXT="wikitext2_c4"
-METRIC="ppl"
-LOSS_FUNC="cross_entropy"
+# DATASETS="wikitext2 c4"
+# DATASETS_TEXT="wikitext2_c4"
+# METRIC="ppl"
+# LOSS_FUNC="cross_entropy"
 
-# DATASETS="wikitext2"
-# DATASETS_TEXT="wikitext2"
-# METRIC="loss"
-# LOSS_FUNC="jsd"
+DATASETS="wikitext2"
+DATASETS_TEXT="wikitext2"
+METRIC="loss"
+LOSS_FUNC="jsd"
 
 # LOSS_FUNC="cross_entropy"
 
@@ -188,8 +188,8 @@ PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 # N=1
 N=10
 RANDOM_SAMPLE=1000
-SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}
-# SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${DATASETS_TEXT}
+# SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}
+SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${DATASETS_TEXT}
 
 
 ARGS="--gpu_id ${DEVICES} \
@@ -219,9 +219,10 @@ ARGS="--gpu_id ${DEVICES} \
 --loss_func ${LOSS_FUNC} \
 --random_sample ${RANDOM_SAMPLE} \
 --save ${SAVE} \
---prefer ${PREFER} \
--n ${N}"
-# --quant_model_paths ${QMODEL_PATHS} \
+--quant_model_paths ${QMODEL_PATHS} \
+"
+# --prefer ${PREFER} \
+# -n ${N}
 # --zeroshot \
 # --tasks ${TASKS} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \

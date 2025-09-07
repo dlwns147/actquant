@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 # from utils import get_net_info
 
-output_file = '/NAS/SJ/actquant/search/visualize/fig/joint_jsd.png'
+output_file = '/NAS/SJ/actquant/search/visualize/fig/joint_jsd_v2.png'
 
 colors = [
     '#FF6663',
@@ -36,7 +36,8 @@ scatter_size = 5
 font_size = 15
 plt.rc('font', size=font_size)
 
-result_file = '/NAS/SJ/actquant/search/save/result/2509060835_Llama-3.1-8B-Instruct_random_sample__1000_sample_seed_wikitext2/results.csv'
+# result_file = '/NAS/SJ/actquant/search/save/result/2509060835_Llama-3.1-8B-Instruct_random_sample__1000_sample_seed_wikitext2/results.csv'
+result_file = '/NAS/SJ/actquant/search/save/result/2509071826_Llama-3.1-8B-Instruct_random_sample_hqq_kivi_1000_sample_seed_wikitext2/results.csv'
 import csv
 with open(result_file, 'r') as f:
     result_list = list(csv.reader(f))

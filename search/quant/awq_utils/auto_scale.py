@@ -33,15 +33,18 @@ def get_act_scale(x):
 
 
 @torch.no_grad()
-def scale_ln_fcs(ln, fcs, scales):
+def scale_ln_fcs(ln, fcs, scales, eps=1e-7):
+# def scale_ln_fcs(ln, fcs, scales):
     if not isinstance(fcs, list):
         fcs = [fcs]
 
     scales = scales.to(ln.weight.device)
 
-    ln.weight.div_(scales)
+    # ln.weight.div_(scales)
+    ln.weight.div_(scales + eps)
     if hasattr(ln, "bias") and ln.bias is not None:
-        ln.bias.div_(scales)
+        # ln.bias.div_(scales)
+        ln.bias.div_(scales + eps)
 
     for fc in fcs:
         fc.weight.mul_(scales.view(1, -1))
@@ -54,7 +57,8 @@ def scale_ln_fcs(ln, fcs, scales):
 
 
 @torch.no_grad()
-def scale_fc_fc(fc1, fc2, scales):
+def scale_fc_fc(fc1, fc2, scales, eps=1e-7):
+# def scale_fc_fc(fc1, fc2, scales):
     assert isinstance(fc1, nn.Linear)
     assert isinstance(fc2, nn.Linear)
     # assert fc1.out_features == fc2.in_features
@@ -62,9 +66,11 @@ def scale_fc_fc(fc1, fc2, scales):
     scales = scales.to(fc1.weight.device)
 
     # fc1.weight.div_(scales.view(-1, 1))
-    fc1.weight[-scales.size(0) :].div_(scales.view(-1, 1))
+    # fc1.weight[-scales.size(0) :].div_(scales.view(-1, 1))
+    fc1.weight[-scales.size(0) :].div_(scales.view(-1, 1) + eps)
     if fc1.bias is not None:
-        fc1.bias.div_(scales.view(-1))
+        # fc1.bias.div_(scales.view(-1))
+        fc1.bias.div_(scales.view(-1) + eps)
 
     fc2.weight.mul_(scales.view(1, -1))
 

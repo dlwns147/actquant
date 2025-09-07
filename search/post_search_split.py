@@ -123,7 +123,8 @@ def main(args):
             arch['k'] = subnet_kv['k']
             arch['v'] = subnet_kv['v']
                 
-            new_metric = f_w[0] + f_kv[0] - (f_w[0] * f_kv[0] / ln2)
+            # new_metric = f_w[0] + f_kv[0] - (f_w[0] * f_kv[0] / ln2)
+            new_metric = f_w[0] + f_kv[0]
             metric.append([new_metric, f_w[0], f_kv[0]])
             subnets.append(arch)
     metric = np.array(metric)
