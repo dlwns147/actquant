@@ -93,16 +93,35 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 
 COMP_OBJ=(memory)
 
-# COMP_OBJ_VAL=(5878849536) # LLama 3.1 8B
-# COMP_OBJ_VAL=(5862072320) # LLama 3.1 8B
-COMP_OBJ_VAL=(5666250752)
+COMP_OBJ_VAL=(5862072320)
+# COMP_OBJ_VAL=(5666250752)
+# COMP_OBJ_VAL=(5649473536) # LLama 3.1 8B
+# # COMP_OBJ_VAL=(5006434304) # LLama 3.1 8B
+# # COMP_OBJ_VAL=(4989657088) # LLama 3.1 8B
+# # COMP_OBJ_VAL=(4793835520) # LLama 3.1 8B
+# # COMP_OBJ_VAL=(4777058304) # LLama 3.1 8B
 # COMP_OBJ_VAL=(4134019072) # LLama 3.1 8B
 N_TOKEN=1024
 
-# # COMP_OBJ_VAL=(42350419968) # LLama 3.1 8B
-# COMP_OBJ_VAL=(25170550784) # LLama 3.1 8B
+# COMP_OBJ_VAL=(10194001920)
+# COMP_OBJ_VAL=(9534185472)
+# COMP_OBJ_VAL=(9321586688)
+# COMP_OBJ_VAL=(8661770240)
+# COMP_OBJ_VAL=(8259117056)
+# COMP_OBJ_VAL=(8046518272)
+# COMP_OBJ_VAL=(7386701824)
+# COMP_OBJ_VAL=(7174103040)
+# # N_TOKEN=1024
+
+
+# # COMP_OBJ_VAL=(25170550784)
 # # COMP_OBJ_VAL=(42137821184)
 # # COMP_OBJ_VAL=(24957952000)
+# # COMP_OBJ_VAL=(41478004736)
+# # COMP_OBJ_VAL=(24298135552)
+# # COMP_OBJ_VAL=(41265405952)
+# COMP_OBJ_VAL=(24085536768)
+# # COMP_OBJ_VAL=(40605589504)
 # N_TOKEN=1048576
 
 COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
@@ -169,8 +188,8 @@ PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 # N=1
 N=10
 RANDOM_SAMPLE=1000
-# SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}
-SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${DATASETS_TEXT}
+SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}
+# SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${DATASETS_TEXT}
 
 
 ARGS="--gpu_id ${DEVICES} \
@@ -223,46 +242,3 @@ done
 N_PROC=1
 # N_PROC=2
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} post_search_split.py ${ARGS}
-
-# --save ${SAVE} \
-# --latency_table_file ${LATENCY_TABLE}
-# --outlier_path ${OUTLIER_PATH} \
-# --only_front \
-
-
-    # --greedy_search_result_path ${GREEDY_SEARCH}
-# GREEDY_SEARCH=''
-# GREEDY_SEARCH=csv/greedy_search/Llama-2-7b-hf_ppl_axis_1_lb_4_lgs_128_lqs_false_lqz_false_sb_2_sgs_64_sqs_false_sqz_false.csv
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_hqq_layer_prune_iter_300_nsga2_2_4_obj_2_4_mut_0.1_layer_prune_0.95_1.0_2410311536/iter_299.stats
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_awq_iter_300_nsga2_2_4_0.01_2410211524/iter_300.stats
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_hqq_iter_300_nsga2_2_4_mut_prob_0.1_2410101147/iter_300.stats
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_hqq_iter_300_nsga2_2_4_mut_prob_0.2_2410101159/iter_300.stats
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_hqq_iter_300_nsga2_2_4_mut_prob_0.02_2410101352/iter_300.stats
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_gptq_iter_300_nsga2_2_4_2410070911/iter_270.stats
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_owq_iter_300_nsga2_2.1_4.1_2410071301/iter_300.stats
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_owq_iter_300_nsga2_2.01_4.01_2410071302/iter_300.stats
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_hqq_iter_300_nsga2_2_4_2410071303/iter_300.stats
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_iter_300_nsga2_2_4_2410051059/iter_300.stats
-# EXPR_FILE=Llama-2-7b-hf_bits_loss_iter_200_nsga2_2_4_2410051103/iter_200.stats
-# TARGET_BITS_RANGE="${MIN_BITS} ${MAX_BITS}"
-# QMODEL_PATHS=("/SSD/awq/${MODEL_NAME}_w2_g64_fake_${SCALE_BITS}bit_128gs_awq.pt" "/SSD/awq/${MODEL_NAME}_w3_g${GROUP_SIZE}_fake_${SCALE_BITS}bit_awq.pt" "/SSD/awq/${MODEL_NAME}_w4_g${GROUP_SIZE}_fake_${SCALE_BITS}bit_awq.pt")
-
-# METHOD=owq
-# SMALL_WBITS=2.1
-# SMALL_MODEL_PATH=/SSD/owq/${MODEL_NAME}_${SMALL_WBITS}_wikitext2_fake.pth
-
-# LARGE_WBITS=4.1
-# LARGE_MODEL_PATH=/SSD/owq/${MODEL_NAME}_${LARGE_WBITS}_wikitext2.pth
-
-# METHOD=awq
-# METHOD_TEXT=awq
-# GROUP_SIZE=128
-# SCALE_BITS=2
-# # SCALE_BITS=3
-
-# QMODEL_PATHS=()
-# for B in ${Q_BITS}
-# do
-#     # QMODEL_PATHS+=( "/SSD/awq/${MODEL_NAME}_w${B}_g${GROUP_SIZE}_fake_${SCALE_BITS}bit_awq.pt" )
-#     QMODEL_PATHS+=( "/SSD/awq/${MODEL_NAME}_w${B}_g${GROUP_SIZE}_fake_${SCALE_BITS}scale_asym.pt" )
-# done

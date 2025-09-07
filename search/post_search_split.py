@@ -145,9 +145,10 @@ def main(args):
     if n_comp_obj_min > 0:
         flag = np.ones(len(F), dtype=bool)
         for i in range(n_comp_obj):
-            flag = np.logical_and(flag, F[:, -n_comp_obj + i] >= args.comp_obj_min[i], F[:, -n_comp_obj + i] <= args.comp_obj_max[i])
+            flag = np.logical_and(flag, np.logical_and(F[:, -n_comp_obj + i] >= args.comp_obj_min[i], F[:, -n_comp_obj + i] <= args.comp_obj_max[i]))
         range_idx = np.argwhere(flag).flatten()
         print(f'range_idx : {len(range_idx)}')
+        import pdb; pdb.set_trace()
                 
         pf = F[range_idx]
         ps = subnets[range_idx]
