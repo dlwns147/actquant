@@ -125,9 +125,9 @@ def main(args):
                 
             # new_metric = f_w[0] + f_kv[0] - (f_w[0] * f_kv[0] / ln2)
             if not args.sqrt:
-                new_metric = f_w[0] + args.alpha * f_kv[0]
+                new_metric = f_w[0] + args.kv_scale * f_kv[0]
             else:
-                new_metric = math.sqrt(f_w[0]) + args.alpha * math.sqrt(f_kv[0])
+                new_metric = math.sqrt(f_w[0]) + args.kv_scale * math.sqrt(f_kv[0])
             metric.append([new_metric, f_w[0], f_kv[0]])
             subnets.append(arch)
     metric = np.array(metric)
