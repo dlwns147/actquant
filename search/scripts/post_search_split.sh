@@ -173,10 +173,23 @@ TASKS="coqa truthfulqa"
 
 LM_EVAL_BATCH_SIZE=32
 
+# KV_SCALE=1
+# KV_SCALE=0.95
+KV_SCALE=0.9
+# KV_SCALE=0.85
+# KV_SCALE=0.8
+
+# TRUNC_LEN=512
+TRUNC_LEN=256
+# SLIDING_WINDOW=128
+SLIDING_WINDOW=64
+
+ALPHA=2
+BETA=-2
 
 # EXPR_FOLDER=save/search/quant
 
-W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_150.stats
+W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_200.stats
 KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
 
 LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
@@ -187,9 +200,11 @@ PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
 # N=1
 N=10
+
 RANDOM_SAMPLE=1000
-# SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}
-SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${DATASETS_TEXT}
+# SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+# SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_sqrt_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 
 
 ARGS="--gpu_id ${DEVICES} \
@@ -220,6 +235,13 @@ ARGS="--gpu_id ${DEVICES} \
 --random_sample ${RANDOM_SAMPLE} \
 --save ${SAVE} \
 --quant_model_paths ${QMODEL_PATHS} \
+--kv_scale ${KV_SCALE} \
+--sqrt \
+--use_key_token \
+--trunc_len ${TRUNC_LEN} \
+--sliding_window ${SLIDING_WINDOW} \
+--alpha ${ALPHA} \
+--beta ${BETA}
 "
 # --prefer ${PREFER} \
 # -n ${N}
@@ -229,6 +251,7 @@ ARGS="--gpu_id ${DEVICES} \
 # --long_bench \
 # --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
 # --long_bench_config ${LONG_BENCH_CONFIG}
+
 for g in "${K_GROUP_SIZE[@]}"
 do
     ARGS+=" --k_group_size ${g} "

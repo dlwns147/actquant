@@ -124,7 +124,10 @@ def main(args):
             arch['v'] = subnet_kv['v']
                 
             # new_metric = f_w[0] + f_kv[0] - (f_w[0] * f_kv[0] / ln2)
-            new_metric = f_w[0] + f_kv[0]
+            if not args.sqrt:
+                new_metric = f_w[0] + args.alpha * f_kv[0]
+            else:
+                new_metric = math.sqrt(f_w[0]) + args.alpha * math.sqrt(f_kv[0])
             metric.append([new_metric, f_w[0], f_kv[0]])
             subnets.append(arch)
     metric = np.array(metric)
@@ -222,7 +225,12 @@ def main(args):
         # use_flash=args.use_flash,
         k_quant_scheme=args.k_quant_scheme,
         v_quant_scheme=args.v_quant_scheme,
-        loss_func=args.loss_func
+        loss_func=args.loss_func,
+        use_key_token=args.use_key_token,
+        trunc_len=args.trunc_len,
+        sliding_window=args.sliding_window,
+        alpha=args.alpha,
+        beta=args.beta
     )
     
     comp_save_list = [list() for _ in get_net_info({}, None, group_size=-1, n_token=0).keys()]
@@ -530,7 +538,21 @@ if __name__ == '__main__':
     
     parser.add_argument('--random_sample', type=int, default=None, 
                         help='')
+    
+    parser.add_argument('--sqrt', action='store_true', help='')
+    parser.add_argument('--kv_scale', type=float, default=1.,
+                        help='')
 
+    parser.add_argument('--use_key_token', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
+    parser.add_argument('--trunc_len', type=int, default=512, 
+                        help='truncation length for long PPL/JSD calculation')
+    parser.add_argument('--sliding_window', type=int, default=128, 
+                        help='sliding_window length for long PPL/JSD calculation')
+    parser.add_argument('--alpha', type=int, default=2, 
+                        help='Long-short distance (LSD) threshold for long PPL/JSD calculation')
+    parser.add_argument('--beta', type=int, default=-2, 
+                        help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
+    
 
     cfgs = parser.parse_args()
     main(cfgs)
