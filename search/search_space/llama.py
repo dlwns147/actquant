@@ -778,8 +778,8 @@ class LlamaGroupSizeSearchSpace:
         # encode arch ({'q': [0, 2, 4], 'k: , etc}) to integer bit-string [1, 0, 2, 1, ...]
         w_encode = np.concatenate([
                 np.array([
-                    # np.argwhere(_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option')))[0, 0] for _x in arch['w'][linear] 
-                    np.argwhere((_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option'))).all(axis=1))[0, 0] for _x in arch['w'][linear]
+                    np.argwhere(_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option')))[0, 0] for _x in arch['w'][linear] 
+                    # np.argwhere((_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option'))).all(axis=1))[0, 0] for _x in arch['w'][linear]
                     # np.argwhere(_x == np.array(self.w_bits))[0, 0] for _x in arch['w'][linear]
                     ]) for linear in self.config['linear']
             ])

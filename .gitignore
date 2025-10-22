@@ -194,6 +194,7 @@ search_woo/
 # *egg-info*/
 # setup.py
 search/outlier
+search/visualize
 
 */.ninja_deps
 *.o
