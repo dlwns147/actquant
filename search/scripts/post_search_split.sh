@@ -91,17 +91,21 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 
 # N_TOKEN=1024
 
-COMP_OBJ=(memory)
+# COMP_OBJ=(memory)
 
-COMP_OBJ_VAL=(5862072320)
-# COMP_OBJ_VAL=(5666250752)
-# COMP_OBJ_VAL=(5649473536) # LLama 3.1 8B
-# # COMP_OBJ_VAL=(5006434304) # LLama 3.1 8B
-# # COMP_OBJ_VAL=(4989657088) # LLama 3.1 8B
-# # COMP_OBJ_VAL=(4793835520) # LLama 3.1 8B
-# # COMP_OBJ_VAL=(4777058304) # LLama 3.1 8B
-# COMP_OBJ_VAL=(4134019072) # LLama 3.1 8B
-N_TOKEN=1024
+# COMP_OBJ_VAL=(5862072320)
+# # COMP_OBJ_VAL=(5666250752)
+# # COMP_OBJ_VAL=(5649473536) # LLama 3.1 8B
+# # # COMP_OBJ_VAL=(5006434304) # LLama 3.1 8B
+# # # COMP_OBJ_VAL=(4989657088) # LLama 3.1 8B
+# # # COMP_OBJ_VAL=(4793835520) # LLama 3.1 8B
+# # # COMP_OBJ_VAL=(4777058304) # LLama 3.1 8B
+# # COMP_OBJ_VAL=(4134019072) # LLama 3.1 8B
+# N_TOKEN=1024
+
+COMP_OBJ=(kvbits memory)
+COMP_OBJ_VAL=(2.25 8264884224)
+N_TOKEN=131072
 
 # COMP_OBJ_VAL=(10194001920)
 # COMP_OBJ_VAL=(9534185472)
@@ -125,6 +129,7 @@ N_TOKEN=1024
 # N_TOKEN=1048576
 
 COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
+COMP_OBJ_THRESHOLD_LIST=(0.005 $(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
 
 # PREFER="metric#0.0 ${TARGET_COMP_OBJ}#${TARGET_COMP_OBJ_VAL}"
 
@@ -142,11 +147,13 @@ do
     # fi
     # MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - $COMP_OBJ_THRESHOLD" | bc) )
     # MAX_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} + $COMP_OBJ_THRESHOLD" | bc) )
-    MIN_COMP_OBJ_LIST+=( 1 )
-    MAX_COMP_OBJ_LIST+=( 1e99 )
+    # MIN_COMP_OBJ_LIST+=( 1 )
+    # MAX_COMP_OBJ_LIST+=( 1e99 )
+    MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - ${COMP_OBJ_THRESHOLD_LIST[$IDX]}" | bc) )
+    MAX_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} + ${COMP_OBJ_THRESHOLD_LIST[$IDX]}" | bc) )
 done
 
-
+COMP_OBJ_TEXT=$(IFS="_" ; echo "${COMP_OBJ[*]}")
 COMP_OBJ=$(IFS=" " ; echo "${COMP_OBJ[*]}")
 COMP_OBJ_VAL=$(IFS=" " ; echo "${COMP_OBJ_VAL[*]}")
 PREFER=$(IFS=" " ; echo "${PREFER_LIST[*]}")
@@ -169,7 +176,7 @@ LOSS_FUNC="jsd"
 
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
 # TASKS="coqa gsm8k truthfulqa"
-TASKS="coqa truthfulqa"
+TASKS="coqa truthfulqa gsm8k"
 
 LM_EVAL_BATCH_SIZE=32
 
@@ -202,8 +209,8 @@ PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 N=10
 
 RANDOM_SAMPLE=1000
-# SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${MIN_COMP_OBJ}_${MAX_COMP_OBJ}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
-SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+# SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_sqrt_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 
 
@@ -235,14 +242,14 @@ ARGS="--gpu_id ${DEVICES} \
 --random_sample ${RANDOM_SAMPLE} \
 --save ${SAVE} \
 --quant_model_paths ${QMODEL_PATHS} \
---kv_scale ${KV_SCALE} \
---sqrt \
---use_key_token \
---trunc_len ${TRUNC_LEN} \
---sliding_window ${SLIDING_WINDOW} \
---alpha ${ALPHA} \
---beta ${BETA}
+--kv_scale ${KV_SCALE} 
 "
+# --sqrt \
+# --use_key_token \
+# --trunc_len ${TRUNC_LEN} \
+# --sliding_window ${SLIDING_WINDOW} \
+# --alpha ${ALPHA} \
+# --beta ${BETA}
 # --prefer ${PREFER} \
 # -n ${N}
 # --zeroshot \

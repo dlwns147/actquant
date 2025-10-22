@@ -265,7 +265,7 @@ class LlamaSearchSpace:
     
 
 
-class LlamaGroupSizeSearchSpace:
+class LlamaGroupSizeQEFTSearchSpace:
     def __init__(self, 
                 bits,
                 group_size,
@@ -276,6 +276,7 @@ class LlamaGroupSizeSearchSpace:
                 comp_obj_max=[],
                 outlier_bits=[],
                 only_outlier_bits=False,
+                n_qeft_column=[0],
                 n_token=0,
                 rand_size=5
                 ):
@@ -292,17 +293,20 @@ class LlamaGroupSizeSearchSpace:
 
         assert 'w' in pass_module and 'k' in pass_module and 'v' in pass_module
 
-        self.q_proj_option = bits['w']
-        self.k_proj_option = bits['w']
-        self.v_proj_option = bits['w']
-        self.o_proj_option = bits['w']
+        self.q_proj_option = [(b, c) if b in outlier_bits else (b, 0) for b in bits['w'] for c in n_qeft_column]
+        self.k_proj_option = [(b, c) if b in outlier_bits else (b, 0) for b in bits['w'] for c in n_qeft_column]
+        self.v_proj_option = [(b, c) if b in outlier_bits else (b, 0) for b in bits['w'] for c in n_qeft_column]
+        # self.o_proj_option = [(b, c) if b in outlier_bits else (b, 0) for b in bits['w'] for c in n_qeft_column]
+        self.o_proj_option = [(b, 0) for b in bits['w']]
 
-        self.gate_proj_option = bits['w']
-        self.up_proj_option = bits['w']
-        self.down_proj_option = bits['w']
+        self.gate_proj_option = [(b, c) if b in outlier_bits else (b, 0) for b in bits['w'] for c in n_qeft_column]
+        self.up_proj_option = [(b, c) if b in outlier_bits else (b, 0) for b in bits['w'] for c in n_qeft_column]
+        self.down_proj_option = [(b, c) if b in outlier_bits else (b, 0) for b in bits['w'] for c in n_qeft_column]
 
         # self.k_option = bits['k']
         # self.v_option = bits['v']
+        
+        self.w_option = [(b, c) if b in outlier_bits else (b, 0) for b in bits['w'] for c in n_qeft_column]
         
         if 'k' in bits and 'k' in group_size:
             assert (len(group_size['k']) == 1 or len(group_size['k']) == len(bits['k']))
@@ -538,7 +542,8 @@ class LlamaGroupSizeSearchSpace:
     
 
 
-class LlamaGroupSizeQEFTSearchSpace:
+
+class LlamaGroupSizeSearchSpace:
     def __init__(self, 
                 bits,
                 group_size,
@@ -547,11 +552,10 @@ class LlamaGroupSizeQEFTSearchSpace:
                 comp_obj='bits',
                 comp_obj_min=[],
                 comp_obj_max=[],
-                n_out=[],
                 outlier_bits=[],
                 only_outlier_bits=False,
-                rand_size=15,
-                n_token=0
+                n_token=0,
+                rand_size=5
                 ):
         
         # self.q_proj_option = sorted(([b for b in quant_model_bits if b not in list(map(int, outlier_bits['self_attn.q_proj']))] if only_outlier_bits else quant_model_bits) + outlier_bits['self_attn.q_proj'])
@@ -566,19 +570,17 @@ class LlamaGroupSizeQEFTSearchSpace:
 
         assert 'w' in pass_module and 'k' in pass_module and 'v' in pass_module
 
-        self.n_out = sorted(n_out)
-        for o_bits in outlier_bits:
-            assert o_bits in bits['w'], f"outlier_bits: {outlier_bits}, w_bits: {bits['w']}"
-            
-        if len(n_out) > 0:
-            self.q_proj_option = [(b, o) if b in outlier_bits else (b, 0) for b in bits['w'] for o in n_out] 
-            self.k_proj_option = [(b, o) if b in outlier_bits else (b, 0) for b in bits['w'] for o in n_out] 
-            self.v_proj_option = [(b, o) if b in outlier_bits else (b, 0) for b in bits['w'] for o in n_out] 
-            self.o_proj_option = [(b, 0) for b in bits['w']] 
+        self.q_proj_option = bits['w']
+        self.k_proj_option = bits['w']
+        self.v_proj_option = bits['w']
+        self.o_proj_option = bits['w']
 
-            self.gate_proj_option = [(b, o) if b in outlier_bits else (b, 0) for b in bits['w'] for o in n_out] 
-            self.up_proj_option = [(b, o) if b in outlier_bits else (b, 0) for b in bits['w'] for o in n_out] 
-            self.down_proj_option = [(b, o) if b in outlier_bits else (b, 0) for b in bits['w'] for o in n_out] 
+        self.gate_proj_option = bits['w']
+        self.up_proj_option = bits['w']
+        self.down_proj_option = bits['w']
+
+        # self.k_option = bits['k']
+        # self.v_option = bits['v']
         
         if 'k' in bits and 'k' in group_size:
             assert (len(group_size['k']) == 1 or len(group_size['k']) == len(bits['k']))
@@ -693,20 +695,20 @@ class LlamaGroupSizeQEFTSearchSpace:
                     blk, linear_name = linear.split('.')[0], linear.split('.')[-1]
                     blk = int(blk)
                     if linear_name == 'q_proj':
-                        w_q_list[blk] = max(self.q_proj_option, key=lambda x: (x[0], x[1]))
+                        w_q_list[blk] = max(self.q_proj_option)
                     elif linear_name == 'k_proj':
-                        w_k_list[blk] = max(self.k_proj_option, key=lambda x: (x[0], x[1]))
+                        w_k_list[blk] = max(self.k_proj_option)
                     elif linear_name == 'v_proj':
-                        w_v_list[blk] = max(self.v_proj_option, key=lambda x: (x[0], x[1]))
+                        w_v_list[blk] = max(self.v_proj_option)
                     elif linear_name == 'o_proj':
-                        w_o_list[blk] = max(self.o_proj_option, key=lambda x: (x[0], x[1]))
+                        w_o_list[blk] = max(self.o_proj_option)
 
                     elif linear_name == 'gate_proj':
-                        w_gate_list[blk] = max(self.gate_proj_option, key=lambda x: (x[0], x[1]))
+                        w_gate_list[blk] = max(self.gate_proj_option)
                     elif linear_name == 'up_proj':
-                        w_up_list[blk] = max(self.up_proj_option, key=lambda x: (x[0], x[1]))
+                        w_up_list[blk] = max(self.up_proj_option)
                     elif linear_name == 'down_proj':
-                        w_down_list[blk] = max(self.down_proj_option, key=lambda x: (x[0], x[1]))
+                        w_down_list[blk] = max(self.down_proj_option)
                     else:
                         raise NotImplementedError(f"linear : {linear}")
                 
@@ -737,23 +739,31 @@ class LlamaGroupSizeQEFTSearchSpace:
     def initialize(self, n_doe, pool=[]):
         # sample one arch with least (lb of hyperparameters) and most complexity (ub of hyperparameters)
         data = []
-        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-        n_doe -= 1
-        if len(self.comp_obj) > 1:
-            data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-            n_doe -= 1
-            data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
-            n_doe -= 1
+        for w_option in getattr(self, f'{self.config["linear"][0].split(".")[-1]}_option'):
+            for k_option in self.k_option:
+                for v_option in self.v_option:
+                    data.append(self.sample(w=[[w_option] for _ in self.config['linear']], k=[k_option], v=[v_option])[0])
+                    n_doe -= 1
+
+        # data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        # n_doe -= 1
+        # if len(self.comp_obj) > 1:
+        #     data.append(self.sample(w=[[min(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[max(self.k_option, key=lambda x: (x[0], -x[1]))], v=[max(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        #     n_doe -= 1
+        #     data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option, key=lambda x: (x[0], -x[1]))], v=[min(self.v_option, key=lambda x: (x[0], -x[1]))])[0])
+        #     n_doe -= 1
         
         # for w_bits in self.q_proj_option:
         #     data.append(self.sample(w=[[w_bits]] * self.n_linear, k=[min(self.k_option)], v=[min(self.v_option)])[0])
@@ -768,29 +778,26 @@ class LlamaGroupSizeQEFTSearchSpace:
         # encode arch ({'q': [0, 2, 4], 'k: , etc}) to integer bit-string [1, 0, 2, 1, ...]
         w_encode = np.concatenate([
                 np.array([
-                    np.argwhere(_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option')))[0, 0] for _x in arch['w'][linear] 
+                    # np.argwhere(_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option')))[0, 0] for _x in arch['w'][linear] 
+                    np.argwhere((_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option'))).all(axis=1))[0, 0] for _x in arch['w'][linear]
                     # np.argwhere(_x == np.array(self.w_bits))[0, 0] for _x in arch['w'][linear]
                     ]) for linear in self.config['linear']
             ])
-        # a_encode = np.concatenate([np.array([np.argwhere(_x == np.array(self.abits))[0, 0] for _x in arch['activation'][linear_group]]) for linear_group in self.config['linear_group']])
         k_encode = np.array([np.argwhere((_x == np.array(self.k_option)).all(axis=1))[0, 0] for _x in arch['k']])
         v_encode = np.array([np.argwhere((_x == np.array(self.v_option)).all(axis=1))[0, 0] for _x in arch['v']])
         
         return np.concatenate((w_encode, k_encode, v_encode))
-        # return np.concatenate((w_encode, a_encode, k_encode, v_encode))
     
     def encode_predictor(self, arch):
-        # import pdb; pdb.set_trace()
         # encode arch ({'q': [0, 2, 4], 'k: , etc}) to integer bit-string [1, 0, 2, 1, ...]
         w_encode = np.concatenate([
                 np.array([
-                    np.argwhere(_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option')))[0, 0] for blk_idx, _x in enumerate(arch['w'][linear]) if f'{blk_idx}.{linear}' not in self.pass_module['w'] 
-                    ]) if 'wbits' in self.comp_obj or 'memory' in self.comp_obj  else [] for linear in self.config['linear']
+                    # np.argwhere(_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option')))[0, 0] for blk_idx, _x in enumerate(arch['w'][linear]) if f'{blk_idx}.{linear}' not in self.pass_module['w'] 
+                    np.argwhere((_x == np.array(getattr(self, f'{linear.split(".")[-1]}_option'))).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['w'][linear]) if f'{blk_idx}.{linear}' not in self.pass_module['w'] 
+                    ]) if 'wbits' in self.comp_obj or 'memory' in self.comp_obj else [] for linear in self.config['linear']
             ])
-        # a_encode = np.concatenate([np.array([np.argwhere(_x == np.array(self.abits))[0, 0] for _x in arch['activation'][linear_group]]) for linear_group in self.config['linear_group']])
         k_encode = np.array([np.argwhere((_x == np.array(self.k_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['k']) if blk_idx not in self.pass_module['k']]) if 'kvbits' in self.comp_obj or 'kbits' in self.comp_obj or 'memory' in self.comp_obj else []
         v_encode = np.array([np.argwhere((_x == np.array(self.v_option)).all(axis=1))[0, 0] for blk_idx, _x in enumerate(arch['v']) if blk_idx not in self.pass_module['v']]) if 'kvbits' in self.comp_obj or 'vbits' in self.comp_obj or 'memory' in self.comp_obj else []
-        # import pdb; pdb.set_trace()
 
         return np.concatenate((w_encode, k_encode, v_encode))
         # return np.delete(np.concatenate((w_encode, k_encode, v_encode)), self.pass_idx_list, axis=-1)

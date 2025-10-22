@@ -131,7 +131,7 @@ def main(args):
             metric.append([new_metric, f_w[0], f_kv[0]])
             subnets.append(arch)
     metric = np.array(metric)
-    comp_obj = [get_net_info(a, config, group_size, n_token=args.n_token)[comp_obj] for comp_obj in args.comp_obj for a in subnets] 
+    comp_obj = [[get_net_info(a, config, group_size, n_token=args.n_token)[comp_obj] for comp_obj in args.comp_obj] for a in subnets] 
     sort_idx = np.argsort(metric[:, 0])
     # F = np.column_stack(([m[0] for m in metric], [m[1] for m in metric], [m[2] for m in metric], comp_obj))[sort_idx, :]
     # F = np.column_stack((*[[m[:, i] for m in metric] for i in range(len(metric))], *[comp_obj[obj] for obj in args.comp_obj]))[sort_idx]

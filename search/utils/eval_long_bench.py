@@ -65,6 +65,8 @@ def build_chat(tokenizer, prompt, model_name):
         conv.append_message(conv.roles[0], prompt)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
+    # elif "Llama-3.1" in model_name.lower() and "instruct" in model_name:
+    #     pass
     # elif "mistral-v0.2-instruct" in model_name.lower():
     #     messages = [
     #         {

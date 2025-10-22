@@ -42,10 +42,21 @@ def compute_bits(arch, config, group_size, target='w'):
             n_param += out_dim * in_dim * len(linear_bits)
             linear_group_size = in_dim if w_group_size == -1 else w_group_size
             assert in_dim % linear_group_size == 0
-            for bits in linear_bits:
-                memory_usage += out_dim * in_dim * bits
-                if bits < 16:
-                    memory_usage += (in_dim // linear_group_size) * out_dim * 32 # scale + zero point
+            if type(linear_bits[0]) == int:
+                for bits in linear_bits:
+                    memory_usage += out_dim * in_dim * bits
+                    if bits < 16:
+                        memory_usage += (in_dim // linear_group_size) * out_dim * 32 # scale + zero point
+                        
+            elif type(linear_bits[0]) == list and len(linear_bits[0]) == 2:
+                for bits, n_outlier_column in linear_bits:
+                    memory_usage += out_dim * in_dim * bits
+                    if bits < 16:
+                        memory_usage += (in_dim // linear_group_size) * out_dim * 32 # scale + zero point
+                    memory_usage += out_dim * n_outlier_column * 16
+            else:
+                raise NotImplementedError(type(linear_bits[0]))
+                        
         # return memory_usage / config['model_numel']
         return memory_usage / n_param
     
@@ -90,13 +101,27 @@ def compute_memory(arch, config, group_size, n_token=0, residual_length=0):
     for linear, linear_bits in arch['w'].items():
         w_group_size = group_size['w']
         out_dim, in_dim = map(int, config['linear_shape'][linear])
-        if w_group_size == -1:
-            w_group_size = in_dim
-        assert in_dim % w_group_size == 0
-        for bits in linear_bits:
-            weight_memory += out_dim * in_dim * bits // 8
-            if bits < 16:
-                weight_memory += (in_dim // w_group_size) * out_dim * 4 # scale + zero point
+        linear_group_size = in_dim if w_group_size == -1 else w_group_size
+        assert in_dim % linear_group_size == 0
+        if type(linear_bits[0]) == int:
+            for bits in linear_bits:
+                weight_memory += out_dim * in_dim * bits // 8
+                if bits < 16:
+                    weight_memory += (in_dim // linear_group_size) * out_dim * 4 # scale + zero point
+                    
+        elif type(linear_bits[0]) == list and len(linear_bits[0]) == 2:
+            for bits, n_outlier_column in linear_bits:
+                weight_memory += out_dim * in_dim * bits // 8
+                if bits < 16:
+                    weight_memory += (in_dim // linear_group_size) * out_dim * 4 # scale + zero point
+                weight_memory += out_dim * n_outlier_column * 2
+        
+        else:
+            raise NotImplementedError(type(linear_bits[0]))
+        # for bits in linear_bits:
+        #     weight_memory += out_dim * in_dim * bits // 8
+        #     if bits < 16:
+        #         weight_memory += (in_dim // linear_group_size) * out_dim * 4 # scale + zero point
                 
     weight_memory += int(config['vocab_size']) * int(config['hidden_size']) * 4 # lm_head + embed_token
     weight_memory += int(config['n_norm']) * int(config['hidden_size']) * 2 # norms

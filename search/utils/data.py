@@ -94,8 +94,6 @@ def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_
     attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
     return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=True)
     
-
-
 def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, min_seqlen=0, cache_dir=None, ignore_index=-100):
     traindata = load_dataset('gsm8k', 'main', split='train', cache_dir=cache_dir)
     traindata = traindata.shuffle(seed=seed)    
@@ -133,6 +131,18 @@ def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, min
     
     return DataLoader(TensorDataset(input_ids_dataset, attention_mask_dataset, labels_dataset), batch_size=batch_size)
 
+
+def get_gov_report_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
+    traindata = load_dataset('launch/gov_report', 'plain_text', split='train', cache_dir=cache_dir)
+    traindata = traindata.shuffle(seed=seed)[:n_sample]['document']
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenized = tokenizer(traindata, max_length=seqlen, padding=True, truncation=True, return_tensors='pt')
+    tokenizer.pad_token = None
+    input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']        
+    
+    return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size)
+
+
 def get_trainloaders(name, n_sample=128, seed=0, seqlen=2048, model='', batch_size=1, cache_dir=None):
     tokenizer = get_tokenizer(model)
     if 'wikitext2' in name:
@@ -152,6 +162,8 @@ def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0
             return get_c4_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
         if 'gsm8k' in name:
             return get_gsm8k_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, min_seqlen=min_seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
+        if 'gov_report' in name:
+            return get_gov_report_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
     else:
         if 'wikitext2' in name:
             return get_wikitext2(tokenizer=tokenizer, batch_size=batch_size, seqlen=seqlen, cache_dir=cache_dir)
