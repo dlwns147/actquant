@@ -1,0 +1,79 @@
+[33ma81a1f5[m[33m ([m[1;36mHEAD -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m fix search space encoding
+[33m9797c13[m update gov_report dataset and ruler benchmark
+[33m62b668e[m add kv_scale
+[33m614dc28[m add kv_scale & LongPPL
+[33md76aa3a[m update jsd approximation
+[33m266caf2[m remove pdb
+[33ma11adab[m fix comp obj range indexing
+[33m9200449[m update wkv split post search
+[33ma80341d[m update wkv joint post search
+[33m792b614[m update csv files with new jsd
+[33mb48d397[m update wkv joint post search
+[33m017a9b8[m update joint wkv post search
+[33m649076a[m update joint wkv post search
+[33mb70136b[m fix JSD
+[33md7079e0[m remove pdb
+[33mcf88135[m add bit combinations
+[33m657c512[m add group size in get_quantized_model
+[33mcd6a009[m update kv cache config
+[33ma91e66b[m update cache settings in each post search tasks
+[33m96d045d[m fix residual length & output fake quant in Long Bench
+[33m78ded31[m fixed applying kv cache replacement in awq/gptq/qeft models
+[33m6ca7176[m Merge branch 'main' of github.com:dlwns147/actquant
+[33m24ada34[m update csv files
+[33m1688993[m fix lsd calculation
+[33m026cb4e[m update csv files
+[33me40b330[m update model to transformers==4.50.2
+[33mf673d46[m add key token calculation (LongPPL/JSD)
+[33m814322f[m add n_token in complexity calculation of ppl
+[33m1646e50[m add gsm8k sensitivity
+[33m5b9066e[m fake quant for padded inputs
+[33m74ce73c[m update memory obj
+[33ma811807[m update w avg bits
+[33m9140c60[m does not replace model when kv bits are 16
+[33m3d097c5[m update quant & group size for memory obj
+[33me0cec18[m update memory calculation
+[33m625a6b6[m add kv linear
+[33m6f7ac4d[m add sensitivity files
+[33m0af67b5[m update gsm8k calibration set & memory caculcation
+[33m5f59304[m update gsm8k dataset
+[33m0453d8c[m update gsm8k dataset
+[33m0e778f7[m update gsm8k dataset
+[33ma53cf44[m fix avg kv group size
+[33m26fc0e1[m add 4d causal mask
+[33mc00d420[m update mlp predictor
+[33mfaef2a0[m update lm_eval evaluator
+[33m303b632[m add lm_eval evaluator
+[33m3172f93[m add lm_eval evaluator
+[33m266c1d3[m support fp16 model
+[33ma4f8fe5[m update group size
+[33m6dded8e[m fix output of lm eval task
+[33mbe863e7[m revert to previous gemv cuda
+[33m4ffd639[m refine result text
+[33mb349ef4[m add 8bit kv bgemv
+[33m40a3b3d[m fix groupsize calculation
+[33m5909811[m fix groupsize calculation
+[33m819c10d[m update flexible group size
+[33m777e7b2[m update flexible group size
+[33m41bfb33[m update group size search
+[33m1bb1731[m update group size search
+[33m0720ff8[m update group size search
+[33m0bd74c1[m update group size search
+[33m03477ef[m fix replace
+[33m5e652c6[m update longbench config
+[33mef87e40[m add mistral, qwen2 kivi model
+[33m63bfa41[m fix import path
+[33m795a23f[m fix import path
+[33m92245cf[m update sensitivity files
+[33me470f7d[m update model config
+[33mb886787[m update model config
+[33m0fc869c[m set dtype float16
+[33m8e9e49e[m remove egg-info
+[33m87da455[m resolve egg-info
+[33mbf78bc9[m resolve egg-info
+[33m08f1749[m resolve setup.py
+[33m554e60c[m add longbench
+[33m03b2997[m deinit submodule
+[33md7e1c18[m submodule deinit
+[33mfbef952[m git init
+[33me60eb99[m Initial commit
