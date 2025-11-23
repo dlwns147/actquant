@@ -251,6 +251,9 @@ def compute_longppl(
             nll_key = loss_key.float() * key_token_len * bs
             nll_key_list.append(nll_key)
             total_key_token_len += key_token_len * bs
+        
+        decode_key_tokens = tokenizer.decode(shift_labels[key_tokens])
+        print(f'decode_key_tokens: {decode_key_tokens}')
 
         # loss_func = torch.nn.CrossEntropyLoss(reduction='mean')
         # loss_all = loss_func(output_full.logits[0, :-1, :], input_ids[0, 1:]).to(torch.float)
@@ -264,6 +267,7 @@ def compute_longppl(
     ppl_all = torch.exp(sum(nll_all_list) / total_seqlen)
     ppl_key = torch.exp(sum(nll_key_list) / total_key_token_len) if total_key_token_len > 0 else None
     return {"longppl": ppl_key, "n_key_token": total_key_token_len, "ppl": ppl_all, "n_token": total_seqlen}
+
     
         
         # loss_f = torch.nn.CrossEntropyLoss(reduction='none')

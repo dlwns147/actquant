@@ -151,9 +151,14 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
         shift_labels = labels[:, 1:].reshape(-1)
         mask = torch.where(shift_labels == ignore_index, False, True)
         if key_token_list is not None:
-            key_token_mask = torch.zeros(len(mask), dtype=torch.bool, device=mask.device)
-            key_token_mask[key_token_list[i]] = True 
-            mask[~key_token_mask] = False
+            key_token_mask = torch.ones_like(mask, dtype=bool)
+            key_token_mask[key_token_list[i]] = False
+            mask[key_token_mask] = False
+            mask[key_token_list[i]] = True
+            
+            # key_token_mask = torch.zeros(len(mask), dtype=torch.bool, device=mask.device)
+            # key_token_mask[key_token_list[i]] = True 
+            # mask[~key_token_mask] = False
         cur_seqlen = mask.sum()
         
         # Compute loss

@@ -618,16 +618,16 @@ class LlamaGroupSizeQEFTSearchSpace:
         self.comp_obj_max = comp_obj_max
         
         self.pass_idx_list = []
-        for i, linear in enumerate(config['linear']):
-            _, linear = linear.split('.')
-            if len(getattr(self, f'{linear}_option')) == 1:
-                self.pass_idx_list += list(range(i * self.n_block, (i + 1) * self.n_block))
+        # for i, linear in enumerate(config['linear']):
+        #     _, linear = linear.split('.')
+        #     if len(getattr(self, f'{linear}_option')) == 1:
+        #         self.pass_idx_list += list(range(i * self.n_block, (i + 1) * self.n_block))
 
-        if len(self.k_option) == 1:
-            self.pass_idx_list += list(range(self.n_linear * self.n_block, (self.n_linear + 1) * self.n_block))
+        # if len(self.k_option) == 1:
+        #     self.pass_idx_list += list(range(self.n_linear * self.n_block, (self.n_linear + 1) * self.n_block))
 
-        if len(self.v_option) == 1:
-            self.pass_idx_list += list(range((self.n_linear + 1) * self.n_block, (self.n_linear + 2) * self.n_block))
+        # if len(self.v_option) == 1:
+        #     self.pass_idx_list += list(range((self.n_linear + 1) * self.n_block, (self.n_linear + 2) * self.n_block))
 
         for pass_linear in self.pass_module['w']:
             blk, linear = pass_linear.split('.', maxsplit=1)

@@ -9,6 +9,10 @@ from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 # from pymoo.model.decision_making import DecisionMaking, normalize, find_outliers_upper_tail, NeighborFinder
 from pymoo.core.decision_making import DecisionMaking, find_outliers_upper_tail, NeighborFinder
 from pymoo.util.normalization import normalize
+from pymoo.optimize import minimize
+from pymoo.core.problem import Problem
+from pymoo.algorithms.soo.nonconvex.ga import GA
+from utils.ga import MySampling, BinaryCrossover, MyMutation
 
 from evaluator import LlamaEvaluator
 from tqdm import tqdm
@@ -17,7 +21,7 @@ import csv
 import math
 import scipy.stats as stats
 from matplotlib import pyplot as plt
-from utils.func import init_accelerator, get_net_info, clean_up, process_dtype
+from utils.func import init_accelerator, get_net_info, clean_up, process_dtype, get_correlation
 from utils.eval import measure_latency, eval_zeroshot
 from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
@@ -67,6 +71,56 @@ class HighTradeoffPoints(DecisionMaking):
             return find_outliers_upper_tail(mu)  # return points with trade-off > 2*sigma
 
 
+class SubsetProblem(Problem):
+    """ select a subset to diversify the pareto front """
+    def __init__(self, candidates, archive, K, n_obj):
+        super().__init__(n_var=len(candidates), n_obj=1,
+                         n_constr=1, xl=0, xu=1, type_var=bool)
+        self.archive = archive
+        self.candidates = candidates
+        self.n_max = K
+
+    def _evaluate(self, x, out, *args, **kwargs):
+        # f = np.full((x.shape[0], self.n_obj), np.nan)
+        f = np.full((x.shape[0], 1), np.nan)
+        g = np.full((x.shape[0], 1), np.nan)
+
+        # import pdb; pdb.set_trace()
+        for i, _x in enumerate(x):
+            # append selected candidates to archive then sort
+            # for j in range(self.n_obj):
+            #     tmp = np.sort(np.concatenate((self.archive[:, j], self.candidates[_x][:, j])))
+            #     f[i, j] = np.std(np.diff(tmp))
+
+            tmp = np.sort(np.concatenate((self.archive, self.candidates[_x])), axis=0)
+            f[i, 0] = np.std(np.diff(tmp, axis=0))
+            # f[i, 0] = np.std(np.diff(tmp, axis=0), axis=0).sum()
+            # f[i, 0] = np.std(np.diff(tmp, axis=0), axis=0).max()
+
+            # tmp = np.sort(np.concatenate((self.archive, self.candidates[_x])))
+            # f[i, 0] = np.std(np.diff(tmp))
+
+            # we penalize if the number of selected candidates is not exactly K
+            g[i, 0] = (self.n_max - np.sum(_x)) ** 2
+
+        out["F"] = f
+        out["G"] = g
+        
+def _subset_selection(self, pop, nd_F, K, pop_size):
+    # candidates = np.array([get_net_info(self.search_space.decode(x), self.config, self.latency_table)[self.sec_obj] for x in pop.get("X")])
+    # problem = SubsetProblem(candidates, nd_F, K)
+    problem = SubsetProblem(pop.get("F")[:, 1:], nd_F, K, len(self.comp_obj))
+    algorithm = GA(
+    # algorithm = NSGA2(
+        pop_size=pop_size, sampling=MySampling(), crossover=BinaryCrossover(),
+        mutation=MyMutation(), eliminate_duplicates=True)
+
+    res = minimize(
+        problem, algorithm, ('n_gen', 60), verbose=False)
+
+    return res.X
+
+
 def main(args):
     print(args)
 
@@ -89,7 +143,7 @@ def main(args):
     # for expr, comp_obj in zip(args.expr, args.expr_comp_obj):
     for expr, comp_obj in zip([args.w_expr, args.kv_expr], ['wbits', 'kvbits']):
         with open(expr, 'r') as f:
-            result_json = json.load(f)
+            result_json = json.load(open(expr))
             archive = result_json['archive'] + result_json['candidates']
             archive_list.append(archive)
 
@@ -127,27 +181,6 @@ def main(args):
         tau, _ = stats.kendalltau(new_jsd, jsd_actual)
         print(f'alpha: {lsq_res["alpha"]}, beta: {lsq_res["beta"]}, gamma: {lsq_res["gamma"]}')
         print(f'rho: {rho}, tau: {tau}')
-        
-    # if args.random_sample_path and len(args.grid_search):
-    #     with open(args.random_sample_path, 'r') as f:
-    #         reader = list(csv.reader(f))
-    #         jsd_actual = np.array(reader[-4], dtype=float)
-    #         jsd_w = np.array(reader[-2], dtype=float)
-    #         jsd_kv = np.array(reader[-1], dtype=float)
-            
-    #     max_tau = 0
-    #     max_kv_scale = 0
-    #     for kv_scale in args.grid_search:
-    #         new_jsd = jsd_w + kv_scale * jsd_kv
-    #         rho, _ = stats.spearmanr(new_jsd, jsd_actual)
-    #         tau, _ = stats.kendalltau(new_jsd, jsd_actual)
-    #         print(f'kv_scale: {kv_scale}, rho: {rho}, tau: {tau}')
-    #         if tau > max_tau:
-    #             max_tau = tau
-    #             max_kv_scale = kv_scale
-    #     print(f'max_kv_scale: {max_kv_scale}, max_tau: {max_tau}')
-    #     exit()
-
     
     for f_w, subnet_w in zip(F_list[0], subnets_list[0]):
         for f_kv, subnet_kv in zip(F_list[1], subnets_list[1]):
@@ -601,7 +634,6 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--random_sample_path', type=str, default='', 
                         help='')
-    parser.add_argument('--grid_search', type=float, nargs='+', default=[])
     
     parser.add_argument('--sqrt', action='store_true', help='')
     parser.add_argument('--kv_scale', type=float, default=1.,

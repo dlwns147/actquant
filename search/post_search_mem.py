@@ -81,105 +81,20 @@ def main(args):
     assert n_comp_obj == n_comp_obj_min and n_comp_obj_min == n_comp_obj_max
 
     group_size = {'w': args.w_group_size, 'k': args.k_group_size, 'v': args.v_group_size}
-    archive_list = []
-    subnets_list = []
     metric_list = []
-    F_list = []
     
     # for expr, comp_obj in zip(args.expr, args.expr_comp_obj):
-    for expr, comp_obj in zip([args.w_expr, args.kv_expr], ['wbits', 'kvbits']):
-        with open(expr, 'r') as f:
-            result_json = json.load(f)
-            archive = result_json['archive'] + result_json['candidates']
-            archive_list.append(archive)
+    with open(args.expr, 'r') as f:
+        result_json = json.load(f)
+        archive = result_json['archive'] + result_json['candidates']
 
-        subnets, metric = [v[0] for v in archive], [v[1] for v in archive]
-        # subnets_list.append(subnets)
-        # metric_list.append(metric)
-        # prev_metric_list.append(metric)
-        comp_obj = [get_net_info(n, config, group_size)[comp_obj] for n in subnets]
-        
-        sort_idx = np.argsort(metric)
-        F = np.column_stack((metric, comp_obj))[sort_idx]
-        subnets = np.array(subnets)[sort_idx]
-        if args.expr_front:
-            front = NonDominatedSorting().do(F, only_non_dominated_front=True)
-            F = F[front]
-            subnets = subnets[front]
-        
-        F_list.append(F)
-        subnets_list.append(subnets)
+    subnets, metric = [v[0] for v in archive], [v[1] for v in archive]
+    comp_obj = [[get_net_info(a, config, group_size, n_token=args.n_token)[comp_obj] for comp_obj in args.comp_obj] for a in subnets]
     
-    metric = []
-    subnets = []
-    # F = [new_metric, w_metric, kv_metric, *args.comp_obj]
-    # ln2 = math.log(2)
-    if args.random_sample_path:
-        with open(args.random_sample_path, 'r') as f:
-            reader = list(csv.reader(f))
-            jsd_actual = np.array(reader[-4], dtype=float)
-            jsd_w = np.array(reader[-2], dtype=float)
-            jsd_kv = np.array(reader[-1], dtype=float)
-        lsq_res = lsq(jsd_w=jsd_w, jsd_kv=jsd_kv, jsd_actual=jsd_actual, add_intercept=True)
-        new_jsd = lsq_res["alpha"] * jsd_w + lsq_res["beta"] * jsd_kv + lsq_res["gamma"]
-        
-        rho, _ = stats.spearmanr(new_jsd, jsd_actual)
-        tau, _ = stats.kendalltau(new_jsd, jsd_actual)
-        print(f'alpha: {lsq_res["alpha"]}, beta: {lsq_res["beta"]}, gamma: {lsq_res["gamma"]}')
-        print(f'rho: {rho}, tau: {tau}')
-        
-    # if args.random_sample_path and len(args.grid_search):
-    #     with open(args.random_sample_path, 'r') as f:
-    #         reader = list(csv.reader(f))
-    #         jsd_actual = np.array(reader[-4], dtype=float)
-    #         jsd_w = np.array(reader[-2], dtype=float)
-    #         jsd_kv = np.array(reader[-1], dtype=float)
-            
-    #     max_tau = 0
-    #     max_kv_scale = 0
-    #     for kv_scale in args.grid_search:
-    #         new_jsd = jsd_w + kv_scale * jsd_kv
-    #         rho, _ = stats.spearmanr(new_jsd, jsd_actual)
-    #         tau, _ = stats.kendalltau(new_jsd, jsd_actual)
-    #         print(f'kv_scale: {kv_scale}, rho: {rho}, tau: {tau}')
-    #         if tau > max_tau:
-    #             max_tau = tau
-    #             max_kv_scale = kv_scale
-    #     print(f'max_kv_scale: {max_kv_scale}, max_tau: {max_tau}')
-    #     exit()
-
-    
-    for f_w, subnet_w in zip(F_list[0], subnets_list[0]):
-        for f_kv, subnet_kv in zip(F_list[1], subnets_list[1]):
-            arch = dict()
-            arch['w'] = subnet_w['w']
-            arch['k'] = subnet_kv['k']
-            arch['v'] = subnet_kv['v']
-
-            if args.random_sample_path:
-                new_metric = lsq_res["alpha"] * f_w[0] + lsq_res["beta"] * f_kv[0] + lsq_res["gamma"]
-            # new_metric = f_w[0] + f_kv[0] - (f_w[0] * f_kv[0] / ln2)
-            elif not args.sqrt:
-                new_metric = f_w[0] + args.kv_scale * f_kv[0]
-            else:
-                new_metric = math.sqrt(f_w[0]) + args.kv_scale * math.sqrt(f_kv[0])
-            metric.append([new_metric, f_w[0], f_kv[0]])
-            subnets.append(arch)
-    metric = np.array(metric)
-    comp_obj = [[get_net_info(a, config, group_size, n_token=args.n_token)[comp_obj] for comp_obj in args.comp_obj] for a in subnets] 
-    sort_idx = np.argsort(metric[:, 0])
-    # F = np.column_stack(([m[0] for m in metric], [m[1] for m in metric], [m[2] for m in metric], comp_obj))[sort_idx, :]
-    # F = np.column_stack((*[[m[:, i] for m in metric] for i in range(len(metric))], *[comp_obj[obj] for obj in args.comp_obj]))[sort_idx]
-    
+    sort_idx = np.argsort(metric)
     F = np.column_stack((metric, comp_obj))[sort_idx]
     subnets = np.array(subnets)[sort_idx]
     
-            
-    # wbits = [get_net_info(a, config, group_size, n_token=args.n_token)['wbits'] for a in subnets] 
-    # kvbits = [get_net_info(a, config, group_size, n_token=args.n_token)['kvbits'] for a in subnets] 
-    # print(f'wbits: {wbits}')
-    # print(f'kvbits: {kvbits}')
-
     # pf_list, ps_list, pm_list, ppm_list = [], [], [], []
     if n_comp_obj_min > 0:
         flag = np.ones(len(F), dtype=bool)
@@ -544,15 +459,15 @@ if __name__ == '__main__':
     
     parser.add_argument('--save', type=str, default='',
                         help='location of dir to save')
-    # parser.add_argument('--expr', type=str, nargs='+', default=[''],
-    #                     help='')
-    parser.add_argument('--w_expr', type=str, default='',
+    parser.add_argument('--expr', type=str, default='',
                         help='')
-    parser.add_argument('--kv_expr', type=str, default='',
-                        help='')
-    parser.add_argument('--expr_front', action='store_true', help='')
-    # parser.add_argument('--expr_comp_obj', type=str, nargs='+', default=[''],
+    # parser.add_argument('--w_expr', type=str, default='',
     #                     help='')
+    # parser.add_argument('--kv_expr', type=str, default='',
+    #                     help='')
+    # parser.add_argument('--expr_front', action='store_true', help='')
+    parser.add_argument('--expr_comp_obj', type=str, nargs='+', default=[''],
+                        help='')
     parser.add_argument('--prefer', type=str, nargs='+', default=[], 
                         help='preferences in choosing architectures (metric#10 bits#150)')
     # parser.add_argument('--high_tradeoff', action='store_true', help='')

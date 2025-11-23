@@ -78,17 +78,17 @@ QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 N_OUTLIER=32
 OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.pth
 
-# COMP_OBJ=(wbits kvbits)
-# COMP_OBJ_TEXT="wkv"
-# COMP_OBJ_VAL=(3 3.25)
-# # COMP_OBJ_VAL=(3 4.25)
+COMP_OBJ=(wbits kvbits)
+COMP_OBJ_TEXT="wkv"
+COMP_OBJ_VAL=(3 3)
+# COMP_OBJ_VAL=(3 4.25)
 # # COMP_OBJ_VAL=(4.25 3.25)
-# COMP_OBJ_THRESHOLD=0.005
+COMP_OBJ_THRESHOLD_LIST=(0.005 0.005)
+N_TOKEN=1024
 
 # COMP_OBJ=(kvbits)
 # COMP_OBJ_VAL=(3.0)
-# COMP_OBJ_THRESHOLD=0.005
-
+# COMP_OBJ_THRESHOLD_LIST=(0.005)
 # N_TOKEN=1024
 
 # COMP_OBJ=(memory)
@@ -103,9 +103,9 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 # # COMP_OBJ_VAL=(4134019072) # LLama 3.1 8B
 # N_TOKEN=1024
 
-COMP_OBJ=(kvbits memory)
-COMP_OBJ_VAL=(2.25 8264884224)
-N_TOKEN=131072
+# COMP_OBJ=(kvbits memory)
+# COMP_OBJ_VAL=(2.25 8264884224)
+# N_TOKEN=131072
 
 # COMP_OBJ_VAL=(10194001920)
 # COMP_OBJ_VAL=(9534185472)
@@ -128,8 +128,8 @@ N_TOKEN=131072
 # # COMP_OBJ_VAL=(40605589504)
 # N_TOKEN=1048576
 
-COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
-COMP_OBJ_THRESHOLD_LIST=(0.005 $(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
+# COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
+# COMP_OBJ_THRESHOLD_LIST=(0.005 $(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
 
 # PREFER="metric#0.0 ${TARGET_COMP_OBJ}#${TARGET_COMP_OBJ_VAL}"
 
@@ -213,6 +213,8 @@ SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_sqrt_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 
+RANDOM_SAMPLE_PATH=/NAS/SJ/actquant/search/save/result/2509071826_Llama-3.1-8B-Instruct_random_sample_hqq_kivi_1000_sample_seed_wikitext2/results.csv
+GRID_SEARCH="1 0.1 0.01 0.001 0.0001"
 
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
@@ -242,8 +244,10 @@ ARGS="--gpu_id ${DEVICES} \
 --random_sample ${RANDOM_SAMPLE} \
 --save ${SAVE} \
 --quant_model_paths ${QMODEL_PATHS} \
---kv_scale ${KV_SCALE} 
-"
+--kv_scale ${KV_SCALE} \
+--random_sample_path ${RANDOM_SAMPLE_PATH} \
+--grid_search ${GRID_SEARCH}"
+
 # --sqrt \
 # --use_key_token \
 # --trunc_len ${TRUNC_LEN} \
