@@ -316,8 +316,8 @@ def main(args):
                 for sentence in sentences:
                     f.write(sentence)
                     
-        if args.ruler:
-            pass
+        # if args.ruler:
+        #     pass
         
         if 'awq' in args.w_method or 'gptq' in args.w_method or 'qeft' in args.w_method:
             del model, evaluator.model

@@ -27,10 +27,14 @@ DEVICES=${1}
 # MODEL_NAME=Qwen3-8B
 # MODEL_NAME=Qwen3-14B
 
-MODEL_PATH=/SSD/huggingface/mistralai
-# MODEL_NAME=Mistral-7B-v0.3
-MODEL_NAME=Mistral-7B-Instruct-v0.3
-# MODEL_NAME=Mixtral-8x7B-v0.1
+# MODEL_PATH=/SSD/huggingface/mistralai
+# # MODEL_NAME=Mistral-7B-v0.3
+# MODEL_NAME=Mistral-7B-Instruct-v0.3
+# # MODEL_NAME=Mixtral-8x7B-v0.1
+
+MODEL_PATH=/SSD/huggingface/facebook
+MODEL_NAME=opt-1.3b
+
 
 DTYPE=float16
 

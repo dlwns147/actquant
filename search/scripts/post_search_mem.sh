@@ -198,13 +198,15 @@ ARGS="--gpu_id ${DEVICES} \
 --loss_func ${LOSS_FUNC} \
 --save ${SAVE} \
 --zeroshot \
---tasks ${TASKS}"
+--tasks ${TASKS} \
+--long_bench \
+--long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
+--long_bench_config ${LONG_BENCH_CONFIG}
+--prefer ${PREFER}"
+
 # --random_sample ${RANDOM_SAMPLE} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
-# --long_bench \
-# --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
-# --long_bench_config ${LONG_BENCH_CONFIG}
-# --prefer ${PREFER} \
+
 for g in "${K_GROUP_SIZE[@]}"
 do
     ARGS+=" --k_group_size ${g} "
