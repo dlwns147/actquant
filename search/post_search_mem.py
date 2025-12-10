@@ -139,6 +139,8 @@ def main(args):
         if args.random_sample is not None and args.random_sample < len(pf):
             I = np.random.choice(I, size=args.random_sample, replace=False)
             I.sort()
+        else:
+            I = I[:args.n]
 
 
     # always add most accurate architectures
@@ -175,12 +177,7 @@ def main(args):
         # use_flash=args.use_flash,
         k_quant_scheme=args.k_quant_scheme,
         v_quant_scheme=args.v_quant_scheme,
-        loss_func=args.loss_func,
-        use_key_token=args.use_key_token,
-        trunc_len=args.trunc_len,
-        sliding_window=args.sliding_window,
-        alpha=args.alpha,
-        beta=args.beta
+        loss_func=args.loss_func
     )
     
     comp_save_list = [list() for _ in get_net_info({}, None, group_size=-1, n_token=0).keys()]
@@ -525,16 +522,6 @@ if __name__ == '__main__':
     parser.add_argument('--kv_scale', type=float, default=1.,
                         help='')
 
-    parser.add_argument('--use_key_token', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
-    parser.add_argument('--trunc_len', type=int, default=512, 
-                        help='truncation length for long PPL/JSD calculation')
-    parser.add_argument('--sliding_window', type=int, default=128, 
-                        help='sliding_window length for long PPL/JSD calculation')
-    parser.add_argument('--alpha', type=int, default=2, 
-                        help='Long-short distance (LSD) threshold for long PPL/JSD calculation')
-    parser.add_argument('--beta', type=int, default=-2, 
-                        help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
-    
 
     cfgs = parser.parse_args()
     main(cfgs)

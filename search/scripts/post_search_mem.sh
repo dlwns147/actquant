@@ -30,10 +30,10 @@ CONFIG=config/llama.json
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
 
-# W_METHOD=hqq
-# W_METHOD_TEXT=hqq
-W_METHOD=awq
-W_METHOD_TEXT=awq
+W_METHOD=hqq
+W_METHOD_TEXT=hqq
+# W_METHOD=awq
+# W_METHOD_TEXT=awq
 # W_METHOD="awq layer_prune"
 # W_METHOD_TEXT=awq_layer_prune
 # W_METHOD=fp16
@@ -201,8 +201,7 @@ ARGS="--gpu_id ${DEVICES} \
 --tasks ${TASKS} \
 --long_bench \
 --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
---long_bench_config ${LONG_BENCH_CONFIG}
---prefer ${PREFER}"
+--long_bench_config ${LONG_BENCH_CONFIG}"
 
 # --random_sample ${RANDOM_SAMPLE} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
@@ -231,6 +230,7 @@ ${ARGS}
 # --latency_table_file ${LATENCY_TABLE}
 # --outlier_path ${OUTLIER_PATH} \
 # --only_front \
+# --prefer ${PREFER}
 
 
     # --greedy_search_result_path ${GREEDY_SEARCH}

@@ -139,7 +139,7 @@ MAX_COMP_OBJ_LIST=()
 
 for IDX in "${!COMP_OBJ[@]}"
 do
-    PREFER_LIST+=( "${COMP_OBJ[$IDX]}#${COMP_OBJ_VAL[$IDX]}" )
+    # PREFER_LIST+=( "${COMP_OBJ[$IDX]}#${COMP_OBJ_VAL[$IDX]}" )
     # if [ "${COMP_OBJ[$IDX]}" == "memory" ]; then
     #     MIN_COMP_OBJ_LIST+=( 0 )
     # elif [[ "${COMP_OBJ[$IDX]}" == "kvbits" || "${COMP_OBJ[$IDX]}" == "wbits" ]]; then
@@ -205,8 +205,11 @@ LONG_BENCH_TASK=""
 
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
-# N=1
-N=10
+RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
+RULER_YAML_PATH=utils/ruler_utils
+
+N=1
+# N=10
 
 RANDOM_SAMPLE=1000
 SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
@@ -234,28 +237,33 @@ ARGS="--gpu_id ${DEVICES} \
 --k_quant_scheme ${K_QUANT_SCHEME} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
 --n_token ${N_TOKEN} \
+--expr_front \
 --debug \
 --w_expr ${W_EXPR} \
 --kv_expr ${KV_EXPR} \
---expr_front \
---datasets ${DATASETS} \
 --metric ${METRIC} \
 --loss_func ${LOSS_FUNC} \
+-n ${N}
 --random_sample ${RANDOM_SAMPLE} \
 --save ${SAVE} \
 --quant_model_paths ${QMODEL_PATHS} \
 --kv_scale ${KV_SCALE} \
---random_sample_path ${RANDOM_SAMPLE_PATH} \
---grid_search ${GRID_SEARCH}"
+--ruler \
+--ruler_task ${RULER_TASK} \
+--ruler_yaml_path ${RULER_YAML_PATH}"
+# --datasets ${DATASETS} \
 
+#  \
+# --random_sample_path ${RANDOM_SAMPLE_PATH} \
+# --grid_search ${GRID_SEARCH}
+
+# --prefer ${PREFER} \
 # --sqrt \
 # --use_key_token \
 # --trunc_len ${TRUNC_LEN} \
 # --sliding_window ${SLIDING_WINDOW} \
 # --alpha ${ALPHA} \
 # --beta ${BETA}
-# --prefer ${PREFER} \
-# -n ${N}
 # --zeroshot \
 # --tasks ${TASKS} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \

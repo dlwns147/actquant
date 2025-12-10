@@ -21,6 +21,7 @@ from utils.func import init_accelerator, get_net_info, clean_up, process_dtype
 from utils.eval import measure_latency, eval_zeroshot
 from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
+# from utils.eval_ruler import eval_ruler
 import warnings
 warnings.simplefilter("ignore")
 
@@ -224,6 +225,8 @@ def main(args):
         if args.random_sample is not None and args.random_sample < len(pf):
             I = np.random.choice(I, size=args.random_sample, replace=False)
             I.sort()
+        else:
+            I = I[:args.n]
 
 
     # always add most accurate architectures
@@ -261,11 +264,6 @@ def main(args):
         k_quant_scheme=args.k_quant_scheme,
         v_quant_scheme=args.v_quant_scheme,
         loss_func=args.loss_func,
-        use_key_token=args.use_key_token,
-        trunc_len=args.trunc_len,
-        sliding_window=args.sliding_window,
-        alpha=args.alpha,
-        beta=args.beta
     )
     
     comp_save_list = [list() for _ in get_net_info({}, None, group_size=-1, n_token=0).keys()]
@@ -404,9 +402,22 @@ def main(args):
                 for sentence in sentences:
                     f.write(sentence)
                     
-        # if args.ruler:
-        #     pass
         
+        # if args.ruler:
+        #     clean_up()
+        #     if args.kv_method == 'kivi':
+        #         model.config.kivi_config.residual_length = args.residual_length
+        #     elif args.kv_method == 'hqq':
+        #         model.generation_config.cache_config = args.residual_length
+        #     model.config.quant_kv_output = False
+        #     model.config.use_cache = True
+            
+        #     ruler_start = time()
+        #     eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks)
+        #     ruler_time = time() - ruler_start
+        #     print(f'RULER Time: {ruler_time:.2f}s')
+            
+                    
         if 'awq' in args.w_method or 'gptq' in args.w_method or 'qeft' in args.w_method:
             del model, evaluator.model
             clean_up()
@@ -610,15 +621,17 @@ if __name__ == '__main__':
     parser.add_argument('--kv_scale', type=float, default=1.,
                         help='')
 
-    parser.add_argument('--use_key_token', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
-    parser.add_argument('--trunc_len', type=int, default=512, 
-                        help='truncation length for long PPL/JSD calculation')
-    parser.add_argument('--sliding_window', type=int, default=128, 
-                        help='sliding_window length for long PPL/JSD calculation')
-    parser.add_argument('--alpha', type=int, default=2, 
-                        help='Long-short distance (LSD) threshold for long PPL/JSD calculation')
-    parser.add_argument('--beta', type=int, default=-2, 
-                        help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
+    parser.add_argument('--ruler', action='store_true', help='')
+    parser.add_argument("--ruler_task", type=str, default=None, help="Task name", nargs="+",
+                        choices=["niah_single_1", "niah_single_2", "niah_single_3", "niah_multikey_1", "niah_multikey_2", "niah_multikey_3", "niah_multivalue", "niah_multiquery", "ruler_vt", "ruler_cwe", "ruler_fwe", "ruler_qa_squad", "ruler_qa_hotpot"])
+    # parser.add_argument("--max_seq_length", type=int, default=4096, 
+                        # choices=[4096,8192,16384,32768,65536,131072,262144,524288,1048576], help="Maximum sequence length")
+    parser.add_argument("--ruler_length", type=int, nargs='+', default=[4096])
+    parser.add_argument('--ruler_yaml_path', type=str, default='',
+                        help='')
+    parser.add_argument("--ruler_sample", type=int, default=50, help="Number of samples to evaluate")
+    parser.add_argument("--ruler_gen_toks", type=int, default=None, help="Number of tokens to generate")
+    parser.add_argument("--ruler_batch_size", type=int, default=1, help="Batch size")
     
 
     cfgs = parser.parse_args()

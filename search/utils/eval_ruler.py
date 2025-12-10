@@ -1,223 +1,183 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""
-Get summary.csv with score and null predictions amount.
-
-Running
-```
-python evaluate.py \
-    --data_dir /path/to/your/prediction_jsonl_folder \
-    --benchmark synthetic
-```
-"""
-
-import re
 import os
-import argparse
-import nltk
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
-    
-import pandas as pd
-import importlib
-import yaml
-from pathlib import Path
+import torch
+from time import time
+from copy import deepcopy
 from tqdm import tqdm
-from collections import defaultdict
-from manifest_utils import read_manifest, write_manifest
-# from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
+from transformers import StopStringCriteria
+from lm_eval.tasks import utils
+from .ruler_utils import niah_utils, vt_utils, cwe_utils, fwe_utils, qa_utils, common_utils
+from torch.utils.data import DataLoader
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--data_dir", type=str, required=True, help='path to the prediction jsonl files')
-parser.add_argument("--benchmark", type=str, default='synthetic', help='Options: [synthetic]')
-parser.add_argument("--verbose", type=int, default=0, help='how many lines you want to display.')
-args = parser.parse_args()
-print(args)
-
-def postprocess_pred(predict_str: str, task_config: dict):
-
-    predict_str = predict_str.strip()
-
-    # Remove all non-printable characters
-    np_pattern = re.compile(r'[\x00-\x1f]')
-    predict_str = np_pattern.sub('\n', predict_str).strip()
-
-    return predict_str
-
-
-def get_pred_and_ref(
-    predictions_file: str,
-    task_config: dict,
-    input_field: str = 'input',
-    references_field: str = 'outputs',
-    prediction_field: str = 'pred',
-    metadata_field: str = 'others',
-):
-    lines = read_manifest(predictions_file)
-
-    inputs = []
-    predicts = []
-    references = []
-    indices = []
-
-    for line in tqdm(lines):
-        input = line[input_field]
-        predict = line[prediction_field]
-        predict = postprocess_pred(predict, task_config)
-        reference = line.get(references_field, [line.get('output', '')])
-        index = line[metadata_field].get('id', line['index'])
-        
-        inputs.append(input)
-        predicts.append(predict)
-        references.append(reference)
-        indices.append(index)
-        
-    return inputs, predicts, references, indices
-
-def run_evaluation_per_task(task_config: dict, predictions_file: str, verbose: int = 0):
-    inputs, predicts, references, indices = get_pred_and_ref(
-        predictions_file=predictions_file,
-        task_config=task_config,
-    )
-
-    task_nulls = f'{sum([len(x)==0 for x in predicts])}/{len(predicts)}'
-
-    if len(references) > 0 and references[0][0] is not None:
-        task_score = task_config['metric_fn'](predicts, references)
-    else:
-        task_score = 0.0
-
-    if verbose != 0:
-        print('=' * 40)
-        for i, (input, reference, predict) in enumerate(zip(inputs, references, predicts)):
-            print(f'Input     : {input}')
-            print(f'Reference : {reference}')
-            print(f'Prediction: {predict}')
-            print('=' * 40)
-            if i > verbose:
-                break
-
-    return task_score, task_nulls, predicts, indices
-
-
-def write_evaluation(results: dict):
-    tasks = list(results.keys())
-    score = [results[task]['score'] for task in tasks]
-    nulls = [results[task]['nulls'] for task in tasks]
-    dfs = [
-        ['Tasks'] + tasks,
-        ['Score'] + score,
-        ['Nulls'] + nulls,
-    ]
-
-    output_file = os.path.join(args.data_dir, 'summary.csv' if len(tasks) > 1 else f'summary-{tasks[0]}.csv')
-    df = pd.DataFrame(dfs)
-    df.to_csv(output_file, index=False)
-    print('\n=============================================\n')
-    print(df)
-    print(f'\nSaved eval results to {output_file}')
-
-
-def write_submission(results: dict):
-    COLUMNS = ["Task", "ID", "Prediction"]
-    dfs = pd.DataFrame(columns=COLUMNS, data=[])
+def prepare_generation_kwargs(task_config_map, task_name: str, yaml_path:str, gen_toks=None) -> tuple[dict, int]:
+    """태스크별 generation_kwargs와 max_gen_toks를 준비"""
+    config_path = task_config_map.get(task_name)
+    if config_path is None:
+        # 기본값 사용 (niah_single_1과 동일)
+        config_path = os.path.join(yaml_path, "niah_single_1.yaml")
+    config = utils.load_yaml_config(config_path)
+    generation_kwargs = deepcopy(config["generation_kwargs"])
+    generation_kwargs.pop("until", None)
+    max_gen_toks = generation_kwargs.pop("max_gen_toks")
     
-    for task, result in results.items():
-        df = pd.DataFrame({
-            'Task': task,
-            'ID': result['indices'], 
-            'Prediction': result['predicts']
-        })
-        dfs = pd.concat((dfs, df[COLUMNS]))
-        
-    output_file = os.path.join(args.data_dir, 'submission.csv')
-    dfs = dfs.reset_index(drop=True)
-    dfs.to_csv(output_file, index=False)
-    print(f'\nSaved submission results to {output_file}')
-
-
-def aggregate_chunk(folder):
-    jsonl_files = [file for file in os.listdir(folder) if Path(file).suffix == '.jsonl' ]
-    chunk_files = sorted([file for file in jsonl_files if re.match(r'.*[^_]+-\d+\.jsonl', file)])
-    chunk_files_dict = defaultdict(list)
-    for file in chunk_files:
-        task = '-'.join(file.split('-')[:-1])
-        chunk_files_dict[task].append(file)
-
-    for task, files in chunk_files_dict.items():
-        lines = []
-        for file in sorted(files):
-            file = os.path.join(folder, file)
-            lines += read_manifest(file)
-            os.remove(file) # Remove chunk files
-        write_manifest(os.path.join(folder, f'{task}.jsonl'), lines)
-
-
-def main():
-    curr_folder = os.path.dirname(os.path.abspath(__file__))
+    if gen_toks is not None:
+        max_gen_toks = gen_toks
     
-    try:
-        module = importlib.import_module(f"{args.benchmark}.constants")
-    except ImportError:
-        print(f"Module eval.{args.benchmark}.constants not found.")
+    return generation_kwargs, max_gen_toks
 
-    tasks_base = module.TASKS
-    with open(os.path.join(curr_folder, f"../{args.benchmark}.yaml"), "r") as f:
-        tasks_customized = yaml.safe_load(f)
 
+def eval_ruler(model, 
+               tokenizer, 
+               model_id,
+               yaml_path='',
+               tasks=["niah_single_1", "niah_single_2", "niah_single_3", "niah_multikey_1", "niah_multikey_2", "niah_multikey_3", "niah_multivalue", "niah_multiquery", "ruler_vt", "ruler_cwe", "ruler_fwe", "ruler_qa_squad", "ruler_qa_hotpot"],
+               length=[4096],
+               batch_size=1,
+               nsample=50, 
+               seed=0, 
+               gen_toks=128):
+    
+    task_function = {
+        # NIAH tasks
+        "niah_single_1": niah_utils.niah_single_1,
+        "niah_single_2": niah_utils.niah_single_2,
+        "niah_single_3": niah_utils.niah_single_3,
+        "niah_multikey_1": niah_utils.niah_multikey_1,
+        "niah_multikey_2": niah_utils.niah_multikey_2,
+        "niah_multikey_3": niah_utils.niah_multikey_3,
+        "niah_multivalue": niah_utils.niah_multivalue,
+        "niah_multiquery": niah_utils.niah_multiquery,
+
+        # Ruler tasks
+        "ruler_vt": vt_utils.get_vt_dataset,
+        "ruler_cwe": cwe_utils.get_cw_dataset,
+        "ruler_fwe": fwe_utils.fwe_download,
+        "ruler_qa_squad": qa_utils.get_squad,
+        "ruler_qa_hotpot": qa_utils.get_hotpotqa
+    }
+
+    # 태스크별 config 파일 경로 매핑
+    task_config_map = {
+        "niah_single_1": os.path.join(yaml_path, 'niah_single_1.yaml'),
+        "niah_single_2": os.path.join(yaml_path, 'niah_single_2.yaml'),
+        "niah_single_3": os.path.join(yaml_path, 'niah_single_3.yaml'),
+        "niah_multikey_1": os.path.join(yaml_path, 'niah_multikey_1.yaml'),
+        "niah_multikey_2": os.path.join(yaml_path, 'niah_multikey_2.yaml'),
+        "niah_multikey_3": os.path.join(yaml_path, 'niah_multikey_3.yaml'),
+        "niah_multivalue": os.path.join(yaml_path, 'niah_multivalue.yaml'),
+        "niah_multiquery": os.path.join(yaml_path, 'niah_multiquery.yaml'),
+        "ruler_vt": os.path.join(yaml_path, 'vt.yaml'),
+        "ruler_cwe": os.path.join(yaml_path, 'cwe.yaml'),
+        "ruler_fwe": os.path.join(yaml_path, 'fwe.yaml'),
+        "ruler_qa_squad": os.path.join(yaml_path, 'qa_squad.yaml'),
+        "ruler_qa_hotpot": os.path.join(yaml_path, 'qa_hotpot.yaml'),
+    }
+    
+    common_utils.DEFAULT_SEQ_LENGTHS = length
+    task_function = {task: task_function[task] for task in tasks}
+
+    # 태스크별 generation 설정 저장
+    task_generation_configs = {task: prepare_generation_kwargs(task_config_map, task, yaml_path, gen_toks) for task in task_function.keys()}
+
+    datasets = dict()
+    for task in task_function.keys():
+        dataset = task_function[task](model=model_id)['test']
+        import pdb; pdb.set_trace()
         
-    TASKS = tasks_customized
-    for _, config in TASKS.items():
-        config.update(tasks_base[config['task']])
-
-    print(f"Total tasks: {list(TASKS.keys())}")
-
-    # Aggregate all prediction files
-    aggregate_chunk(args.data_dir)
-
-    # Get scores and nulls
-    jsonl_files = [file for file in os.listdir(args.data_dir) if Path(file).suffix == '.jsonl']
-    eval_results = {}
-    subm_results = {}
-
-
-    for task, config in TASKS.items():
-
-        if f'{task}.jsonl' not in jsonl_files:
-            print(f'Prediction file {task}.jsonl is not found.')
-            continue
-
-        print(f'Evaluate task {task}...')
-        task_score, task_nulls, predicts, indices = run_evaluation_per_task(
-            predictions_file=os.path.join(args.data_dir, f'{task}.jsonl'),
-            task_config=config,
-        )
-        eval_results[task] = {
-            'score': task_score,
-            'nulls': task_nulls,
-        }
-        subm_results[task] = {
-            'predicts': predicts,
-            'indices':indices,
-        }
+        dataset.shuffle(seed)
+        dataset = dataset[: nsample]
+        dataset = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        # dataset = dataset.batch(batch_size)
         
-    # Write to csv
-    write_evaluation(eval_results)
-    write_submission(subm_results)
+        # # 모든 프로세스에서 동일한 샘플을 선택하도록 시드 설정
+        # generator = torch.Generator()
+        # generator.manual_seed(args.seed)
+        # sample_idx = torch.randint(len(dataset), (sample, ), generator=generator)
+        
+        # dataset = dataset.select(sample_idx.tolist())
+        # dataset = dataset.batch(args.batch_size)
+        datasets[task] = dataset
 
-if __name__ == '__main__':
-    main()
+    # until = [tokenizer.decode(tokenizer.eos_token_id, skip_special_tokens=False), '.']
+
+    tot_scores = dict()
+    start_time = time()
+
+    for task in task_function.keys():
+        kwargs, max_gen_toks = task_generation_configs[task]
+        task_scores = []
+        
+        for docs in tqdm(datasets[task], desc=f"Evaluating {task}"):
+            for i in range(len(docs['input'])):
+                docs['input'][i] = docs['input'][i] + ' ' + docs['gen_prefix'][i]
+
+            tokenized_sample = tokenizer(docs["input"], return_tensors="pt", padding=True)
+            device = model.device
+            context_enc = tokenized_sample.input_ids.to(device)
+            attn_masks = tokenized_sample.attention_mask.to(device)
+
+            # stopping_criteria = stop_sequences_criteria(
+            #     tokenizer, until, context_enc.shape[1], context_enc.shape[0])
+            
+            stopping_criteria = StopStringCriteria(tokenizer, [tokenizer.decode(tokenizer.eos_token_id, skip_special_tokens=False)], context_enc.shape[1], context_enc.shape[0])
+
+            kwargs["max_length"] = context_enc.shape[1] + max_gen_toks
+
+            with torch.inference_mode():
+                output = model.generate(
+                    input_ids=context_enc,
+                    attention_mask=attn_masks,
+                    pad_token_id=tokenizer.pad_token_id,
+                    stopping_criteria=stopping_criteria,
+                    use_cache=True,
+                    **kwargs
+                )
+
+            # output이 올바른 device에 있는지 확인하고 필요시 이동
+            # device_map="auto"를 사용할 때는 output이 모델의 마지막 레이어 device에 있을 수 있음
+            # if output.device != context_enc.device:
+            #     output = output.to(context_enc.device)
+            
+            output = output[:, context_enc.shape[1].item():]
+            output = tokenizer.batch_decode(output, skip_special_tokens=True)
+
+            for i in range(len(docs['input'])):
+                doc = {key: docs[key][i] for key in docs.keys()}
+                score = common_utils.process_results(doc, [output[i]])[str(doc["max_length"])]
+                task_scores.append(score)
+        
+        if len(task_scores) > 0:
+            avg_score = sum(task_scores) / len(task_scores)
+            tot_scores[task] = avg_score
+            print(f"Average score for {task}: {avg_score}")
+
+    end_time = time()
+    elapsed_time = (end_time - start_time) / 60
+    import pdb; pdb.set_trace()
+    
+    # 메인 프로세스에서만 결과 출력 및 저장
+    if accelerator.is_main_process:
+        print(f"Time taken: {elapsed_time} minutes")
+        tot_scores["time"] = elapsed_time
+        print(tot_scores)
+
+        if args.debug:
+            return
+        
+        if args.use_kivi:
+            save_path = f"./results/{args.model_name}_length_{args.max_seq_length}_sample_{args.limit}_batch_{args.batch_size}_gen_{args.gen_toks}_kivi_k{args.k_bits}v{args.v_bits}g{args.group_size}r{args.residual_length}.json"
+        else:
+            save_path = f"./results/{args.model_name}_length_{args.max_seq_length}_sample_{args.limit}_batch_{args.batch_size}_gen_{args.gen_toks}.json"
+            
+        if os.path.exists(save_path):
+            with open(save_path, "r") as f:
+                existing_scores = json.load(f)
+                existing_scores.update(tot_scores)
+                tot_scores = existing_scores
+                
+        save_dir = os.path.dirname(save_path)
+        os.makedirs(save_dir, exist_ok=True)
+
+        with open(save_path, "w") as f:
+            json.dump(tot_scores, f, indent=2, ensure_ascii=False)
+
+        print(f"Results saved to {save_path}")

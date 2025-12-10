@@ -8,7 +8,7 @@ class TokenizerWrapper:
     def __init__(self, input_ids):
         self.input_ids = input_ids
 
-def get_tokenizer(model, use_fast=False, cache_dir=None):
+def get_tokenizer(model, use_fast=False, cache_dir=None, **kwargs):
     # if "llama" in model.lower():
     #     tokenizer = LlamaTokenizer.from_pretrained(model, use_fast=False, cache_dir=cache_dir)
     #     # fix for transformer 4.28.0.dev0 compatibility
