@@ -169,18 +169,21 @@ def sys_word_pair_random(
     return write_jsons
 
 
-def get_dataset(pretrained, seq=None, **kwargs):
-    tokenizer = get_tokenizer(pretrained)
+# def get_dataset(pretrained, seq=None, **kwargs):
+def get_dataset(seq=None, **kwargs):
+    # tokenizer = get_tokenizer(pretrained)
+    tokenizer = get_tokenizer(**kwargs)
     write_jsons = sys_word_pair_random(
-        num_samples=500, max_seq_length=seq, tokenizer=tokenizer
+        num_samples=kwargs.get('num_samples', 500), max_seq_length=seq, tokenizer=tokenizer
     )
     return write_jsons
 
 
 def get_cw_dataset(**kwargs):
-    pretrained = kwargs.get("tokenizer", kwargs.get("pretrained", {}))
+    # pretrained = kwargs.get("tokenizer", kwargs.get("pretrained", {}))
     df = (
-        get_dataset(pretrained, seq=seq)
+        # get_dataset(pretrained, seq=seq)
+        get_dataset(**kwargs, seq=seq)
         for seq in kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
     )
 

@@ -233,7 +233,11 @@ def init_accelerator(gpu_id, config):
 
     return accelerator, device_map
 
-def load_hqq_model(model_id, device_map, use_cache=False, inference=False):
+def load_hqq_model(model_id,
+                   device_map,
+                   use_cache=False,
+                   attn_implementation='flash_attention_2',
+                   inference=False):
 
     # # for fast model loading
     # org_kaiming_uniform = torch.nn.init.kaiming_uniform_
@@ -247,7 +251,7 @@ def load_hqq_model(model_id, device_map, use_cache=False, inference=False):
 
     model = None
     if model_id is not None:
-        model = AutoHQQHFModel.from_quantized(model_id, device_map='cpu')
+        model = AutoHQQHFModel.from_quantized(model_id, device_map='cpu', attn_implementation=attn_implementation)
         model = simple_dispatch_model(model, device_map)
         model.config.use_cache = use_cache
         clean_up()
@@ -283,6 +287,7 @@ def get_hfmodel(model_name_or_path: str,
                 dtype='auto',
                 trust_remote_code=False,
                 use_cache=False,
+                attn_implementation='flash_attention_2',
                 **kwargs):
 
     # assert kwargs.get('attn_implementation') in ['hf', 'ft']        ## hf : huggingface, ft : faster transformer
@@ -312,6 +317,7 @@ def get_hfmodel(model_name_or_path: str,
         trust_remote_code=trust_remote_code,
         low_cpu_mem_usage=True,
         use_cache=use_cache,
+        attn_implementation=attn_implementation,
         **kwargs
     )
     model.config.use_cache = use_cache

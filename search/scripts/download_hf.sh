@@ -41,8 +41,8 @@ MODEL_NAME=Llama-3.1-8B-Instruct
 # # MODEL_NAME=Qwen2.5-1.5B-Instruct
 # MODEL_NAME=Qwen2.5-3B-Instruct
 
-MODEL_PATH=facebook
-MODEL_NAME=opt-1.3b
+# MODEL_PATH=facebook
+# MODEL_NAME=opt-1.3b
 
 
 python download_hf.py --model_path ${MODEL_PATH} --model_name ${MODEL_NAME}

@@ -25,12 +25,39 @@ CONFIG=config/llama.json
 
 # W_METHOD=hqq
 # W_METHOD_TEXT=hqq
-W_METHOD=awq
-W_METHOD_TEXT=awq
+# W_METHOD=awq
+# W_METHOD_TEXT=awq
 # W_METHOD="awq layer_prune"
 # W_METHOD_TEXT=awq_layer_prune
-# W_METHOD=fp16
-# W_METHOD_TEXT=fp16
+W_METHOD=fp16
+W_METHOD_TEXT=fp16
+
+W_BITS=16
+# W_BITS=4
+W_GROUP_SIZE=128
+
+# KV_METHOD="hqq"
+# KV_METHOD="kivi"
+KV_METHOD="fp16"
+
+# K_BITS=2
+# V_BITS=2
+# K_BITS=4
+# V_BITS=4
+# K_BITS=8
+# V_BITS=8
+K_BITS=16
+V_BITS=16
+
+# KV_GROUP_SIZE=0
+# KV_GROUP_SIZE=32
+# KV_GROUP_SIZE=64
+KV_GROUP_SIZE=128
+
+
+RESIDUAL_LENGTH=128
+K_QUANT_SCHEME=channel
+V_QUANT_SCHEME=token
 
 COMP_OBJ="bits"
 COMP_OBJ_TEXT=bits
@@ -46,39 +73,6 @@ TASKS="coqa gsm8k truthfulqa"
 N=1
 DATASETS="wikitext2 c4"
 
-# GROUP_SIZE=128
-# GROUP_SIZE=-1
-
-
-# TARGET_COMP_OBJ=bits
-# TARGET_BITS_LIST=(2 3 4)
-
-# W_BITS=16
-W_BITS=4
-W_GROUP_SIZE=128
-
-# KV_METHOD="hqq"
-KV_METHOD="kivi"
-
-# K_BITS=2
-# V_BITS=2
-K_BITS=4
-V_BITS=4
-# K_BITS=8
-# V_BITS=8
-# K_BITS=16
-# V_BITS=16
-
-# KV_GROUP_SIZE=0
-# KV_GROUP_SIZE=32
-# KV_GROUP_SIZE=64
-KV_GROUP_SIZE=128
-
-
-RESIDUAL_LENGTH=128
-K_QUANT_SCHEME=channel
-V_QUANT_SCHEME=token
-
 # LM_EVAL_BATCH_SIZE=1
 # LM_EVAL_BATCH_SIZE=4
 # LM_EVAL_BATCH_SIZE=16
@@ -93,6 +87,20 @@ SAVE=save/result/${TODAY}_test
 
 LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONG_BENCH_CONFIG=utils/long_bench_config
+
+# RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
+RULER_TASK="niah_single_1"
+RULER_YAML_PATH=utils/ruler_utils
+# RULER_LENGTH=4096
+# RULER_LENGTH=16384
+RULER_LENGTH=65536
+# RULER_LENGTH=128000
+# RULER_LENGTH=131072
+
+RULER_SAMPLE=1
+# RULER_SAMPLE=50
+RULER_BATCH_SIZE=1
+RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs
 
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
@@ -118,10 +126,18 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 -n ${N} \
 --save ${SAVE} \
 --clip_asym \
---datasets ${DATASETS} \
---zeroshot \
---tasks ${TASKS} \
---lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
+--ruler \
+--ruler_task ${RULER_TASK} \
+--ruler_yaml_path ${RULER_YAML_PATH} \
+--ruler_result_path ${RULER_RESULT_PATH} \
+--ruler_batch_size ${RULER_BATCH_SIZE} \
+--ruler_sample ${RULER_SAMPLE} \
+--ruler_length ${RULER_LENGTH}
+# --datasets ${DATASETS} \
+
+# --zeroshot \
+# --tasks ${TASKS} \
+# --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
 # --long_bench \
 # --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
 # --long_bench_config ${LONG_BENCH_CONFIG} \

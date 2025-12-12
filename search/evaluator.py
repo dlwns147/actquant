@@ -106,7 +106,7 @@ class LlamaEvaluator:
                 # with accelerator.main_process_first():
                 self.model = load_hqq_model(quant_model_paths[np.argmax(bits['w'])], device_map, inference)
 
-                if (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
+                if self.method['kv'] in ['hqq', 'kivi'] and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
                     self.model = replace_kv_cache(model=self.model,
                                                 tokenizer=self.tokenizer,
                                                 method=method['kv'],
@@ -124,7 +124,7 @@ class LlamaEvaluator:
             # self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
             self.model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
             
-            if (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
+            if self.method['kv'] in ['hqq', 'kivi'] and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
                 self.model = replace_kv_cache(model=self.model,
                                             tokenizer=self.tokenizer,
                                             method=method['kv'],
@@ -243,6 +243,8 @@ class LlamaEvaluator:
             if 'v' in arch:
                 self.model.config.kivi_config.v_bits = [x[0] for x in arch['v']]
                 self.model.config.kivi_config.v_group_size = [x[1] for x in arch['v']]
+        elif self.method['kv'] == 'fp16':
+            pass
         else:
             raise NotImplementedError(self.method['kv'])
         

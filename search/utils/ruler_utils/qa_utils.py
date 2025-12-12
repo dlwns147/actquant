@@ -204,13 +204,15 @@ def generate_samples(
     return write_jsons
 
 
-def get_dataset(pretrained, docs, qas, max_seq_length=None, **kwargs) -> list[dict]:
-    tokenizer = get_tokenizer(pretrained)
+# def get_dataset(pretrained, docs, qas, max_seq_length=None, **kwargs) -> list[dict]:
+    # tokenizer = get_tokenizer(pretrained)
+def get_dataset(docs, qas, max_seq_length=None, **kwargs) -> list[dict]:
+    tokenizer = get_tokenizer(**kwargs)
     write_jsons = generate_samples(
         tokenizer=tokenizer,
         docs=docs,
         qas=qas,
-        num_samples=500,
+        num_samples=kwargs.get('num_samples', 500),
         tokens_to_generate=32,
         max_seq_length=max_seq_length,
     )
@@ -218,13 +220,14 @@ def get_dataset(pretrained, docs, qas, max_seq_length=None, **kwargs) -> list[di
 
 
 def get_qa_dataset(ds, **kwargs) -> dict[str, datasets.Dataset]:
-    pretrained = kwargs.get("tokenizer", kwargs.get("pretrained", {}))
+    # pretrained = kwargs.get("tokenizer", kwargs.get("pretrained", {}))
     if ds == "squad":
         qas, docs = read_squad()
     else:
         qas, docs = read_hotpotqa()
     df = (
-        get_dataset(pretrained=pretrained, docs=docs, qas=qas, max_seq_length=seq)
+        # get_dataset(pretrained=pretrained, docs=docs, qas=qas, max_seq_length=seq)
+        get_dataset(docs=docs, qas=qas, max_seq_length=seq, **kwargs)
         for seq in kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
     )
 

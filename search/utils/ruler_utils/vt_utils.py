@@ -228,6 +228,7 @@ def sys_vartrack_w_noise_random(
 def get_dataset(
     tokenizer: Union["PreTrainedTokenizer", "PreTrainedTokenizerFast"],
     seq=None,
+    num_samples=500,
     **kwargs,
 ) -> list[dict]:
     icl_example = sys_vartrack_w_noise_random(
@@ -238,7 +239,7 @@ def get_dataset(
     )[0]
     write_jsons = sys_vartrack_w_noise_random(
         tokenizer=tokenizer,
-        num_samples=500,
+        num_samples=num_samples,
         max_seq_length=seq,
         icl_example=icl_example,
     )
@@ -246,9 +247,10 @@ def get_dataset(
 
 
 def get_vt_dataset(**kwargs) -> dict[str, datasets.Dataset]:
-    pretrained = kwargs.get("tokenizer", kwargs.get("pretrained", ""))
+    # pretrained = kwargs.get("tokenizer", kwargs.get("pretrained", ""))
     df = (
-        get_dataset(tokenizer=get_tokenizer(pretrained), seq=seq)
+        # get_dataset(tokenizer=get_tokenizer(pretrained), seq=seq)
+        get_dataset(tokenizer=get_tokenizer(**kwargs), seq=seq, num_samples=kwargs.get('num_samples', 500))
         for seq in kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
     )
 

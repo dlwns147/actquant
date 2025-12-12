@@ -21,7 +21,7 @@ from utils.func import init_accelerator, get_net_info, clean_up, process_dtype
 from utils.eval import measure_latency, eval_zeroshot
 from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
-# from utils.eval_ruler import eval_ruler
+from utils.eval_ruler import eval_ruler
 import warnings
 warnings.simplefilter("ignore")
 
@@ -401,27 +401,27 @@ def main(args):
             with open(os.path.join(args.long_bench_result_path, "pred_e" if args.long_bench_e else "pred", 'result.txt'), 'w') as f:
                 for sentence in sentences:
                     f.write(sentence)
-                    
-        
-        # if args.ruler:
-        #     clean_up()
-        #     if args.kv_method == 'kivi':
-        #         model.config.kivi_config.residual_length = args.residual_length
-        #     elif args.kv_method == 'hqq':
-        #         model.generation_config.cache_config = args.residual_length
-        #     model.config.quant_kv_output = False
-        #     model.config.use_cache = True
+
+        if args.ruler:
+            clean_up()
+            if args.kv_method == 'kivi':
+                model.config.kivi_config.residual_length = args.residual_length
+            elif args.kv_method == 'hqq':
+                model.generation_config.cache_config = args.residual_length
+            model.config.quant_kv_output = False
+            model.config.use_cache = True
+            # tokenizer=get_tokenizer(model_id)
+            # tokenizer.pad_token = tokenizer.eos_token
             
-        #     ruler_start = time()
-        #     eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks)
-        #     ruler_time = time() - ruler_start
-        #     print(f'RULER Time: {ruler_time:.2f}s')
+            ruler_start = time()
+            eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path)
+            ruler_time = time() - ruler_start
+            print(f'RULER Time: {ruler_time:.2f}s')
             
-                    
         if 'awq' in args.w_method or 'gptq' in args.w_method or 'qeft' in args.w_method:
             del model, evaluator.model
             clean_up()
-                    
+
     print(args)
     return
 
@@ -523,7 +523,7 @@ if __name__ == '__main__':
     
     parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
                         help='')
-    parser.add_argument('--kv_method', type=str, default='kivi', choices=['hqq', 'kivi'],
+    parser.add_argument('--kv_method', type=str, default='kivi', choices=['fp16', 'hqq', 'kivi'],
                         help='')
     
     parser.add_argument('--w_bits', type=int, nargs='+', default=[], 
@@ -632,6 +632,8 @@ if __name__ == '__main__':
     parser.add_argument("--ruler_sample", type=int, default=50, help="Number of samples to evaluate")
     parser.add_argument("--ruler_gen_toks", type=int, default=None, help="Number of tokens to generate")
     parser.add_argument("--ruler_batch_size", type=int, default=1, help="Batch size")
+    parser.add_argument('--ruler_result_path', type=str, default='',
+                        help='')
     
 
     cfgs = parser.parse_args()

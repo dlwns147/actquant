@@ -1,9 +1,11 @@
 import os
 import torch
+import json
 from time import time
 from copy import deepcopy
 from tqdm import tqdm
-from transformers import StopStringCriteria
+# from transformers import StopStringCriteria
+from lm_eval.models.utils import stop_sequences_criteria
 from lm_eval.tasks import utils
 from .ruler_utils import niah_utils, vt_utils, cwe_utils, fwe_utils, qa_utils, common_utils
 from torch.utils.data import DataLoader
@@ -29,12 +31,13 @@ def eval_ruler(model,
                tokenizer, 
                model_id,
                yaml_path='',
-               tasks=["niah_single_1", "niah_single_2", "niah_single_3", "niah_multikey_1", "niah_multikey_2", "niah_multikey_3", "niah_multivalue", "niah_multiquery", "ruler_vt", "ruler_cwe", "ruler_fwe", "ruler_qa_squad", "ruler_qa_hotpot"],
-               length=[4096],
+               tasks=[],
+               length=[],
                batch_size=1,
                nsample=50, 
                seed=0, 
-               gen_toks=128):
+               gen_toks=128,
+               result_path=''):
     
     task_function = {
         # NIAH tasks
@@ -72,35 +75,42 @@ def eval_ruler(model,
         "ruler_qa_hotpot": os.path.join(yaml_path, 'qa_hotpot.yaml'),
     }
     
-    common_utils.DEFAULT_SEQ_LENGTHS = length
+    task_until = {
+        "niah_single_1": ['.'],
+        "niah_single_2": ['.'],
+        "niah_single_3": ['.'],
+        "niah_multikey_1": ['.'],
+        "niah_multikey_2": ['.'],
+        "niah_multikey_3": ['.'],
+        "niah_multivalue": ['.'],
+        "niah_multiquery": ['.'],
+        "ruler_vt": ['.', '\n\n'],
+        "ruler_cwe": [],
+        "ruler_fwe": [],
+        "ruler_qa_squad": ['.'],
+        "ruler_qa_hotpot": ['.'],
+    }
+    
     task_function = {task: task_function[task] for task in tasks}
 
     # 태스크별 generation 설정 저장
     task_generation_configs = {task: prepare_generation_kwargs(task_config_map, task, yaml_path, gen_toks) for task in task_function.keys()}
 
     datasets = dict()
-    for task in task_function.keys():
-        dataset = task_function[task](model=model_id)['test']
-        import pdb; pdb.set_trace()
+    for task in tqdm(task_function.keys(), desc=f'Creating datasets'):
+        # print(f'Preparing {task} dataset')
+        dataset = task_function[task](model=model_id, max_seq_lengths=length, num_samples=nsample)['test']
         
         dataset.shuffle(seed)
-        dataset = dataset[: nsample]
+        dataset = dataset.select(range(nsample))
         dataset = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         # dataset = dataset.batch(batch_size)
         
-        # # 모든 프로세스에서 동일한 샘플을 선택하도록 시드 설정
-        # generator = torch.Generator()
-        # generator.manual_seed(args.seed)
-        # sample_idx = torch.randint(len(dataset), (sample, ), generator=generator)
-        
-        # dataset = dataset.select(sample_idx.tolist())
-        # dataset = dataset.batch(args.batch_size)
         datasets[task] = dataset
-
-    # until = [tokenizer.decode(tokenizer.eos_token_id, skip_special_tokens=False), '.']
 
     tot_scores = dict()
     start_time = time()
+    device = model.device
 
     for task in task_function.keys():
         kwargs, max_gen_toks = task_generation_configs[task]
@@ -110,15 +120,16 @@ def eval_ruler(model,
             for i in range(len(docs['input'])):
                 docs['input'][i] = docs['input'][i] + ' ' + docs['gen_prefix'][i]
 
-            tokenized_sample = tokenizer(docs["input"], return_tensors="pt", padding=True)
-            device = model.device
+            # tokenized_sample = tokenizer(docs["input"], return_tensors="pt", padding=True)
+            tokenized_sample = tokenizer(docs["input"], return_tensors="pt")
+            print(f'tokenized_sample: {tokenized_sample.input_ids.shape}')
             context_enc = tokenized_sample.input_ids.to(device)
             attn_masks = tokenized_sample.attention_mask.to(device)
 
             # stopping_criteria = stop_sequences_criteria(
             #     tokenizer, until, context_enc.shape[1], context_enc.shape[0])
             
-            stopping_criteria = StopStringCriteria(tokenizer, [tokenizer.decode(tokenizer.eos_token_id, skip_special_tokens=False)], context_enc.shape[1], context_enc.shape[0])
+            stopping_criteria = stop_sequences_criteria(tokenizer, [tokenizer.eos_token] + task_until[task], context_enc.shape[1], context_enc.shape[0])
 
             kwargs["max_length"] = context_enc.shape[1] + max_gen_toks
 
@@ -126,7 +137,7 @@ def eval_ruler(model,
                 output = model.generate(
                     input_ids=context_enc,
                     attention_mask=attn_masks,
-                    pad_token_id=tokenizer.pad_token_id,
+                    # pad_token_id=tokenizer.pad_token_id,
                     stopping_criteria=stopping_criteria,
                     use_cache=True,
                     **kwargs
@@ -137,7 +148,7 @@ def eval_ruler(model,
             # if output.device != context_enc.device:
             #     output = output.to(context_enc.device)
             
-            output = output[:, context_enc.shape[1].item():]
+            output = output[:, context_enc.shape[1]:]
             output = tokenizer.batch_decode(output, skip_special_tokens=True)
 
             for i in range(len(docs['input'])):
@@ -150,34 +161,24 @@ def eval_ruler(model,
             tot_scores[task] = avg_score
             print(f"Average score for {task}: {avg_score}")
 
-    end_time = time()
-    elapsed_time = (end_time - start_time) / 60
-    import pdb; pdb.set_trace()
-    
-    # 메인 프로세스에서만 결과 출력 및 저장
-    if accelerator.is_main_process:
-        print(f"Time taken: {elapsed_time} minutes")
-        tot_scores["time"] = elapsed_time
-        print(tot_scores)
-
-        if args.debug:
-            return
-        
-        if args.use_kivi:
-            save_path = f"./results/{args.model_name}_length_{args.max_seq_length}_sample_{args.limit}_batch_{args.batch_size}_gen_{args.gen_toks}_kivi_k{args.k_bits}v{args.v_bits}g{args.group_size}r{args.residual_length}.json"
-        else:
-            save_path = f"./results/{args.model_name}_length_{args.max_seq_length}_sample_{args.limit}_batch_{args.batch_size}_gen_{args.gen_toks}.json"
+    elapsed_time = (time() - start_time)
+  
+    print(f"RULER Time: {elapsed_time:.2f}")
+    print(list(tot_scores.keys()))
+    print(list(tot_scores.values()))
             
-        if os.path.exists(save_path):
-            with open(save_path, "r") as f:
+    if result_path:
+        tot_scores["time"] = elapsed_time
+        if os.path.exists(result_path):
+            with open(result_path, "r") as f:
                 existing_scores = json.load(f)
                 existing_scores.update(tot_scores)
                 tot_scores = existing_scores
                 
-        save_dir = os.path.dirname(save_path)
+        save_dir = os.path.dirname(result_path)
         os.makedirs(save_dir, exist_ok=True)
 
-        with open(save_path, "w") as f:
+        with open(result_path, "w") as f:
             json.dump(tot_scores, f, indent=2, ensure_ascii=False)
 
-        print(f"Results saved to {save_path}")
+        print(f"Results saved to {result_path}")

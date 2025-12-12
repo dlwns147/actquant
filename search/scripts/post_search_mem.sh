@@ -143,8 +143,8 @@ METRIC=ppl
 # DATASETS="wikitext2"
 # METRIC=loss
 
-LOSS_FUNC="jsd"
-# LOSS_FUNC="cross_entropy"
+# LOSS_FUNC="jsd"
+LOSS_FUNC="cross_entropy"
 
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
 TASKS="coqa gsm8k truthfulqa"
@@ -162,6 +162,21 @@ EXPR_COMP_OBJ=memory
 LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONG_BENCH_CONFIG=utils/long_bench_config
 LONG_BENCH_TASK=""
+
+# RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
+RULER_TASK="niah_single_1"
+RULER_YAML_PATH=utils/ruler_utils
+# RULER_LENGTH=4096
+# RULER_LENGTH=16384
+RULER_LENGTH=65536
+# RULER_LENGTH=128000
+# RULER_LENGTH=131072
+
+RULER_SAMPLE=1
+# RULER_SAMPLE=50
+RULER_BATCH_SIZE=1
+RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs
+
 
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
@@ -193,16 +208,23 @@ ARGS="--gpu_id ${DEVICES} \
 --debug \
 --expr ${EXPR_FILE} \
 --expr_comp_obj ${EXPR_COMP_OBJ} \
---datasets ${DATASETS} \
 --metric ${METRIC} \
 --loss_func ${LOSS_FUNC} \
 --save ${SAVE} \
---zeroshot \
---tasks ${TASKS} \
---long_bench \
---long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
---long_bench_config ${LONG_BENCH_CONFIG}"
+--datasets ${DATASETS} \
+--ruler \
+--ruler_task ${RULER_TASK} \
+--ruler_yaml_path ${RULER_YAML_PATH} \
+--ruler_result_path ${RULER_RESULT_PATH} \
+--ruler_batch_size ${RULER_BATCH_SIZE} \
+--ruler_sample ${RULER_SAMPLE} \
+--ruler_length ${RULER_LENGTH}"
 
+# --zeroshot \
+# --tasks ${TASKS} \
+# --long_bench \
+# --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
+# --long_bench_config ${LONG_BENCH_CONFIG} \
 # --random_sample ${RANDOM_SAMPLE} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
 

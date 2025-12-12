@@ -148,19 +148,23 @@ def sys_kwext(
     return write_jsons
 
 
-def get_dataset(pretrained, max_seq_length=None, **kwargs):
-    tokenizer = get_tokenizer(pretrained)
+# def get_dataset(pretrained, max_seq_length=None, **kwargs):
+    # tokenizer = get_tokenizer(pretrained)    
+def get_dataset(max_seq_length=None, **kwargs):
+    tokenizer = get_tokenizer(**kwargs)
     write_jsons = sys_kwext(
         tokenizer=tokenizer,
         max_seq_length=max_seq_length,
+        num_samples=kwargs.get('num_samples', 500)
     )
     return write_jsons
 
 
 def fwe_download(**kwargs):
-    pretrained = kwargs.get("tokenizer", kwargs.get("pretrained", {}))
+    # pretrained = kwargs.get("tokenizer", kwargs.get("pretrained", {}))
     df = (
-        get_dataset(pretrained, max_seq_length=seq)
+        # get_dataset(pretrained, max_seq_length=seq)
+        get_dataset(**kwargs, max_seq_length=seq)
         for seq in kwargs.pop("max_seq_lengths", DEFAULT_SEQ_LENGTHS)
     )
 
