@@ -235,5 +235,39 @@
         "max_position_embeddings": 32768,
         "head_dim": 128,
         "n_norm": 161
+    },
+
+    "Qwen2.5-72B-Instruct": {
+        "n_block": 80,
+        "n_layer": 2,
+        "layer": ["self_attn", "mlp"],
+        "layer_numel": {
+            "self_attn": 150994944,
+            "mlp": 726663168
+        },
+        "n_linear": 7,
+        "linear": ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"],
+        "linear_shape": {
+            "self_attn.q_proj": [8192, 8192],
+            "self_attn.k_proj": [1024, 8192],
+            "self_attn.v_proj": [1024, 8192],
+            "self_attn.o_proj": [8192, 8192],
+            "mlp.gate_proj": [29568, 8192],
+            "mlp.up_proj": [29568, 8192],
+            "mlp.down_proj": [8192, 29568]
+        },
+        "hierarchy": {"self_attn.q_proj": "self_attn", "self_attn.k_proj": "self_attn", "self_attn.v_proj": "self_attn", "self_attn.o_proj": "self_attn", "mlp.gate_proj": "mlp", "mlp.up_proj": "mlp", "mlp.down_proj": "mlp"},
+        "model_numel": 70212648960,
+        "model": "model", 
+        "layers": "model.layers",
+        "pre_layer": ["model.embed_tokens"],
+        "post_layer": ["model.norm", "lm_head", "model.rotary_emb"],
+        "k_linear": "self_attn.k_proj",
+        "v_linear": "self_attn.v_proj",
+        "vocab_size": 152064,
+        "hidden_size": 8192,
+        "max_position_embeddings": 32768,
+        "head_dim": 128,
+        "n_norm": 161
     }
 }
