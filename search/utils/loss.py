@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
+import os
 
 # class JSD(nn.Module):
 #     def __init__(self, reduction='batchmean'):
@@ -30,19 +31,24 @@ def TopK(p: torch.tensor, q: torch.tensor, k: int):
     intersection = pq[torch.where(counts.gt(1))]
     return (intersection / union).mean()
 
-def get_key_token_list(model, tokenizer, loader, save_path=None, trunc_len=4096, sliding_window=1024, alpha=2, beta=-2):
+def get_key_token_list(model, tokenizer, loader, save_path='', load_path='', trunc_len=4096, sliding_window=1024, alpha=2, beta=-2):
     text_list = []
     for input_ids_batch, _, _ in loader:
         for input_ids in input_ids_batch:
             text_list.append(tokenizer.decode(input_ids))
     
     key_token_list = []
-    for text in text_list:        
+    for encoding_index, text in enumerate(text_list):        
         encoded_input = tokenizer(text, return_tensors="pt", add_special_tokens=False, return_offsets_mapping=True)
         input_ids = encoded_input['input_ids'].to(model.device)
         offset_mapping = encoded_input['offset_mapping'].reshape(-1, 2)
     
-        key_text_slices = find_key_token(text, model, tokenizer, trunc_len, sliding_window, save_path, alpha, beta)
+        if load_path:
+            key_text_slices = load_key_token(os.path.join(load_path, f"slice_{encoding_index}.txt"))
+        else:
+            os.makedirs(save_path, exist_ok=True)
+            cur_save_path = os.path.join(save_path, f"slice_{encoding_index}.txt") if save_path else ''
+            key_text_slices = find_key_token(text, model, tokenizer, trunc_len, sliding_window, cur_save_path, alpha, beta)
         key_tokens = cal_overlap(offset_mapping, key_text_slices)
         key_token_list.append(key_tokens)
     return key_token_list
@@ -65,7 +71,7 @@ def merge_intervals(intervals):
     
     return merged_intervals 
 
-def find_key_token(text, evaluator_model, evaluator_tokenizer, trunc_len, sliding_window, save_path=None, alpha=2, beta=-2):
+def find_key_token(text, evaluator_model, evaluator_tokenizer, trunc_len, sliding_window, save_path='', load_path='', alpha=2, beta=-2):
     text_encoded = evaluator_tokenizer(text, return_tensors="pt", return_offsets_mapping=True)               
     input_ids = text_encoded['input_ids'].to(evaluator_model.device)
     
@@ -109,7 +115,7 @@ def find_key_token(text, evaluator_model, evaluator_tokenizer, trunc_len, slidin
     # key_text_intervals = merge_intervals(text_encoded['offset_mapping'][0, key_tokens])
     key_text_intervals = merge_intervals(text_encoded['offset_mapping'].reshape(-1, 2)[key_tokens])
 
-    if save_path is not None:
+    if save_path:
         with open(save_path, "w", encoding="utf-8") as f:
             slices_str = ";".join([f"[{element[0]}, {element[1]}]" for element in key_text_intervals])
             f.write(slices_str)
@@ -170,7 +176,8 @@ def compute_longppl(
         evaluator_model,
         tokenizer=None, 
         evaluator_tokenizer=None, 
-        save_path=None, 
+        save_path='', 
+        load_path='',
         trunc_len=4096, 
         sliding_window=1024,
         alpha=2,
@@ -225,7 +232,7 @@ def compute_longppl(
         if evaluator_model is not None:
             key_text_slices = find_key_token(cur_text, evaluator_model, evaluator_tokenizer, trunc_len, sliding_window, save_path, alpha, beta)
         else:
-            key_text_slices = load_key_token(save_path)
+            key_text_slices = load_key_token(load_path)
 
         key_tokens = cal_overlap(offset_mapping, key_text_slices)
         bs, seqlen = input_ids.shape

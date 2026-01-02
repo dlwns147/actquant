@@ -19,13 +19,3 @@ torch::Tensor gemv_forward_cuda_outer_dim(
     const int group_size,
     const int nh,
     const int nh_kv);
-
-torch::Tensor gemv_forward_cuda_outer_dim_3bit(
-    torch::Tensor _in_feats,
-    torch::Tensor _kernel,
-    torch::Tensor _scaling_factors,
-    torch::Tensor _zeros,
-    const int bit,
-    const int group_size,
-    const int nh,
-    const int nh_kv);

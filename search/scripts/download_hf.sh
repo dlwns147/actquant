@@ -1,5 +1,5 @@
 
-MODEL_PATH=meta-llama
+# MODEL_PATH=meta-llama
 # MODEL_NAME=Llama-2-7b-hf
 # MODEL_NAME=Llama-2-13b-hf
 # MODEL_NAME=Llama-2-70b-hf
@@ -8,10 +8,10 @@ MODEL_PATH=meta-llama
 # MODEL_NAME=Llama-2-7b-chat-hf
 # MODEL_NAME=Llama-2-13b-chat-hf
 # MODEL_NAME=Llama-3.1-8B
-MODEL_NAME=Llama-3.1-8B-Instruct
+# MODEL_NAME=Llama-3.1-8B-Instruct
 
 
-# MODEL_PATH=Qwen
+MODEL_PATH=Qwen
 # MODEL_NAME=Qwen2.5-1.5B
 # MODEL_NAME=Qwen2.5-3B
 # MODEL_NAME=Qwen2.5-7B
@@ -22,6 +22,7 @@ MODEL_NAME=Llama-3.1-8B-Instruct
 # MODEL_NAME=Qwen2.5-3B-Instruct
 # MODEL_NAME=Qwen2.5-7B-Instruct
 # MODEL_NAME=Qwen2.5-14B-Instruct
+MODEL_NAME=Qwen2.5-72B-Instruct
 # MODEL_NAME=Qwen2.5-7B-Instruct-1M
 
 # MODEL_NAME=Qwen3-4B

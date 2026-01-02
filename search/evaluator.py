@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import math
 from utils.func import *
@@ -47,6 +48,9 @@ class LlamaEvaluator:
                  task_dict=None,
                  verbosity='FATAL',
                  use_key_token=False,
+                 eval_model_id='',
+                 key_token_save_path='',
+                 key_token_load_path='',
                  trunc_len=512,
                  sliding_window=128,
                  alpha=2,
@@ -89,7 +93,21 @@ class LlamaEvaluator:
                                 self.outlier[f'{blk_idx}.{linear}'] = [outlier[key], get_fp16_channel(getsubattr(getblock(model, config)[blk_idx], linear), outlier[key])]
 
             if use_key_token:
-                self.key_token_list = {dataset: get_key_token_list(model=model, tokenizer=get_tokenizer(model_id, use_fast=True), loader=loader, trunc_len=trunc_len, sliding_window=sliding_window, alpha=alpha, beta=beta) for dataset, loader in self.train_loaders.items()}
+                if key_token_save_path:
+                    key_token_save_path_list = {dataset: os.path.join(key_token_save_path, dataset) for dataset in self.train_loaders}
+                if key_token_load_path:
+                    key_token_load_path_list = {dataset: os.path.join(key_token_load_path, dataset) for dataset in self.train_loaders}
+
+                self.key_token_list = {dataset: get_key_token_list(model=model, 
+                                                                tokenizer=get_tokenizer(eval_model_id if eval_model_id else model_id, use_fast=True), 
+                                                                loader=loader, 
+                                                                trunc_len=trunc_len, 
+                                                                sliding_window=sliding_window, 
+                                                                alpha=alpha, 
+                                                                beta=beta, 
+                                                                save_path=key_token_save_path_list[dataset] if key_token_save_path else '', 
+                                                                load_path=key_token_load_path_list[dataset] if key_token_load_path else ''
+                                                            ) for dataset, loader in self.train_loaders.items()}
                 for dataset in self.train_loaders:
                     n_key_token = sum([len(key_token) for key_token in self.key_token_list[dataset]])
                     n_key_token = sum(accelerator.gather_for_metrics([n_key_token], use_gather_object=True))

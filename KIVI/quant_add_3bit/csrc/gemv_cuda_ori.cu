@@ -270,7 +270,6 @@ Notes:
   One cannot infer group_size from the shape of scaling factors.
   the second dimension is rounded up to a multiple of PACK_FACTOR.
 */
-
 __global__ void bgemv4_kernel_outer_dim(
   const half* _inputs, const uint32_t* _weight, const half* _zeros, const half* _scale, half* _outputs, 
   const int IC, const int OC, const int group_size, const int nh, const int nh_kv){
@@ -279,222 +278,76 @@ __global__ void bgemv4_kernel_outer_dim(
     const int batch_idx = blockIdx.x;
     const int packed_oc_idx = blockIdx.y * blockDim.y + threadIdx.y; 
     const int oc_start_idx = packed_oc_idx * pack_factor;
-
-    if (oc_start_idx >= OC) return;
-
     const int group_idx = oc_start_idx / group_size; 
-    const int ICR = IC;
-    const half* inputs = _inputs + batch_idx * ICR;
+    const half* inputs = _inputs + batch_idx * IC;
     half* outputs = _outputs + batch_idx * OC;
     const int ratio = nh / nh_kv;
     int _batch_idx = batch_idx / ratio;
-    const uint32_t*  weight = _weight + (size_t)_batch_idx * OC * IC / pack_factor;    // use size_t to prevent overflow
-    const half* scaling_factors = _scale + (size_t)_batch_idx * OC * IC / group_size;    // use size_t to prevent overflow
-    const half* zeros = _zeros + (size_t)_batch_idx * OC * IC / group_size;    // use size_t to prevent overflow
+    const uint32_t*  weight = _weight + _batch_idx * OC * IC / pack_factor;
+    const half* scaling_factors = _scale + _batch_idx * OC * IC / group_size;
+    const half* zeros = _zeros + _batch_idx * OC * IC / group_size;
     const int TILE_DIM = 128;
     const int num = 0xFF >> (8-bit);
-
-    __shared__ half shared_inp[128];
-
-    float psum[pack_factor]{};
-    for (int k=0; k < (ICR + TILE_DIM - 1) / TILE_DIM; k++){
+    const int ICR = IC;
+    // 1float4 == 8 half number
+    double psum[pack_factor]{};
+    for (int k=0; k < (IC + TILE_DIM - 1) / TILE_DIM; k++){
       uint32_t qw[4]{};
       half cscale[4]{};
       half czero[4]{};
-
+      half inp[4]{};
+      // each thread load 32 int4 number
       int weight_offset = packed_oc_idx * ICR + k * TILE_DIM + threadIdx.x*4;
       int scale_mn_offset = group_idx * ICR + k * TILE_DIM + threadIdx.x*4;
-
-      // Load inputs into shared memory (only threadIdx.y == 0)
-      if (threadIdx.y == 0) {
-        int load_idx = k * TILE_DIM + threadIdx.x * 4;
-        if (load_idx + 3 < ICR) {
-          *((float2*)&shared_inp[threadIdx.x * 4]) = __ldg((float2*)(inputs + load_idx));
-        }
+      int inputs_ptr_delta = k * TILE_DIM + threadIdx.x * 4; 
+      for (int i=0; i<4; i++){
+        if (weight_offset + i < OC * ICR / pack_factor)
+          qw[i] = *(weight + weight_offset + i);
+        if (scale_mn_offset + i < OC * ICR / group_size){
+          cscale[i] = *(scaling_factors + scale_mn_offset + i);
+          czero[i] = *(zeros + scale_mn_offset + i);}
+        if (inputs_ptr_delta + i < ICR)
+          inp[i] = *(inputs + inputs_ptr_delta + i);
       }
-
-      __syncthreads();
-
-      half inp[4]{};
-      inp[0] = shared_inp[threadIdx.x * 4];
-      inp[1] = shared_inp[threadIdx.x * 4 + 1];
-      inp[2] = shared_inp[threadIdx.x * 4 + 2];
-      inp[3] = shared_inp[threadIdx.x * 4 + 3];
-
-      // Vectorized load (float4)
-      if (weight_offset + 3 < OC * ICR / pack_factor) {
-        *((float4*)qw) = __ldg((float4*)(weight + weight_offset));
-      }
-      if (scale_mn_offset + 3 < OC * ICR / group_size) {
-        *((float2*)cscale) = __ldg((float2*)(scaling_factors + scale_mn_offset));
-        *((float2*)czero) = __ldg((float2*)(zeros + scale_mn_offset));
-      }
-
-      float cur_single_weight_fp = 0.0f;
-      float dequantized_weight = 0.0f;
-
+      // each thread load 32 int4 number
+      // int weight_offset = packed_oc_idx * IC + k * TILE_DIM + threadIdx.x*4;
+      // if (weight_offset < OC * IC / pack_factor)
+      //   *((float4*)(qw)) = *((float4*)(weight + packed_oc_idx * IC + k * TILE_DIM + threadIdx.x*4));
+      // int scale_mn_offset = group_idx * IC + k * TILE_DIM + threadIdx.x*4;
+      // if (scale_mn_offset < OC * IC / group_size){
+      //   *((float2*)(cscale)) = *((float2*)(scaling_factors + scale_mn_offset));
+      //   *((float2*)(czero)) = *((float2*)(zeros + scale_mn_offset));
+      // }
+      // int inputs_ptr_delta = k * TILE_DIM + threadIdx.x * 4; 
+      // if (inputs_ptr_delta < IC){
+      //   const half* inputs_ptr = inputs + inputs_ptr_delta;
+      //   *((float2*)(inp)) = *((float2*)(inputs_ptr));
+      // }
+      // multiply 32 weights with 32 inputs
       #pragma unroll
       for (int ic_0 = 0; ic_0 < 4; ic_0++){
         uint32_t cur_packed_weight =  qw[ic_0];
         float cur_inp = __half2float(inp[ic_0]);
         float cur_scale = __half2float(cscale[ic_0]);
         float cur_zero = __half2float(czero[ic_0]);
-
-        #pragma unroll
         for (int ic_1 = 0; ic_1 < pack_factor; ic_1++){
-          cur_single_weight_fp = (float)(cur_packed_weight & num);
-          dequantized_weight = __fmaf_rn(cur_scale, cur_single_weight_fp, cur_zero);
-          psum[ic_1] = __fmaf_rn(dequantized_weight, cur_inp, psum[ic_1]);
-          cur_packed_weight >>= bit;
+          int oc_idx = oc_start_idx + ic_1;
+          if (oc_idx < OC){
+            float cur_single_weight_fp = (float)(cur_packed_weight & num);
+            double dequantized_weight = (double)cur_scale * (double)cur_single_weight_fp + (double)cur_zero;
+            // if(blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0 && k == 1) printf("%d %d %d %f %f %f %f %f\n", k, ic_0, ic_1, dequantized_weight, cur_single_weight_fp, cur_scale, cur_zero, cur_inp);
+            cur_packed_weight = cur_packed_weight >> bit;
+            psum[ic_1] += dequantized_weight * (double)cur_inp;
+          }
         }
       }
-
-      __syncthreads();
     }
     for (int i=0; i < pack_factor; i++){
       int oc_idx = oc_start_idx + i;
       if (oc_idx < OC){
-        psum[i] = warp_reduce_sum(psum[i]);
+        psum[i] = warp_reduce_sum_double(psum[i]);
         if (threadIdx.x == 0) 
-          outputs[oc_idx] = __float2half(psum[i]); 
-      }
-    }
-}
-
-/*
-Computes Batched 3-bit GEMV (group_size = 32, 64, 128).
-
-Args:
-  inputs: vector of shape [BS, 1, IC];
-  weight: matrix of shape [BS, OC * 32 // 3, IC];
-  output: vector of shape [BS, 1, OC];
-  zeros: matrix of shape [BS, OC // group_size, IC];
-  scaling_factors: matrix of shape [BS, OC // group_size, IC];
-
-Notes:
-  One cannot infer group_size from the shape of scaling factors.
-  the second dimension is rounded up to a multiple of PACK_FACTOR.
-*/
-
-__global__ void bgemv3_kernel_outer_dim(
-  const half* _inputs, const uint32_t* _weight, const half* _zeros, const half* _scale, half* _outputs, 
-  const int IC, const int OC, const int group_size, const int nh, const int nh_kv){
-    const int bit = 3;
-    const int batch_idx = blockIdx.x;
-    const int packed_oc_idx = (blockIdx.y * blockDim.y + threadIdx.y) * 3; 
-    const int oc_start_idx = packed_oc_idx * 32 / 3;
-
-    if (oc_start_idx >= OC) return;
-
-    const int group_idx = oc_start_idx / group_size; 
-    const int ICR = IC;
-    const half* inputs = _inputs + batch_idx * ICR;
-    half* outputs = _outputs + batch_idx * OC;
-    const int ratio = nh / nh_kv;
-    int _batch_idx = batch_idx / ratio;
-    const uint32_t*  weight = _weight + (size_t)_batch_idx * OC * IC * 3 / 32;    // use size_t to prevent overflow
-    const half* scaling_factors = _scale + (size_t)_batch_idx * OC * IC / group_size;    // use size_t to prevent overflow
-    const half* zeros = _zeros + (size_t)_batch_idx * OC * IC / group_size;    // use size_t to prevent overflow
-    const int TILE_DIM = 64;
-    const int num = 0xFF >> (8-bit);
-
-    __shared__ half shared_inp[64];
-
-    float psum[32]{};
-    for (int k=0; k < (ICR + TILE_DIM - 1) / TILE_DIM; k++){
-      uint32_t qw[3][2]{};
-      half cscale[2]{};
-      half czero[2]{};
-      // each thread load 32 int4 number
-      int weight_offset = packed_oc_idx * ICR + k * TILE_DIM + threadIdx.x*2;
-      int scale_mn_offset = group_idx * ICR + k * TILE_DIM + threadIdx.x*2;
-
-      if (threadIdx.y == 0) {
-        int load_idx = k * TILE_DIM + threadIdx.x * 2;
-        if (load_idx + 1 < ICR) {
-          *((float*)&shared_inp[threadIdx.x * 2]) = __ldg((float*)(inputs + load_idx));
-        }
-      }
-
-      __syncthreads();
-
-      half inp[2]{};
-      inp[0] = shared_inp[threadIdx.x * 2];
-      inp[1] = shared_inp[threadIdx.x * 2 + 1];
-      
-      // ===================== Vectorized Load (float4/float2) =====================
-      // Weight: flaot4 load (uint32_t × 4 = 16 bytes)
-      if (weight_offset + 1 < OC * ICR * 3 / 32) {
-        *((float2*)qw[0]) = __ldg((float2*)(weight + weight_offset));
-        *((float2*)qw[1]) = __ldg((float2*)(weight + weight_offset + ICR));
-        *((float2*)qw[2]) = __ldg((float2*)(weight + weight_offset + 2 * ICR));
-      }
-      // Scale/Zero: float2 load (half × 4 = 8 bytes)
-      if (scale_mn_offset + 1 < OC * ICR / group_size) {
-        *((float*)cscale) = __ldg((float*)(scaling_factors + scale_mn_offset));
-        *((float*)czero) = __ldg((float*)(zeros + scale_mn_offset));
-      }
-
-      float cur_single_weight_fp = 0.0f;
-      float dequantized_weight = 0.0f;
-
-      #pragma unroll
-      for (int ic_0 = 0; ic_0 < 2; ic_0++){
-        uint32_t cur_packed_weight_0 =  qw[0][ic_0];
-        uint32_t cur_packed_weight_1 =  qw[1][ic_0];
-        uint32_t cur_packed_weight_2 =  qw[2][ic_0];
-        float cur_inp = __half2float(inp[ic_0]);
-        float cur_scale = __half2float(cscale[ic_0]);
-        float cur_zero = __half2float(czero[ic_0]);
-
-        int ic_1 = 0;
-
-        #pragma unroll
-        for (; ic_1 < 10; ic_1++){
-          cur_single_weight_fp = (float)(cur_packed_weight_0 & num);
-          dequantized_weight = __fmaf_rn(cur_scale, cur_single_weight_fp, cur_zero);
-          psum[ic_1] = __fmaf_rn(dequantized_weight, cur_inp, psum[ic_1]);
-          cur_packed_weight_0 >>= bit;
-        }
-
-        cur_single_weight_fp = (float)(((cur_packed_weight_0 & 0x3) | ((cur_packed_weight_1 & 0x1) << 2)) & num);
-        dequantized_weight = __fmaf_rn(cur_scale, cur_single_weight_fp, cur_zero);
-        psum[ic_1] = __fmaf_rn(dequantized_weight, cur_inp, psum[ic_1]);
-        cur_packed_weight_1 >>= 1;
-        ic_1++;
-
-        #pragma unroll
-        for (; ic_1 < 21; ic_1++){
-          cur_single_weight_fp = (float)(cur_packed_weight_1 & num);
-          dequantized_weight = __fmaf_rn(cur_scale, cur_single_weight_fp, cur_zero);
-          psum[ic_1] = __fmaf_rn(dequantized_weight, cur_inp, psum[ic_1]);
-          cur_packed_weight_1 >>= bit;
-        }
-
-        cur_single_weight_fp = (float)(((cur_packed_weight_1 & 0x1) | ((cur_packed_weight_2 & 0x3) << 1)) & num);
-        dequantized_weight = __fmaf_rn(cur_scale, cur_single_weight_fp, cur_zero);
-        psum[ic_1] = __fmaf_rn(dequantized_weight, cur_inp, psum[ic_1]);
-        cur_packed_weight_2 >>= 2;
-        ic_1++;
-
-        #pragma unroll
-        for (; ic_1 < 32; ic_1++){
-          cur_single_weight_fp = (float)(cur_packed_weight_2 & num);
-          dequantized_weight = __fmaf_rn(cur_scale, cur_single_weight_fp, cur_zero);
-          psum[ic_1] = __fmaf_rn(dequantized_weight, cur_inp, psum[ic_1]);
-          cur_packed_weight_2 >>= bit;
-        }
-      }
-
-      __syncthreads();
-
-    }
-    for (int i=0; i < 32; i++){
-      int oc_idx = oc_start_idx + i;
-      if (oc_idx < OC){
-        psum[i] = warp_reduce_sum(psum[i]);
-        if (threadIdx.x == 0) 
-          outputs[oc_idx] = __float2half(psum[i]); 
+          outputs[oc_idx] = __double2half(psum[i]); 
       }
     }
 }
@@ -503,92 +356,151 @@ __global__ void bgemv3_kernel_outer_dim(
 __global__ void bgemv2_kernel_outer_dim(
   const half* _inputs, const uint32_t* _weight, const half* _zeros, const half* _scale, half* _outputs, 
   const int IC, const int OC, const int group_size, const int nh, const int nh_kv){
+    // const int group_size = 64;
     const int bit = 2;
     const int pack_factor = 16;
     const int batch_idx = blockIdx.x;
     const int packed_oc_idx = blockIdx.y * blockDim.y + threadIdx.y; 
     const int oc_start_idx = packed_oc_idx * pack_factor;
-
-    if (oc_start_idx >= OC) return;
-
     const int group_idx = oc_start_idx / group_size; 
     const int ICR = IC;
     const half* inputs = _inputs + batch_idx * ICR;
     half* outputs = _outputs + batch_idx * OC;
     const int ratio = nh / nh_kv;
     int _batch_idx = batch_idx / ratio;
-    const uint32_t*  weight = _weight + (size_t)_batch_idx * OC * IC / pack_factor;    // use size_t to prevent overflow
-    const half* scaling_factors = _scale + (size_t)_batch_idx * OC * IC / group_size;    // use size_t to prevent overflow
-    const half* zeros = _zeros + (size_t)_batch_idx * OC * IC / group_size;    // use size_t to prevent overflow
+    const uint32_t*  weight = _weight + _batch_idx * OC * IC / pack_factor;
+    const half* scaling_factors = _scale + _batch_idx * OC * IC / group_size;
+    const half* zeros = _zeros + _batch_idx * OC * IC / group_size;
     const int TILE_DIM = 128;
     const int num = 0xFF >> (8-bit);
-
-    __shared__ half shared_inp[128];
-
-    float psum[pack_factor]{};
+    // 1float4 == 8 half number
+    double psum[pack_factor]{};
     for (int k=0; k < (ICR + TILE_DIM - 1) / TILE_DIM; k++){
       uint32_t qw[4]{};
       half cscale[4]{};
       half czero[4]{};
-
+      half inp[4]{};
+      // each thread load 32 int4 number
       int weight_offset = packed_oc_idx * ICR + k * TILE_DIM + threadIdx.x*4;
       int scale_mn_offset = group_idx * ICR + k * TILE_DIM + threadIdx.x*4;
-
-      // Load inputs into shared memory (only threadIdx.y == 0)
-      if (threadIdx.y == 0) {
-        int load_idx = k * TILE_DIM + threadIdx.x * 4;
-        if (load_idx + 3 < ICR) {
-          *((float2*)&shared_inp[threadIdx.x * 4]) = __ldg((float2*)(inputs + load_idx));
-        }
+      int inputs_ptr_delta = k * TILE_DIM + threadIdx.x * 4; 
+      for (int i=0; i<4; i++){
+        if (weight_offset + i < OC * ICR / pack_factor)
+          qw[i] = *(weight + weight_offset + i);
+        if (scale_mn_offset + i < OC * ICR / group_size){
+          cscale[i] = *(scaling_factors + scale_mn_offset + i);
+          czero[i] = *(zeros + scale_mn_offset + i);}
+        if (inputs_ptr_delta + i < ICR)
+          inp[i] = *(inputs + inputs_ptr_delta + i);
       }
-
-      __syncthreads();
-
-      half inp[4]{};
-      inp[0] = shared_inp[threadIdx.x * 4];
-      inp[1] = shared_inp[threadIdx.x * 4 + 1];
-      inp[2] = shared_inp[threadIdx.x * 4 + 2];
-      inp[3] = shared_inp[threadIdx.x * 4 + 3];
-
-      // Vectorized load (float4)
-      if (weight_offset + 3 < OC * ICR / pack_factor) {
-        *((float4*)qw) = __ldg((float4*)(weight + weight_offset));
-      }
-      if (scale_mn_offset + 3 < OC * ICR / group_size) {
-        *((float2*)cscale) = __ldg((float2*)(scaling_factors + scale_mn_offset));
-        *((float2*)czero) = __ldg((float2*)(zeros + scale_mn_offset));
-      }
-
-      float cur_single_weight_fp = 0.0f;
-      float dequantized_weight = 0.0f;
-
+      // if (weight_offset < OC * ICR / pack_factor)
+      //   *((float4*)(qw)) = *((float4*)(weight + packed_oc_idx * ICR + k * TILE_DIM + threadIdx.x*4));
+      // int scale_mn_offset = group_idx * ICR + k * TILE_DIM + threadIdx.x*4;
+      // if (scale_mn_offset < OC * ICR / group_size){
+      //   *((float2*)(cscale)) = *((float2*)(scaling_factors + scale_mn_offset));
+      //   *((float2*)(czero)) = *((float2*)(zeros + scale_mn_offset));
+      // }
+      // int inputs_ptr_delta = k * TILE_DIM + threadIdx.x * 4; 
+      // if (inputs_ptr_delta < ICR){
+      //   const half* inputs_ptr = inputs + inputs_ptr_delta;
+      //   *((float2*)(inp)) = *((float2*)(inputs_ptr));
+      // }
+      // multiply 32 weights with 32 inputs
       #pragma unroll
       for (int ic_0 = 0; ic_0 < 4; ic_0++){
         uint32_t cur_packed_weight =  qw[ic_0];
         float cur_inp = __half2float(inp[ic_0]);
         float cur_scale = __half2float(cscale[ic_0]);
         float cur_zero = __half2float(czero[ic_0]);
-
-        #pragma unroll
         for (int ic_1 = 0; ic_1 < pack_factor; ic_1++){
-          cur_single_weight_fp = (float)(cur_packed_weight & num);
-          dequantized_weight = __fmaf_rn(cur_scale, cur_single_weight_fp, cur_zero);
-          psum[ic_1] = __fmaf_rn(dequantized_weight, cur_inp, psum[ic_1]);
-          cur_packed_weight >>= bit;
+          int oc_idx = oc_start_idx + ic_1;
+          if (oc_idx < OC){
+            float cur_single_weight_fp = (float)(cur_packed_weight & num);
+            double dequantized_weight = (double)cur_scale * (double)cur_single_weight_fp + (double)cur_zero;
+            // if(blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0 && k == 1) printf("%d %d %d %f %f %f %f %f\n", k, ic_0, ic_1, dequantized_weight, cur_single_weight_fp, cur_scale, cur_zero, cur_inp);
+            cur_packed_weight = cur_packed_weight >> bit;
+            psum[ic_1] += dequantized_weight * (double)cur_inp;
+          }
         }
       }
-
-      __syncthreads();
     }
     for (int i=0; i < pack_factor; i++){
       int oc_idx = oc_start_idx + i;
       if (oc_idx < OC){
-        psum[i] = warp_reduce_sum(psum[i]);
+        psum[i] = warp_reduce_sum_double(psum[i]);
         if (threadIdx.x == 0) 
-          outputs[oc_idx] = __float2half(psum[i]); 
+          outputs[oc_idx] = __double2half(psum[i]); 
       }
     }
 }
+
+// __global__ void bgemv2_kernel_g64_outer_dim(
+//   const half* _inputs, const uint32_t* _weight, const half* _zeros, const half* _scale, half* _outputs, 
+//   const int IC, const int OC){
+//     const int group_size = 64;
+//     const int bit = 2;
+//     const int pack_factor = 16;
+//     const int batch_idx = blockIdx.x;
+//     const int packed_oc_idx = blockIdx.y * blockDim.y + threadIdx.y; 
+//     const int oc_start_idx = packed_oc_idx * pack_factor;
+//     const int group_idx = oc_start_idx / group_size; 
+//     const int ICR = IC;
+//     const half* inputs = _inputs + batch_idx * ICR;
+//     half* outputs = _outputs + batch_idx * OC;
+//     const uint32_t*  weight = _weight + batch_idx * OC * IC / pack_factor;
+//     const half* scaling_factors = _scale + batch_idx * OC * IC / group_size;
+//     const half* zeros = _zeros + batch_idx * OC * IC / group_size;
+//     const int TILE_DIM = 128;
+//     const int num = 0xFF >> (8-bit);
+//     // 1float4 == 8 half number
+//     double psum[pack_factor]{};
+//     for (int k=0; k < (ICR + TILE_DIM - 1) / TILE_DIM; k++){
+//       uint32_t qw[4]{};
+//       half cscale[4]{};
+//       half czero[4]{};
+//       half inp[4]{};
+//       // each thread load 32 int4 number
+//       int weight_offset = packed_oc_idx * ICR + k * TILE_DIM + threadIdx.x*4;
+//       if (weight_offset < OC * ICR / pack_factor)
+//         *((float4*)(qw)) = *((float4*)(weight + packed_oc_idx * ICR + k * TILE_DIM + threadIdx.x*4));
+//       int scale_mn_offset = group_idx * ICR + k * TILE_DIM + threadIdx.x*4;
+//       if (scale_mn_offset < OC * ICR / group_size){
+//         *((float2*)(cscale)) = *((float2*)(scaling_factors + scale_mn_offset));
+//         *((float2*)(czero)) = *((float2*)(zeros + scale_mn_offset));
+//       }
+//       int inputs_ptr_delta = k * TILE_DIM + threadIdx.x * 4; 
+//       if (inputs_ptr_delta < ICR){
+//         const half* inputs_ptr = inputs + inputs_ptr_delta;
+//         *((float2*)(inp)) = *((float2*)(inputs_ptr));
+//       }
+//       // multiply 32 weights with 32 inputs
+//       #pragma unroll
+//       for (int ic_0 = 0; ic_0 < 4; ic_0++){
+//         uint32_t cur_packed_weight =  qw[ic_0];
+//         float cur_inp = __half2float(inp[ic_0]);
+//         float cur_scale = __half2float(cscale[ic_0]);
+//         float cur_zero = __half2float(czero[ic_0]);
+//         for (int ic_1 = 0; ic_1 < pack_factor; ic_1++){
+//           int oc_idx = oc_start_idx + ic_1;
+//           if (oc_idx < OC){
+//             float cur_single_weight_fp = (float)(cur_packed_weight & num);
+//             double dequantized_weight = (double)cur_scale * (double)cur_single_weight_fp + (double)cur_zero;
+//             // if(blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0 && k == 1) printf("%d %d %d %f %f %f %f %f\n", k, ic_0, ic_1, dequantized_weight, cur_single_weight_fp, cur_scale, cur_zero, cur_inp);
+//             cur_packed_weight = cur_packed_weight >> bit;
+//             psum[ic_1] += dequantized_weight * cur_inp;
+//           }
+//         }
+//       }
+//     }
+//     for (int i=0; i < pack_factor; i++){
+//       int oc_idx = oc_start_idx + i;
+//       if (oc_idx < OC){
+//         psum[i] = warp_reduce_sum_double(psum[i]);
+//         if (threadIdx.x == 0) 
+//           outputs[oc_idx] = __double2half(psum[i]); 
+//       }
+//     }
+// }
 
 
 /*
@@ -650,47 +562,4 @@ torch::Tensor gemv_forward_cuda_outer_dim(
       );     
       }
     return _out_feats;
-;}
-
-torch::Tensor gemv_forward_cuda_outer_dim_3bit(
-  torch::Tensor _in_feats,
-  torch::Tensor _kernel,
-  torch::Tensor _scaling_factors,
-  torch::Tensor _zeros,
-  const int bit,
-  const int group_size,
-  const int nh,
-  const int nh_kv)
-{
-  int BS = _in_feats.size(0);
-  int num_in_feats = _in_feats.size(1);
-  int num_in_channels = _in_feats.size(2);
-  int num_out_channels = _zeros.size(1) * group_size;
-  // int kernel_volume = _out_in_map.size(1);
-  auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
-  auto kernel = reinterpret_cast<uint32_t*>(_kernel.data_ptr<int>());
-  auto zeros = reinterpret_cast<half*>(_zeros.data_ptr<at::Half>());
-  auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-  // auto out_in_map = _out_in_map.data_ptr<int>();
-  auto options =
-  torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
-  // kernel is [OC, IC]
-  at::Tensor _out_feats = torch::empty({BS, num_in_feats, num_out_channels}, options);
-  int num_out_feats = _out_feats.size(-2);
-  auto out_feats = reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>());
-  dim3 num_blocks(BS, (num_out_channels * 3 / 32 + 8) / 9, num_out_feats);
-  dim3 num_threads(32, 6);
-  if (bit == 3){
-    bgemv3_kernel_outer_dim<<<num_blocks, num_threads>>>(
-      // pointers
-      in_feats, kernel, zeros, scaling_factors, out_feats,
-      // constants
-      num_in_channels, num_out_channels, group_size, nh, nh_kv
-    );
-  }
-  else{
-    printf("Unsupported bit value: %d\n", bit);
-  }
-  
-  return _out_feats;
 ;}
