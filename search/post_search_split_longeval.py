@@ -19,10 +19,10 @@ import scipy.stats as stats
 from matplotlib import pyplot as plt
 from utils.func import init_accelerator, get_net_info, clean_up, process_dtype
 from utils.eval import measure_latency, eval_zeroshot
-from utils.longbench import pred_longbench, eval_longbench
+from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
-from utils.ruler import eval_ruler
-from utils.longeval import eval_longeval_lines, generate_lines_testcases
+from utils.eval_ruler import eval_ruler
+from utils.eval_longeval import eval_longeval_lines
 import warnings
 warnings.simplefilter("ignore")
 
@@ -71,19 +71,6 @@ class HighTradeoffPoints(DecisionMaking):
 
 def main(args):
     print(args)
-
-    # Generate testcases if requested
-    if args.generate_testcases:
-        print("Generating LongEval testcases...")
-        generate_lines_testcases(
-            num_lines_list=args.generate_testcases_num_lines,
-            num_test_samples=args.generate_testcases_num_samples,
-            line_idx_opt=args.generate_testcases_line_idx_opt,
-            output_dir=args.generate_testcases_output_dir
-        )
-        print("Testcase generation completed.")
-        if args.generate_testcases_only:
-            return
 
     with open(args.config, 'r') as f:
         config = json.load(f)[args.model_name]
@@ -389,7 +376,7 @@ def main(args):
                 total_result += list(new_result.values())
             print(f'total_result: {total_result}')
         
-        if args.longbench:
+        if args.long_bench:
             clean_up()
             # model.config.residual_length = args.residual_length
             if args.kv_method == 'kivi':
@@ -399,20 +386,20 @@ def main(args):
             model.config.quant_kv_output = False
             model.config.use_cache = True
             
-            # if len(args.longbench_task) == 0 and not args.longbench_task_e:
-            #     args.longbench_task = []
-            longbench_start = time()
-            pred_longbench(model, tokenizer=get_tokenizer(model_id), save_path=args.longbench_result_path, longbench_config=args.longbench_config, e=args.longbench_e)
-            eval_longbench(args.longbench_result_path, args.longbench_e)
-            longbench_time = time() - longbench_start
+            # if len(args.long_bench_task) == 0 and not args.long_bench_task_e:
+            #     args.long_bench_task = []
+            long_bench_start = time()
+            pred_long_bench(model, tokenizer=get_tokenizer(model_id), save_path=args.long_bench_result_path, long_bench_config=args.long_bench_config, e=args.long_bench_e)
+            eval_long_bench(args.long_bench_result_path, args.long_bench_e)
+            long_bench_time = time() - long_bench_start
             
             sentences = []
             for k, v in vars(args).items():
                 sentences.append(f"{k}: {v}\n")
-            sentences.append(f'Longbench Time: {longbench_time:.2f}s')
+            sentences.append(f'Longbench Time: {long_bench_time:.2f}s')
             sentences.append("\n")
 
-            with open(os.path.join(args.longbench_result_path, "pred_e" if args.longbench_e else "pred", 'result.txt'), 'w') as f:
+            with open(os.path.join(args.long_bench_result_path, "pred_e" if args.long_bench_e else "pred", 'result.txt'), 'w') as f:
                 for sentence in sentences:
                     f.write(sentence)
 
@@ -431,8 +418,7 @@ def main(args):
             eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path)
             ruler_time = time() - ruler_start
             print(f'RULER Time: {ruler_time:.2f}s')
-            
-
+        
         if args.longeval:
             clean_up()
             if args.kv_method == 'kivi':
@@ -479,7 +465,6 @@ def main(args):
                 with open(summary_path, 'w') as f:
                     for sentence in sentences:
                         f.write(sentence)
-            
             
         if 'awq' in args.w_method or 'gptq' in args.w_method or 'qeft' in args.w_method:
             del model, evaluator.model
@@ -663,14 +648,14 @@ if __name__ == '__main__':
     parser.add_argument('--tasks', type=str, nargs='+', default=['coqa', 'gsm8k', 'truthfulqa'])
     parser.add_argument('--lm_eval_batch_size', type=int, default=None,
                         help='')
-    parser.add_argument('--longbench', action='store_true', help='')
-    parser.add_argument('--longbench_e', action='store_true',
+    parser.add_argument('--long_bench', action='store_true', help='')
+    parser.add_argument('--long_bench_e', action='store_true',
                         help='number of architectures desired')
-    parser.add_argument('--longbench_result_path', type=str, default='',
+    parser.add_argument('--long_bench_result_path', type=str, default='',
                         help='')
-    parser.add_argument('--longbench_config', type=str, default='',
+    parser.add_argument('--long_bench_config', type=str, default='',
                         help='')
-    parser.add_argument('--longbench_task', type=str, nargs='+', default=[])
+    parser.add_argument('--long_bench_task', type=str, nargs='+', default=[])
     parser.add_argument('--pass_key_file', type=str, default='',
                         help='')
     
@@ -698,7 +683,6 @@ if __name__ == '__main__':
     parser.add_argument('--ruler_result_path', type=str, default='',
                         help='')
     
-    
     # LongEval arguments
     parser.add_argument('--longeval', action='store_true', help='Enable LongEval lines task evaluation')
     parser.add_argument('--longeval_test_dir', type=str, default='',
@@ -709,20 +693,6 @@ if __name__ == '__main__':
     parser.add_argument('--longeval_result_path', type=str, default='',
                         help='Path to save LongEval results JSON file')
     
-    # LongEval testcase generation arguments
-    parser.add_argument('--generate_testcases', action='store_true', help='Generate LongEval testcases')
-    parser.add_argument('--generate_testcases_only', action='store_true', help='Only generate testcases and exit')
-    parser.add_argument('--generate_testcases_num_lines', type=int, nargs='+', default=[200, 300, 400, 500, 600, 680, 700, 800, 900, 1000, 1100, 1200, 1350],
-                        help='List of number of lines to generate testcases for')
-    parser.add_argument('--generate_testcases_num_samples', type=int, default=50,
-                        help='Number of test samples per number of lines')
-    parser.add_argument('--generate_testcases_line_idx_opt', type=str, default='LRT',
-                        choices=['LRT', 'LRT-ABCindex', 'LRT-UUID', 'LRT-NL'],
-                        help='Type of line index option')
-    parser.add_argument('--generate_testcases_output_dir', type=str, default='evaluation',
-                        help='Directory to save generated testcases (will create lines/testcases/ subdirectory)')
-    
-
 
     cfgs = parser.parse_args()
     main(cfgs)

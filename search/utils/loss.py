@@ -71,7 +71,7 @@ def merge_intervals(intervals):
     
     return merged_intervals 
 
-def find_key_token(text, evaluator_model, evaluator_tokenizer, trunc_len, sliding_window, save_path='', load_path='', alpha=2, beta=-2):
+def find_key_token(text, evaluator_model, evaluator_tokenizer, trunc_len, sliding_window, save_path='', alpha=2, beta=-2):
     text_encoded = evaluator_tokenizer(text, return_tensors="pt", return_offsets_mapping=True)               
     input_ids = text_encoded['input_ids'].to(evaluator_model.device)
     

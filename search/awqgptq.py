@@ -16,9 +16,10 @@ import csv
 from matplotlib import pyplot as plt
 from utils.func import init_accelerator, clean_up, process_dtype, get_net_info
 from utils.eval import measure_latency, eval_zeroshot
-from utils.eval_long_bench import pred_long_bench, eval_long_bench
+from utils.longbench import pred_longbench, eval_longbench
 from utils.data import get_tokenizer
-from utils.eval_ruler import eval_ruler
+from utils.ruler import eval_ruler
+from utils.longeval import eval_longeval_lines
 import warnings
 from time import time
 warnings.simplefilter("ignore")
@@ -209,7 +210,7 @@ def main(args):
         # print(f'acc_norm : {acc_norm}')
         # print(f'acc : {acc}')
 
-    if args.long_bench:
+    if args.longbench:
         clean_up()
         # model.config.residual_length = args.residual_length
         if args.kv_method == 'kivi':
@@ -219,21 +220,21 @@ def main(args):
         model.config.quant_kv_output = False
         model.config.use_cache = True
         
-        long_bench_start = time()
-        pred_long_bench(model, tokenizer=get_tokenizer(model_id), save_path=args.long_bench_result_path, long_bench_config=args.long_bench_config, e=args.long_bench_e)
-        eval_long_bench(args.long_bench_result_path, args.long_bench_e)
-        long_bench_time = time() - long_bench_start
+        longbench_start = time()
+        pred_longbench(model, tokenizer=get_tokenizer(model_id), save_path=args.longbench_result_path, longbench_config=args.longbench_config, e=args.longbench_e)
+        eval_longbench(args.longbench_result_path, args.longbench_e)
+        longbench_time = time() - longbench_start
         
         sentences = []
         for k, v in vars(args).items():
             sentences.append(f"{k}: {v}\n")
-        sentences.append(f'Longbench Time: {long_bench_time:.2f}s')
+        sentences.append(f'Longbench Time: {longbench_time:.2f}s')
         sentences.append("\n")
 
-        with open(os.path.join(args.long_bench_result_path, "pred_e" if args.long_bench_e else "pred", 'result.txt'), 'w') as f:
+        with open(os.path.join(args.longbench_result_path, "pred_e" if args.longbench_e else "pred", 'result.txt'), 'w') as f:
             for sentence in sentences:
                 f.write(sentence)
-
+        
     if args.ruler:
         clean_up()
         if args.kv_method == 'kivi':
@@ -249,6 +250,55 @@ def main(args):
         eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path)
         ruler_time = time() - ruler_start
         print(f'RULER Time: {ruler_time:.2f}s')
+
+
+    if args.longeval:
+        clean_up()
+        if args.kv_method == 'kivi':
+            model.config.kivi_config.residual_length = args.residual_length
+        elif args.kv_method == 'hqq':
+            model.generation_config.cache_config = args.residual_length
+        model.config.quant_kv_output = False
+        model.config.use_cache = True
+        
+        tokenizer = get_tokenizer(model_id)
+        longeval_start = time()
+        
+        # Prepare result path
+        if args.longeval_result_path:
+            os.makedirs(os.path.dirname(args.longeval_result_path) if os.path.dirname(args.longeval_result_path) else '.', exist_ok=True)
+            result_path = args.longeval_result_path
+        else:
+            result_path = ''
+        
+        # Evaluate longeval lines task
+        results = eval_longeval_lines(
+            model=model,
+            tokenizer=tokenizer,
+            test_dir=args.longeval_test_dir,
+            model_name_or_path=model_id,
+            num_lines_list=args.longeval_num_lines,
+            eval_shortest_only=args.longeval_shortest_only,
+            result_path=result_path,
+            use_cache=True
+        )
+        
+        longeval_time = time() - longeval_start
+        print(f'LongEval Lines Task Time: {longeval_time:.2f}s')
+        
+        # Save results summary
+        if args.longeval_result_path:
+            sentences = []
+            for k, v in vars(args).items():
+                sentences.append(f"{k}: {v}\n")
+            sentences.append(f'LongEval Time: {longeval_time:.2f}s')
+            sentences.append("\n")
+            
+            summary_path = args.longeval_result_path.replace('.json', '_summary.txt')
+            with open(summary_path, 'w') as f:
+                for sentence in sentences:
+                    f.write(sentence)
+        
 
     print(args)
     return
@@ -359,12 +409,12 @@ if __name__ == '__main__':
     parser.add_argument('--num_fewshot', type=int, default=None,
                         help='')
     
-    parser.add_argument('--long_bench', action='store_true', help='')
-    parser.add_argument('--long_bench_e', action='store_true',
+    parser.add_argument('--longbench', action='store_true', help='')
+    parser.add_argument('--longbench_e', action='store_true',
                         help='number of architectures desired')
-    parser.add_argument('--long_bench_result_path', type=str, default='',
+    parser.add_argument('--longbench_result_path', type=str, default='',
                         help='')
-    parser.add_argument('--long_bench_config', type=str, default='',
+    parser.add_argument('--longbench_config', type=str, default='',
                         help='')
     parser.add_argument('--pass_key_file', type=str, default='',
                         help='')
@@ -382,6 +432,19 @@ if __name__ == '__main__':
     parser.add_argument("--ruler_batch_size", type=int, default=1, help="Batch size")
     parser.add_argument('--ruler_result_path', type=str, default='',
                         help='')
+
+    
+    # LongEval arguments
+    parser.add_argument('--longeval', action='store_true', help='Enable LongEval lines task evaluation')
+    parser.add_argument('--longeval_test_dir', type=str, default='',
+                        help='Directory containing longeval test cases (should have lines/testcases/ subdirectory)')
+    parser.add_argument('--longeval_num_lines', type=int, nargs='+', default=[200, 300, 400, 500, 600, 680, 700, 800, 900, 1000, 1100, 1200, 1350],
+                        help='List of number of lines to test')
+    parser.add_argument('--longeval_shortest_only', action='store_true', help='Only evaluate the shortest case')
+    parser.add_argument('--longeval_result_path', type=str, default='',
+                        help='Path to save LongEval results JSON file')
+    
+
 
     cfgs = parser.parse_args()
     main(cfgs)

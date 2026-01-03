@@ -128,13 +128,13 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset
         preds.append({"pred": pred, "answers": json_obj["answers"], "all_classes": json_obj["all_classes"], "length": json_obj["length"]})
     return preds
 
-def pred_long_bench(model, tokenizer, save_path, long_bench_config, e):
+def pred_longbench(model, tokenizer, save_path, longbench_config, e):
     # print(args)
     # seed_everything(args.seed)
     # args = parse_args()
     # model2path = json.load(open("config/model2path.json", "r"))
-    # model2maxlen = json.load(open("long_bench_config/model2maxlen.json", "r"))
-    model2maxlen = json.load(open(os.path.join(long_bench_config, "model2maxlen.json"), "r"))
+    # model2maxlen = json.load(open("longbench_config/model2maxlen.json", "r"))
+    model2maxlen = json.load(open(os.path.join(longbench_config, "model2maxlen.json"), "r"))
     # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # model_name = args.model
 
@@ -148,11 +148,11 @@ def pred_long_bench(model, tokenizer, save_path, long_bench_config, e):
     else:
         datasets = ["triviaqa", "qasper", "trec", "samsum", "lcc", "repobench-p", "qmsum", "multi_news"]
     # we design specific prompt format and max generation length for each task, feel free to modify them to optimize model output
-    # dataset2prompt = json.load(open("long_bench_config/dataset2prompt.json", "r"))
-    # dataset2maxlen = json.load(open("long_bench_config/dataset2maxlen.json", "r"))
+    # dataset2prompt = json.load(open("longbench_config/dataset2prompt.json", "r"))
+    # dataset2maxlen = json.load(open("longbench_config/dataset2maxlen.json", "r"))
     
-    dataset2prompt = json.load(open(os.path.join(long_bench_config, "dataset2prompt.json"), "r"))
-    dataset2maxlen = json.load(open(os.path.join(long_bench_config, "dataset2maxlen.json"), "r"))
+    dataset2prompt = json.load(open(os.path.join(longbench_config, "dataset2prompt.json"), "r"))
+    dataset2maxlen = json.load(open(os.path.join(longbench_config, "dataset2maxlen.json"), "r"))
     # predict on each dataset
 
     if e:
@@ -216,7 +216,7 @@ def scorer(dataset, predictions, answers, all_classes):
         total_score += score
     return round(100 * total_score / len(predictions), 2)
 
-def eval_long_bench(path, e):
+def eval_longbench(path, e):
     # args = parse_args()
     if e:
         path = os.path.join(path, "pred_e")

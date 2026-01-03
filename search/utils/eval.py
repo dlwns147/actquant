@@ -332,6 +332,50 @@ def eval_zeroshot(model, tokenizer, task_list=['coqa', 'gsm8k', 'truthfulqa'], b
     
     return results['results']
 
+def longeval_test(model, tokenizer, output_dir, args):
+    if args.task == "topics":
+        for num_topics in [5, 10, 15, 20, 25]:
+            print(f"************ Start testing {num_topics} topics per prompt ***********")
+            avg_length = 0
+
+            test_file = os.path.join(args.test_dir, f"topics/testcases/{num_topics}_topics.jsonl")
+            output_file = os.path.join(output_dir, f"{num_topics}_response.txt")
+            
+            test_cases = load_testcases(test_file)
+            for idx, test_case in tqdm(enumerate(test_cases)):
+                _, prompt_length, summary = test_topics_one_sample(model=model, tokenizer=tokenizer, test_case=test_case, output_file=output_file, idx=idx, args=args)
+                avg_length += prompt_length / len(test_cases)
+
+            print(f"************ Finish testing {num_topics} topics per prompt with average prompt length {avg_length} ************")
+            if args.eval_shortest_only:
+                break
+            
+    elif args.task == "lines":
+        # for num_lines in [200, 300, 400, 500, 600, 680]:
+        # for num_lines in [700, 800, 900, 1000, 1100, 1200, 1350]:
+        for num_lines in [200, 300, 400, 500, 600, 680, 700, 800, 900, 1000, 1100, 1200, 1350]:
+            print(f"************ Start testing {num_lines} lines per LRT prompt ************")
+            test_file = os.path.join(args.test_dir, f"lines/testcases/{num_lines}_lines.jsonl")
+            
+            output_file = os.path.join(output_dir, f"{num_lines}_response.txt")
+            num_correct = 0
+            avg_length = 0
+
+            test_cases = load_testcases(test_file)
+            for idx, test_case in tqdm(enumerate(test_cases)):
+                correct, prompt_length, summary = test_lines_one_sample(model=model, tokenizer=tokenizer, test_case=test_case, output_file=output_file, idx=idx, args=args)
+                avg_length += prompt_length / len(test_cases)
+                num_correct += correct
+            accuracy = num_correct / len(test_cases)
+
+            with open(output_file, "a+") as f:
+                f.write(f"Accuracy: {accuracy}")
+
+            print(f"************ Finish testing {num_lines} lines per prompt with average prompt length {avg_length}, accuracy: {accuracy} ************")
+            if args.eval_shortest_only:
+                break
+    else:
+        print(f"Unsupported task: {args.task}")
 
 # @torch.no_grad()
 # def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None):

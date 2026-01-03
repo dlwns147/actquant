@@ -19,11 +19,10 @@ from pymoo.operators.crossover.binx import BinomialCrossover
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.operators.mutation.pm import PolynomialMutation
 
-from search_space.llama import LlamaGroupSizeSearchSpace # LlamaSearchSpace
+from search_space.llama import LlamaSearchSpace
 from predictor.factory import get_predictor
 from utils.func import get_net_info, init_accelerator, set_seed, get_correlation
 from utils.ga import MySampling, BinaryCrossover, MyMutation, IntPolynomialMutation, MyTwoPointCrossover, MyUniformCrossover, IntegerFromFloatMutation, IntMutation
-from lm_eval.tasks import TaskManager, get_task_dict
 
 import warnings
 warnings.simplefilter("ignore")
@@ -48,7 +47,7 @@ class Search:
         # self.latency = self.sec_obj if "cpu" in self.sec_obj or "gpu" in self.sec_obj else None
         self.loss_func = kwargs.pop('loss_func', 'jsd')
 
-        self.method = {'w': kwargs.pop('w_method', ['fp16']), 'kv': kwargs.pop('kv_method', 'kivi')}
+        self.method = kwargs.pop('method', '')
         self.quant_model_paths = kwargs.pop('quant_model_paths', [])
         # self.quant_model_bits = kwargs.pop('quant_model_bits', [])
 
@@ -56,9 +55,6 @@ class Search:
         model_name = kwargs.pop('model_name', 'Llama-2-7b-hf')
         model_id=f'{model_path}/{model_name}'
         self.metric = kwargs.pop('metric', 'loss')
-        self.limit = kwargs.pop('limit', 20)
-        self.lm_eval_batch_size = kwargs.pop('lm_eval_batch_size', 1)
-        self.num_fewshot = kwargs.pop('num_fewshot', None)
         outlier_path = kwargs.pop('outlier_path' , '')
         base_outlier_bits = sorted(kwargs.pop('base_outlier_bits', []))
         n_outlier = kwargs.pop('n_outlier' , 0)
@@ -84,33 +80,18 @@ class Search:
 
         w_group_size = kwargs.pop('w_group_size', 128)
         # a_group_size = kwargs.pop('wbits', [2, 3, 4])
-        k_group_size = kwargs.pop('k_group_size', [[128]])
-        v_group_size = kwargs.pop('v_group_size', [[128]])
+        k_group_size = kwargs.pop('k_group_size', [128])
+        v_group_size = kwargs.pop('v_group_size', [128])
         self.group_size = {'w': w_group_size, 'k': k_group_size, 'v': v_group_size}
 
         self.residual_length = kwargs.pop('residual_length', 128)
-        self.verbosity = kwargs.pop('verbosity', 'FATAL')
-        self.task_manager = TaskManager(self.verbosity) if self.metric not in ['ppl', 'loss'] else None
-        self.task_dict = get_task_dict([self.metric], self.task_manager) if self.metric not in ['ppl', 'loss'] else None
-        
+
         self.comp_obj = kwargs.pop('comp_obj', ['wbits', 'kvbits'])  # second objective to optimize simultaneously
         self.comp_obj_min = kwargs.pop('comp_obj_min', [min(w_bits), min(k_bits)])
-        self.comp_obj_max = kwargs.pop('comp_obj_max', [max(w_bits), max(k_bits)])        
+        self.comp_obj_max = kwargs.pop('comp_obj_max', [max(w_bits), max(k_bits)])
         # assert len(self.sec_obj_range) == 2, "len(sec_obj_range) should be 2"
         assert len(self.comp_obj) == len(self.comp_obj_min) and len(self.comp_obj_min) == len(self.comp_obj_max)
         # self.layer_prune_range = kwargs.pop('layer_prune_range', [1, 1])
-                
-        self.n_token = kwargs.pop('n_token', 0)
-        if 'memory' in self.comp_obj:
-            assert self.n_token > 0, "n_token should be bigger than 0 when using memory objective."
-            
-        self.use_key_token = kwargs.pop('use_key_token', False)
-        self.trunc_len = kwargs.pop('trunc_len', 512)
-        self.sliding_window = kwargs.pop('sliding_window', 128)
-        self.alpha = kwargs.pop('alpha', 2)
-        self.beta = kwargs.pop('beta', -2)
-        self.key_token_save_path = kwargs.pop('key_token_save_path', '')
-        self.key_token_load_path = kwargs.pop('key_token_load_path', '')
 
         self.sensitivity_result_path = kwargs.pop('sensitivity_result_path', '')
         total_module = dict()
@@ -120,20 +101,20 @@ class Search:
         
         if self.sensitivity_result_path:
             for target in pass_module.keys():
-                # if any([target in obj for obj in self.comp_obj]):
+                if any([target in obj for obj in self.comp_obj]):
                     with open(os.path.join(self.sensitivity_result_path, f'{target}.csv'), 'r') as f:
                         module_list, sensitivity = list(csv.reader(f))
                         sensitivity = list(map(float, sensitivity))
                         total_module[target] = list(map(int, module_list)) if target in ['k', 'v'] else module_list
                         total_sensitivity[target] = sensitivity
             total_sensitivity_list = np.nan_to_num(np.concatenate(list(total_sensitivity.values())), nan=float('inf'))
-            upper_bound = np.median(total_sensitivity_list) * kwargs.pop('sensitivity_threshold', 2)
+            upper_bound = np.median(total_sensitivity_list) * 2
             print(f'upper_bound: {upper_bound}')
             pass_idx_list = np.where(total_sensitivity_list > upper_bound)[0].tolist()
 
             start = 0
             for target in pass_module.keys():
-                # if any([target in obj for obj in self.comp_obj]):
+                if any([target in obj for obj in self.comp_obj]):
                     end = start + len(total_module[target])
                     for idx in pass_idx_list:
                         if start <= idx and idx < end:
@@ -153,35 +134,19 @@ class Search:
             quant_model_paths=self.quant_model_paths,
             outlier=torch.load(outlier_path) if outlier_path else None,
             seqlen=kwargs.pop('seqlen', 2048),
-            min_seqlen=kwargs.pop('min_seqlen', 0),
             n_sample=kwargs.pop('n_sample', 128),
             datasets=[self.dataset],
-            data_batch_size=kwargs.pop('data_batch_size', 1),
             loss_func=self.loss_func,
             device_map=device_map,
             bits=bits,
             group_size=self.group_size,
             residual_length=self.residual_length,
-            # use_flash=kwargs.pop('use_flash', False),
+            use_flash=kwargs.pop('use_flash', False),
             quant_kv_output=kwargs.pop('quant_kv_output', True),
-            k_quant_scheme=kwargs.pop('k_quant_scheme', 'channel'),
-            v_quant_scheme=kwargs.pop('v_quant_scheme', 'token'),
-            n_token=self.n_token,
-            limit=self.limit,
-            lm_eval_batch_size=self.lm_eval_batch_size,
-            num_fewshot=self.num_fewshot,
-            task_manager=self.task_manager,
-            task_dict=self.task_dict,
-            verbosity=self.verbosity,
-            use_key_token=self.use_key_token,
-            trunc_len=self.trunc_len,
-            sliding_window=self.sliding_window,
-            alpha=self.alpha,
-            beta=self.beta,
-            key_token_save_path=self.key_token_save_path,
-            key_token_load_path=self.key_token_load_path
+            k_quant_per=kwargs.pop('k_quant_per', 'channel'),
+            v_quant_per=kwargs.pop('v_quant_per', 'token'),
         )
-        self.search_space = LlamaGroupSizeSearchSpace(
+        self.search_space = LlamaSearchSpace(
             bits=self.bits,
             group_size=self.group_size,
             pass_module=self.pass_module,
@@ -189,7 +154,6 @@ class Search:
             comp_obj_min=self.comp_obj_min,
             comp_obj_max=self.comp_obj_max,
             config=self.config,
-            n_token=self.n_token,
             outlier_bits=outlier_bits,
             only_outlier_bits=kwargs.pop('only_outlier_bits', False),
         )
@@ -360,7 +324,7 @@ class Search:
         metric_list, complexity_list = [], [] # {obj: [] for obj in self.comp_obj}
         for arch in tqdm(archs, desc='Eval Arch'):
             metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func)
-            metric_list.append(min(self.max_value, np.nan_to_num(list(metric.values())[0], nan=self.max_value)))
+            metric_list.append(min(self.max_value, np.nan_to_num(metric[self.dataset], nan=self.max_value)))
             complexity_list.append([complexity[obj] for obj in self.comp_obj])
 
         return metric_list, complexity_list
@@ -421,7 +385,7 @@ class Search:
             eliminate_duplicates=True)
         
         # initialize the candidate finding optimization problem
-        problem = AuxiliarySingleLevelProblem(self.search_space, predictor, self.config, self.comp_obj, self.comp_obj_max, self.comp_obj_min, self.group_size, self.n_token)
+        problem = AuxiliarySingleLevelProblem(self.search_space, predictor, self.config, self.comp_obj, self.comp_obj_max, self.comp_obj_min, self.group_size)
         
         # kick-off the search
         res = minimize(problem, method, termination=('n_gen', 20), save_history=True, verbose=True)
@@ -431,13 +395,11 @@ class Search:
             [x in [x[0] for x in archive] for x in [self.search_space.decode(x) for x in res.pop.get("X")]])
         print(f'not_duplicate : {sum(not_duplicate)}')
 
-        pop = res.pop[not_duplicate]
         # the following lines corresponding to Algo 1 line 11 / Fig. 3(c)-(d) in the paper
         # form a subset selection problem to short list K from pop_size
         # indices = self._subset_selection(res.pop[not_duplicate], F[front, 1], K, self.subset_pop_size)
-        if sum(not_duplicate) >= K:
-            indices = self._subset_selection(pop, F[front, 1:], K, self.subset_pop_size)
-            pop = pop[indices]
+        indices = self._subset_selection(res.pop[not_duplicate], F[front, 1:], K, self.subset_pop_size)
+        pop = res.pop[not_duplicate][indices]
         # pop = res.pop[not_duplicate]
 
         candidates = []
@@ -478,7 +440,7 @@ class Search:
 class AuxiliarySingleLevelProblem(Problem):
     """ The optimization problem for finding the next N candidate architectures """
 
-    def __init__(self, search_space, predictor, config, comp_obj, comp_obj_max, comp_obj_min, group_size, n_token):
+    def __init__(self, search_space, predictor, config, comp_obj, comp_obj_max, comp_obj_min, group_size):
         n_block, n_linear = search_space.n_block, search_space.n_linear
         n_comp_obj = len(search_space.comp_obj)
         super().__init__(n_var=n_block * (n_linear + 2), n_obj=n_comp_obj + 1, n_constr=2 * n_comp_obj, type_var=int)
@@ -490,7 +452,6 @@ class AuxiliarySingleLevelProblem(Problem):
         self.comp_obj_min = comp_obj_min
         self.config = config
         self.group_size = group_size
-        self.n_token = n_token
         self.xl = np.zeros((n_linear + 2, n_block))
         self.xu = np.ones((n_linear + 2, n_block))
         
@@ -520,7 +481,7 @@ class AuxiliarySingleLevelProblem(Problem):
 
         for i, (_x, metric) in enumerate(zip(x, metrics)):
             arch = self.ss.decode(_x)
-            info = get_net_info(arch, self.config, self.group_size, n_token=self.n_token)
+            info = get_net_info(arch, self.config, self.group_size)
             f[i, 0] = metric
             # f[i, 1] = info[self.ss.sec_obj]
             for j in range(len(self.comp_obj)):
@@ -607,12 +568,6 @@ if __name__ == '__main__':
                         help='file path to supernet weights')
     parser.add_argument('--quant_model_paths', type=str, nargs='+', default=[], 
                         help='')
-    
-    parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
-                        help='')
-    parser.add_argument('--kv_method', type=str, default='kivi', choices=['hqq', 'kivi'],
-                        help='')
-    
     parser.add_argument('--w_bits', type=int, nargs='+', default=[], 
                         help='')
     parser.add_argument('--k_bits', type=int, nargs='+', default=[2, 4], 
@@ -622,22 +577,22 @@ if __name__ == '__main__':
 
     parser.add_argument('--w_group_size', type=int, default=128,
                         help='')
-    parser.add_argument('--k_group_size', type=int, nargs='+', action='append', default=[],
+    parser.add_argument('--k_group_size', type=int, default=128,
                         help='')
-    parser.add_argument('--v_group_size', type=int, nargs='+', action='append', default=[],
+    parser.add_argument('--v_group_size', type=int, default=128,
                         help='')
     
     parser.add_argument('--residual_length', type=int, default=128, 
                         help='')
-    # parser.add_argument('--use_flash', action='store_true', help='')
+    parser.add_argument('--use_flash', action='store_true', help='')
 
     parser.add_argument('--quant_kv_output', action='store_true', help='')
-    parser.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'], 
+    parser.add_argument('--k_quant_per', type=str, choices=['channel', 'token'], 
                         help='')
-    parser.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'], 
+    parser.add_argument('--v_quant_per', type=str, choices=['channel', 'token'], 
                         help='')
     
-    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'memory'], 
+    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits'], 
                         help='complexity objectives to optimize simultaneously')
     parser.add_argument('--comp_obj_min', type=float, nargs='+', default=[2, 2], 
                         help='')
@@ -660,20 +615,8 @@ if __name__ == '__main__':
                         help='sample number of the calibration set')
     parser.add_argument('--seqlen', type=int, default=2048,
                         help='sequential length of the calibaration (train) set')
-    parser.add_argument('--min_seqlen', type=int, default=0,
-                        help='minimum sequential length of the calibaration gsm8k set')
     parser.add_argument('--metric', type=str, default='ppl',
-                        help='which metric predictor model to fit (ppl/loss/gsm8k)')
-    parser.add_argument('--data_batch_size', type=int, default=1,
-                        help='sequential length of the calibaration (train) set')
-    parser.add_argument('--limit', type=int, default=None,
-                        help='')
-    parser.add_argument('--lm_eval_batch_size', type=int, default=None,
-                        help='batch size for measuring lm_eval tasks.')
-    parser.add_argument('--num_fewshot', type=int, default=None,
-                        help='# fewshot sample for measuring lm_eval tasks.')
-    parser.add_argument('--verbosity', type=str, default='INFO',
-                        help='verbosity for measuring lm_eval tasks.')
+                        help='which metric predictor model to fit (ppl/loss)')
     
     parser.add_argument('--config', type=str, default='config/llama.json',
                         help='config file to read the model meta data')
@@ -686,7 +629,8 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--ga_algorithm', type=str, default='nsga2',
                         help='')
-
+    parser.add_argument('--method', type=str, nargs='+', default=[],
+                        help='')
     parser.add_argument('--max_value', type=float, default=50,
                         help='')
     parser.add_argument('--crossover_prob', type=float, default=0.9,
@@ -709,28 +653,7 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--save_iter', type=int, default=1, 
                         help='')
-    parser.add_argument('--sensitivity_threshold', type=int, default=2,
-                        help='')
-    
-    parser.add_argument('--n_token', type=int, default=0, 
-                        help='target sequence length for memory calculation')
-
-    
-    parser.add_argument('--use_key_token', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
-    parser.add_argument('--trunc_len', type=int, default=512, 
-                        help='truncation length for long PPL/JSD calculation')
-    parser.add_argument('--sliding_window', type=int, default=128, 
-                        help='sliding_window length for long PPL/JSD calculation')
-    parser.add_argument('--alpha', type=int, default=2, 
-                        help='Long-short distance (LSD) threshold for long PPL/JSD calculation')
-    parser.add_argument('--beta', type=int, default=-2, 
-                        help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
-    parser.add_argument('--key_token_save_path', type=str, default='',
-                        help='')
-    parser.add_argument('--key_token_load_path', type=str, default='',
-                        help='')
-    
-    parser.add_argument('--packing', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
+        
     
     cfgs = parser.parse_args()
     main(cfgs)

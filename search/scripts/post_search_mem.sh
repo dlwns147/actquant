@@ -159,9 +159,9 @@ EXPR_FILE=save/search/quant/2511170755_Llama-3.1-8B-Instruct_memory_loss_w_hqq_k
 # EXPR_FILE=$(IFS=" " ; echo "${EXPR_FILE[*]}")
 EXPR_COMP_OBJ=memory
 
-LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
-LONG_BENCH_CONFIG=utils/long_bench_config
-LONG_BENCH_TASK=""
+LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
+LONGBENCH_CONFIG=utils/longbench_config
+LONGBENCH_TASK=""
 
 # RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
 RULER_TASK="niah_single_1"
@@ -222,9 +222,9 @@ ARGS="--gpu_id ${DEVICES} \
 
 # --zeroshot \
 # --tasks ${TASKS} \
-# --long_bench \
-# --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
-# --long_bench_config ${LONG_BENCH_CONFIG} \
+# --longbench \
+# --longbench_result_path ${LONGBENCH_RESULT_PATH} \
+# --longbench_config ${LONGBENCH_CONFIG} \
 # --random_sample ${RANDOM_SAMPLE} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
 

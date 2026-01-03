@@ -85,8 +85,8 @@ LM_EVAL_BATCH_SIZE=32
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${METHOD}_${BITS}
 SAVE=save/result/${TODAY}_test
 
-LONG_BENCH_RESULT_PATH=save/long_bench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
-LONG_BENCH_CONFIG=utils/long_bench_config
+LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
+LONGBENCH_CONFIG=utils/longbench_config
 
 # RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
 RULER_TASK="niah_single_1"
@@ -132,15 +132,17 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 --ruler_result_path ${RULER_RESULT_PATH} \
 --ruler_batch_size ${RULER_BATCH_SIZE} \
 --ruler_sample ${RULER_SAMPLE} \
---ruler_length ${RULER_LENGTH}
+--ruler_length ${RULER_LENGTH} \
+--long_eval \
+--
 # --datasets ${DATASETS} \
 
 # --zeroshot \
 # --tasks ${TASKS} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
-# --long_bench \
-# --long_bench_result_path ${LONG_BENCH_RESULT_PATH} \
-# --long_bench_config ${LONG_BENCH_CONFIG} \
+# --longbench \
+# --longbench_result_path ${LONGBENCH_RESULT_PATH} \
+# --longbench_config ${LONGBENCH_CONFIG} \
 # --pass_key_file ${PASS_KEY_FILE} \
 # --num_fewshot ${NUM_FEWSHOT}
 # --use_flash \
