@@ -8,7 +8,7 @@ import itertools
 import uuid
 from tqdm import tqdm
 from time import time
-from fastchat.model import get_conversation_template
+# from fastchat.model import get_conversation_template
 
 
 def load_testcases(test_file):

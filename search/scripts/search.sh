@@ -2,18 +2,18 @@ DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-MODEL_PATH=/SSD/huggingface/meta-llama
-MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
-CONFIG=config/llama.json
-
-# MODEL_PATH=/SSD/huggingface/Qwen
-# # MODEL_NAME=Qwen2.5-7B-Instruct
-# # MODEL_NAME=Qwen2.5-14B-Instruct
-# MODEL_NAME=Qwen2.5-72B-Instruct
-# # DTYPE=bfloat16
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=Llama-3.1-8B-Instruct
 # DTYPE=float16
-# CONFIG=config/qwen2.json
+# CONFIG=config/llama.json
+
+MODEL_PATH=/SSD/huggingface/Qwen
+# MODEL_NAME=Qwen2.5-7B-Instruct
+# MODEL_NAME=Qwen2.5-14B-Instruct
+MODEL_NAME=Qwen2.5-72B-Instruct
+# DTYPE=bfloat16
+DTYPE=float16
+CONFIG=config/qwen2.json
 
 # MODEL_PATH=/SSD/huggingface/mistralai
 # MODEL_NAME=Mistral-7B-Instruct-v0.3
@@ -188,12 +188,12 @@ CROSSOVER_PROB=0.9
 SAVE_ITER=1
 # SAVE_ITER=10
 
-# TRUNC_LEN=4096
-# SLIDING_WINDOW=1024
+TRUNC_LEN=4096
+SLIDING_WINDOW=1024
 # TRUNC_LEN=1024
 # SLIDING_WINDOW=256
-TRUNC_LEN=512
-SLIDING_WINDOW=128
+# TRUNC_LEN=512
+# SLIDING_WINDOW=128
 # TRUNC_LEN=128
 # SLIDING_WINDOW=32
 # TRUNC_LEN=64

@@ -188,6 +188,9 @@ class LlamaEvaluator:
         self.packing = packing
         
         self.use_key_token = use_key_token
+        self.eval_model_id = eval_model_id
+        self.key_token_save_path = key_token_save_path
+        self.key_token_load_path = key_token_load_path
         self.trunc_len = trunc_len
         self.sliding_window = sliding_window
         self.alpha = alpha
@@ -282,29 +285,59 @@ class LlamaEvaluator:
             loaders = self.test_loaders
         elif metric == 'loss':
             loaders = self.train_loaders
+        elif metric == 'longppl' or metric == 'longppl_jsd':
+            loaders = self.test_loaders
         elif 'gsm8k' in metric:
             loaders = {metric: None}
         else:
-            raise NotImplementedError(f"metric should be 'ppl' or 'loss', not {metric}")
+            raise NotImplementedError(f"metric should be 'ppl', 'loss', 'longppl', 'longppl_jsd', or 'gsm8k', not {metric}")
         metric_list = dict()
         for dataset, loader in loaders.items():
+            # Get evaluator model and tokenizer for longppl metrics
+            evaluator_model = None
+            evaluator_tokenizer = None
+            if metric == 'longppl' or metric == 'longppl_jsd':
+                # Load evaluator model if needed (for online mode)
+                eval_model_id = getattr(self, 'eval_model_id', '') if hasattr(self, 'eval_model_id') else ''
+                if eval_model_id:
+                    from utils.func import get_hfmodel, get_tokenizer
+                    evaluator_model = get_hfmodel(eval_model_id, dtype=self.dtype, device_map=self.device_map)
+                    evaluator_tokenizer = get_tokenizer(eval_model_id, use_fast=True)
+                elif not getattr(self, 'key_token_load_path', ''):
+                    # If no eval_model_id and no load_path, use the main model as evaluator
+                    evaluator_model = None
+                    evaluator_tokenizer = None
+            
             result = eval_metric(model=self.sample(arch) if model is None else model, 
                                 accelerator=accelerator,
                                 metric=metric, 
                                 loader=loader, 
                                 seqlen=self.seqlen, 
                                 loss_func=loss_func, 
-                                dense_logits_list=self.dense_logits[dataset] if self.loss_func in ['jsd', 'kld', 'topk'] else None, 
-                                key_token_list=self.key_token_list[dataset] if self.use_key_token else None, 
+                                dense_logits_list=self.dense_logits[dataset] if (self.loss_func in ['jsd', 'kld', 'topk'] or metric == 'longppl_jsd') else None, 
+                                key_token_list=self.key_token_list[dataset] if (self.use_key_token or metric in ['longppl', 'longppl_jsd']) else None, 
+                                tokenizer=self.tokenizer,
                                 num_fewshot=self.num_fewshot, 
                                 limit=self.limit,
                                 batch_size=self.lm_eval_batch_size,
                                 verbosity=self.verbosity,
                                 task_manager=self.task_manager,
-                                task_dict=self.task_dict)
+                                task_dict=self.task_dict,
+                                evaluator_model=evaluator_model,
+                                evaluator_tokenizer=evaluator_tokenizer,
+                                trunc_len=self.trunc_len,
+                                sliding_window=self.sliding_window,
+                                alpha=self.alpha,
+                                beta=self.beta,
+                                save_path=getattr(self, 'key_token_save_path', '') if hasattr(self, 'key_token_save_path') else '',
+                                mode='offline' if (hasattr(self, 'key_token_load_path') and getattr(self, 'key_token_load_path', '')) else 'online',
+                                evaluator_name=getattr(self, 'eval_model_id', '') if hasattr(self, 'eval_model_id') else '')
             if 'gsm8k' in metric:
                 result = 1 - float(result[metric]['exact_match,strict-match'])
                 # result = 1 - float(result[metric]['exact_match,flexible-extract'])
+            elif metric == 'longppl' or metric == 'longppl_jsd':
+                # Extract longppl value from result dict
+                result = result.get('longppl', result.get('ppl'))
             metric_list[dataset] = result
         complexity = get_net_info(arch, self.config, self.group_size, n_token=self.n_token)
         return metric_list, complexity

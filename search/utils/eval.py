@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from .data import *
 from .loss import JSD, TopK
+from .eval_longppl import eval_longppl
 
 
 # Function to evaluate perplexity (ppl) on a specified model and tokenizer
@@ -203,12 +204,32 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None, evaluator_model=None, evaluator_tokenizer=None, trunc_len=4096, sliding_window=1024, alpha=2.0, beta=-2.0, save_path=None, mode='offline', evaluator_name="Meta-Llama-3.1-8B"):
     # accelerator.wait_for_everyone()
     if metric == 'ppl':
         return eval_ppl(model, accelerator, loader, seqlen=seqlen)
     elif metric == 'loss':
         return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list)
+    elif metric == 'longppl' or metric == 'longppl_jsd':
+        return eval_longppl(
+            model=model,
+            accelerator=accelerator,
+            loader=loader,
+            evaluator_model=evaluator_model,
+            evaluator_tokenizer=evaluator_tokenizer,
+            tokenizer=tokenizer,
+            seqlen=seqlen,
+            loss_func=metric,
+            dense_logits_list=dense_logits_list,
+            key_token_list=key_token_list,
+            trunc_len=trunc_len,
+            sliding_window=sliding_window,
+            alpha=alpha,
+            beta=beta,
+            save_path=save_path,
+            mode=mode,
+            evaluator_name=evaluator_name
+        )
     elif 'gsm8k' in metric:
         return eval_zeroshot(model, tokenizer, task_list=[metric], limit=limit, batch_size=batch_size, num_fewshot=num_fewshot, verbosity=verbosity, task_manager=task_manager, task_dict=task_dict)
     else:
