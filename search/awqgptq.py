@@ -376,6 +376,8 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--n_sample', type=int, default=128,
                         help='')
+    parser.add_argument('--n_token', type=int, default=0, 
+                        help='target sequence length for memory calculation')
     
     # parser.add_argument('--debug', action='store_true', help='')
     # parser.add_argument('--sec_obj', type=str, default='bits',
