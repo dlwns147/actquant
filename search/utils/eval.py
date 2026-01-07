@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from .data import *
 from .loss import JSD, TopK
-from .eval_longppl import eval_longppl
 
 
 # Function to evaluate perplexity (ppl) on a specified model and tokenizer
@@ -128,108 +127,151 @@ def get_logits(model, loader):
 
 
 @torch.no_grad()
-def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, ignore_index=-100, k=10):
-    # Get input IDs
-    # testenc = testenc.input_ids
-
-    # Calculate number of samples
-    # n_sample = testenc.numel() // seqlen
+def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, ignore_index=-100):
+    """
+    Evaluate loss on a model using a data loader.
+    
+    Parameters:
+        model: The model to evaluate
+        accelerator: Accelerator object for distributed training
+        loader: DataLoader containing input data
+        seqlen: Sequence length (for compatibility)
+        loss_func: 'cross_entropy' or 'jsd'
+        dense_logits_list: List of dense logits for JSD calculation (required for 'jsd')
+        key_token_list: Pre-computed key token list (format: [batch_idx][seq_idx] -> list of token indices)
+                       If provided, only key tokens are used for loss calculation.
+                       If None, all tokens (except ignore_index) are used.
+        ignore_index: Index to ignore in loss calculation
+        k: Top-k parameter (for topk loss, not used in cross_entropy/jsd)
+    
+    Returns:
+        Average loss value
+    """
+    if loss_func == 'jsd':
+        assert dense_logits_list is not None, "dense_logits_list must be provided for jsd"
+    if key_token_list is not None:
+        assert len(loader) == len(key_token_list)
   
-    # List to store negative log likelihoods
+    # List to store losses and sequence lengths
     losses = []
     seqlens = []
     
     # Loop through each batch
-    # for i, inputs in enumerate(loader):
-    for i, (inputs, attention_mask, labels) in enumerate(loader):
-        # outputs = model(inputs)
+    for batch_idx, (inputs, attention_mask, labels) in enumerate(loader):
+        batch_size = inputs.shape[0]
+        
+        # Forward pass
         outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
 
         # Shift logits and labels for next token prediction
         shift_logits = lm_logits[:, :-1, :].contiguous()
-        shift_logits = shift_logits.reshape(-1, shift_logits.size(-1))
-        shift_labels = labels[:, 1:].reshape(-1)
-        mask = torch.where(shift_labels == ignore_index, False, True)
-        if key_token_list is not None:
-            key_token_mask = torch.ones_like(mask, dtype=bool)
-            key_token_mask[key_token_list[i]] = False
-            mask[key_token_mask] = False
-            mask[key_token_list[i]] = True
-            
-            # key_token_mask = torch.zeros(len(mask), dtype=torch.bool, device=mask.device)
-            # key_token_mask[key_token_list[i]] = True 
-            # mask[~key_token_mask] = False
-        cur_seqlen = mask.sum()
+        shift_labels = labels[:, 1:].contiguous()
         
-        # Compute loss
-        if loss_func == 'cross_entropy':
-            loss_fct = nn.CrossEntropyLoss(ignore_index=ignore_index)
-            loss = loss_fct(shift_logits[mask], shift_labels[mask])
+        # Process each sequence in the batch
+        batch_losses = []
+        batch_seqlens = []
         
-        elif loss_func == 'kld':
-            assert dense_logits_list != None
-            loss_fct = KLD()
-            dense_logits = dense_logits_list[i].reshape(-1, shift_logits.size(-1)).contiguous()
-            loss = loss_fct(shift_logits[mask], dense_logits[mask])
+        for seq_idx in range(batch_size):
+            # Get sequence-specific logits and labels
+            seq_shift_logits = shift_logits[seq_idx]  # [seq_len-1, vocab_size]
+            seq_shift_labels = shift_labels[seq_idx]  # [seq_len-1]
             
-        elif loss_func == 'jsd':
-            assert dense_logits_list != None
-            loss_fct = JSD()
-            dense_logits = dense_logits_list[i].reshape(-1, shift_logits.size(-1)).contiguous()
-            loss = loss_fct(shift_logits[mask], dense_logits[mask])
+            # Create mask for valid tokens (excluding ignore_index)
+            mask = torch.where(seq_shift_labels == ignore_index, False, True)
             
-        elif loss_func == 'topk':
-            assert dense_logits_list != None
-            loss_fct = TopK
-            loss = loss_fct(shift_logits[mask], shift_labels[mask], k=k)
+            # Apply key_token filtering if provided
+            if key_token_list is not None:
+                key_tokens = key_token_list[batch_idx][seq_idx]
+                if key_tokens is None:
+                    continue
+                key_mask = torch.zeros_like(mask, dtype=torch.bool)
+                key_mask[key_tokens] = True
+                mask = mask & key_mask
+            
+            cur_seqlen = mask.sum().item()
+            
+            # Reshape for loss computation
+            seq_shift_logits = seq_shift_logits.reshape(-1, seq_shift_logits.size(-1))
+            seq_shift_labels = seq_shift_labels.reshape(-1)
+            
+            # Compute loss on selected tokens
+            if loss_func == 'cross_entropy':
+                loss_fct = nn.CrossEntropyLoss(ignore_index=ignore_index, reduction='mean')
+                loss = loss_fct(seq_shift_logits[mask], seq_shift_labels[mask])
+            
+            elif loss_func == 'jsd':
+                # Get dense logits for this batch
+                dense_logits = dense_logits_list[batch_idx]
+                
+                dense_logits_seq = dense_logits[seq_idx].contiguous()
+                dense_logits_seq = dense_logits_seq.reshape(-1, dense_logits_seq.size(-1))
+                               
+                # Compute JSD on selected tokens
+                loss_fct = JSD()
+                loss = loss_fct(seq_shift_logits[mask], dense_logits_seq[mask])
+            
+            else:
+                raise NotImplementedError(f'{loss_func} is not implemented')
+            
+            # Weight loss by sequence length
+            loss = loss.float() * cur_seqlen
+            batch_losses.append(loss)
+            batch_seqlens.append(cur_seqlen)
+        
+        # Aggregate batch losses
+        if len(batch_losses) > 0:
+            losses.extend(batch_losses)
+            seqlens.extend(batch_seqlens)
 
-        else:
-            raise NotImplementedError(f'{loss_func} is not implemented')
-        # loss = loss.float() * seqlen * lm_logits.shape[0]
-        loss = loss.float() * cur_seqlen
-        # print(f'loss: {loss}, cur_seqlen: {cur_seqlen}, labels: {labels.shape}, shift_labels: {shift_labels.shape}, mask: {mask.shape}')
-        seqlens.append(cur_seqlen)
-
-        # Append to list of negative log likelihoods
-        losses.append(loss)
-
-    # Compute sum of negative log_likelihood
+    # Compute average loss
+    if len(losses) == 0:
+        return 0.0
+    
     losses = torch.stack(accelerator.gather_for_metrics(losses)).flatten()
     total_seqlen = sum(accelerator.gather_for_metrics(seqlens))
-    # loss_sum = losses.sum() / (len(losses) * seqlen)
-    loss_sum = losses.sum() / total_seqlen
-    # print(f'loss_sum: {loss_sum.item()}')
+    
+    if total_seqlen > 0:
+        loss_sum = losses.sum() / total_seqlen
+    else:
+        loss_sum = torch.tensor(0.0)
 
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None, evaluator_model=None, evaluator_tokenizer=None, trunc_len=4096, sliding_window=1024, alpha=2.0, beta=-2.0, save_path=None, mode='offline', evaluator_name="Meta-Llama-3.1-8B"):
-    # accelerator.wait_for_everyone()
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
+    """
+    Evaluate metric on a model using a data loader.
+    
+    Supported metrics:
+        - 'ppl': Perplexity
+        - 'loss': Loss (cross_entropy or jsd)
+        - 'gsm8k': GSM8K zero-shot evaluation
+    
+    Parameters:
+        model: The model to evaluate
+        accelerator: Accelerator object for distributed training
+        metric: Metric to evaluate ('ppl', 'loss', or 'gsm8k')
+        loader: DataLoader containing input data
+        seqlen: Sequence length
+        loss_func: 'cross_entropy' or 'jsd' (for 'loss' metric)
+        dense_logits_list: List of dense logits for JSD calculation (required for 'jsd')
+        key_token_list: Pre-computed key token list (optional, for 'loss' metric)
+        tokenizer: Tokenizer (required for 'gsm8k')
+        limit: Limit number of samples (for 'gsm8k')
+        batch_size: Batch size (for 'gsm8k')
+        num_fewshot: Number of few-shot examples (for 'gsm8k')
+        verbosity: Verbosity level (for 'gsm8k')
+        task_manager: Task manager (for 'gsm8k')
+        task_dict: Task dictionary (for 'gsm8k')
+    
+    Returns:
+        Metric value
+    """
     if metric == 'ppl':
         return eval_ppl(model, accelerator, loader, seqlen=seqlen)
     elif metric == 'loss':
         return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list)
-    elif metric == 'longppl' or metric == 'longppl_jsd':
-        return eval_longppl(
-            model=model,
-            accelerator=accelerator,
-            loader=loader,
-            evaluator_model=evaluator_model,
-            evaluator_tokenizer=evaluator_tokenizer,
-            tokenizer=tokenizer,
-            seqlen=seqlen,
-            loss_func=metric,
-            dense_logits_list=dense_logits_list,
-            key_token_list=key_token_list,
-            trunc_len=trunc_len,
-            sliding_window=sliding_window,
-            alpha=alpha,
-            beta=beta,
-            save_path=save_path,
-            mode=mode,
-            evaluator_name=evaluator_name
-        )
     elif 'gsm8k' in metric:
         return eval_zeroshot(model, tokenizer, task_list=[metric], limit=limit, batch_size=batch_size, num_fewshot=num_fewshot, verbosity=verbosity, task_manager=task_manager, task_dict=task_dict)
     else:
@@ -353,50 +395,6 @@ def eval_zeroshot(model, tokenizer, task_list=['coqa', 'gsm8k', 'truthfulqa'], b
     
     return results['results']
 
-def longeval_test(model, tokenizer, output_dir, args):
-    if args.task == "topics":
-        for num_topics in [5, 10, 15, 20, 25]:
-            print(f"************ Start testing {num_topics} topics per prompt ***********")
-            avg_length = 0
-
-            test_file = os.path.join(args.test_dir, f"topics/testcases/{num_topics}_topics.jsonl")
-            output_file = os.path.join(output_dir, f"{num_topics}_response.txt")
-            
-            test_cases = load_testcases(test_file)
-            for idx, test_case in tqdm(enumerate(test_cases)):
-                _, prompt_length, summary = test_topics_one_sample(model=model, tokenizer=tokenizer, test_case=test_case, output_file=output_file, idx=idx, args=args)
-                avg_length += prompt_length / len(test_cases)
-
-            print(f"************ Finish testing {num_topics} topics per prompt with average prompt length {avg_length} ************")
-            if args.eval_shortest_only:
-                break
-            
-    elif args.task == "lines":
-        # for num_lines in [200, 300, 400, 500, 600, 680]:
-        # for num_lines in [700, 800, 900, 1000, 1100, 1200, 1350]:
-        for num_lines in [200, 300, 400, 500, 600, 680, 700, 800, 900, 1000, 1100, 1200, 1350]:
-            print(f"************ Start testing {num_lines} lines per LRT prompt ************")
-            test_file = os.path.join(args.test_dir, f"lines/testcases/{num_lines}_lines.jsonl")
-            
-            output_file = os.path.join(output_dir, f"{num_lines}_response.txt")
-            num_correct = 0
-            avg_length = 0
-
-            test_cases = load_testcases(test_file)
-            for idx, test_case in tqdm(enumerate(test_cases)):
-                correct, prompt_length, summary = test_lines_one_sample(model=model, tokenizer=tokenizer, test_case=test_case, output_file=output_file, idx=idx, args=args)
-                avg_length += prompt_length / len(test_cases)
-                num_correct += correct
-            accuracy = num_correct / len(test_cases)
-
-            with open(output_file, "a+") as f:
-                f.write(f"Accuracy: {accuracy}")
-
-            print(f"************ Finish testing {num_lines} lines per prompt with average prompt length {avg_length}, accuracy: {accuracy} ************")
-            if args.eval_shortest_only:
-                break
-    else:
-        print(f"Unsupported task: {args.task}")
 
 # @torch.no_grad()
 # def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None):

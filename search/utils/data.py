@@ -132,15 +132,49 @@ def get_gsm8k_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, min
     return DataLoader(TensorDataset(input_ids_dataset, attention_mask_dataset, labels_dataset), batch_size=batch_size)
 
 
-def get_gov_report_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
-    traindata = load_dataset('launch/gov_report', 'plain_text', split='train', cache_dir=cache_dir)
-    traindata = traindata.shuffle(seed=seed)[:n_sample]['document']
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenized = tokenizer(traindata, max_length=seqlen, padding=True, truncation=True, return_tensors='pt')
-    tokenizer.pad_token = None
-    input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']        
+def get_gov_report(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, split='train', min_seqlen=0, cache_dir=None):
+    traindata = load_dataset('launch/gov_report', 'plain_text', split=split, cache_dir=cache_dir)
     
-    return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size)
+    # Shuffle and flatten indices
+    traindata = traindata.shuffle(seed=seed)
+    traindata = traindata.flatten_indices()
+    
+    tokenizer.pad_token = tokenizer.eos_token
+    
+    # Collect samples that meet min_seqlen requirement
+    data_list = []
+    for data in traindata:
+        document = data['document']
+        # Tokenize the document
+        tokenized = tokenizer(document, add_special_tokens=False, return_tensors='pt', truncation=False)
+        tokenized_length = tokenized['input_ids'].shape[1]
+        
+        # Filter by min_seqlen
+        if tokenized_length < min_seqlen:
+            continue
+        
+        # Truncate to seqlen
+        tokenized = tokenizer(document, add_special_tokens=False, padding=True, truncation=True, max_length=seqlen, return_tensors='pt')
+        input_ids = tokenized['input_ids']
+        attention_mask = tokenized['attention_mask']
+        
+        data_list.append([input_ids, attention_mask, input_ids])
+        
+        # Stop when we have n_sample samples
+        if len(data_list) >= n_sample:
+            break
+    
+    if len(data_list) < n_sample:
+        raise ValueError(f"Could not find enough samples with min_seqlen={min_seqlen}. Found {len(data_list)}, required {n_sample}")
+    
+    tokenizer.pad_token = None
+    # Concatenate all samples
+    input_ids_dataset = torch.concat([x[0] for x in data_list], dim=0)
+    attention_mask_dataset = torch.concat([x[1] for x in data_list], dim=0)
+    labels_dataset = torch.concat([x[2] for x in data_list], dim=0)
+    
+    
+    return DataLoader(TensorDataset(input_ids_dataset, attention_mask_dataset, labels_dataset), batch_size=batch_size)
 
 
 def get_trainloaders(name, n_sample=128, seed=0, seqlen=2048, model='', batch_size=1, cache_dir=None):
@@ -163,7 +197,8 @@ def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0
         if 'gsm8k' in name:
             return get_gsm8k_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, min_seqlen=min_seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
         if 'gov_report' in name:
-            return get_gov_report_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)
+            # return get_gov_report(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, split='train', min_seqlen=min_seqlen, cache_dir=cache_dir)
+            return get_gov_report(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, split='test', min_seqlen=min_seqlen, cache_dir=cache_dir)
     else:
         if 'wikitext2' in name:
             return get_wikitext2(tokenizer=tokenizer, batch_size=batch_size, seqlen=seqlen, cache_dir=cache_dir)
@@ -171,3 +206,5 @@ def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0
             return get_c4(tokenizer=tokenizer, batch_size=batch_size, seqlen=seqlen, cache_dir=cache_dir)
         if 'gsm8k' in name:
             return None
+        if 'gov_report' in name:
+            return get_gov_report(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, split='test', min_seqlen=min_seqlen, cache_dir=cache_dir)

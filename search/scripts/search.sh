@@ -2,18 +2,18 @@ DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-# MODEL_PATH=/SSD/huggingface/meta-llama
-# MODEL_NAME=Llama-3.1-8B-Instruct
-# DTYPE=float16
-# CONFIG=config/llama.json
-
-MODEL_PATH=/SSD/huggingface/Qwen
-# MODEL_NAME=Qwen2.5-7B-Instruct
-# MODEL_NAME=Qwen2.5-14B-Instruct
-MODEL_NAME=Qwen2.5-72B-Instruct
-# DTYPE=bfloat16
+MODEL_PATH=/SSD/huggingface/meta-llama
+MODEL_NAME=Llama-3.1-8B-Instruct
 DTYPE=float16
-CONFIG=config/qwen2.json
+CONFIG=config/llama.json
+
+# MODEL_PATH=/SSD/huggingface/Qwen
+# # MODEL_NAME=Qwen2.5-7B-Instruct
+# # MODEL_NAME=Qwen2.5-14B-Instruct
+# MODEL_NAME=Qwen2.5-72B-Instruct
+# # DTYPE=bfloat16
+# DTYPE=float16
+# CONFIG=config/qwen2.json
 
 # MODEL_PATH=/SSD/huggingface/mistralai
 # MODEL_NAME=Mistral-7B-Instruct-v0.3
@@ -25,12 +25,12 @@ CONFIG=config/qwen2.json
 # W_METHOD_TEXT="hqq_layer_prune"
 W_METHOD="hqq"
 W_METHOD_TEXT="hqq"
-W_BITS="4"
-W_BITS_TEXT="4"
-W_GROUP_SIZE=128
-# W_BITS="2 3 4"
-# W_BITS_TEXT="234"
+# W_BITS="4"
+# W_BITS_TEXT="4"
 # W_GROUP_SIZE=128
+W_BITS="2 3 4"
+W_BITS_TEXT="234"
+W_GROUP_SIZE=128
 
 # W_METHOD="fp16"
 # W_METHOD_TEXT="fp16"
@@ -108,8 +108,8 @@ COMP_OBJ_MAX_TEXT=1e99
 
 # N_TOKEN=1024
 # N_TOKEN=16384
-# N_TOKEN=131072
-N_TOKEN=1048576
+N_TOKEN=131072
+# N_TOKEN=1048576
 
 QMODEL_PATHS_LIST=()
 for B in ${W_BITS}
@@ -129,8 +129,8 @@ OUTLIER_TEXT=234
 N_OUTLIER=32
 OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.pth
 
-# LOSS_FUNC=cross_entropy
-LOSS_FUNC=jsd
+LOSS_FUNC=cross_entropy
+# LOSS_FUNC=jsd
 
 
 # PREDICTOR=mlp
@@ -150,11 +150,14 @@ PREDICTOR=rbf
 
 DATASET=gov_report
 N_SAMPLE=4
+# N_SAMPLE=8
 # SEQLEN=2048
-SEQLEN=8192
-# SEQLEN=16384
+# SEQLEN=8192
+# MIN_SEQLEN=8192
+SEQLEN=16384
+MIN_SEQLEN=16384
 DATA_BATCH_SIZE=1
-MIN_SEQLEN=0
+# MIN_SEQLEN=0
 
 # DATASET=gsm8k
 # N_SAMPLE=32
@@ -180,7 +183,7 @@ METRIC=loss
 # METRIC=gsm8k_cot
 
 # MAX_VALUE=5
-MAX_VALUE=1
+MAX_VALUE=0.7
 # MAX_VALUE=1
 MUT_PROB=0.1
 CROSSOVER_PROB=0.9
@@ -188,9 +191,9 @@ CROSSOVER_PROB=0.9
 SAVE_ITER=1
 # SAVE_ITER=10
 
-TRUNC_LEN=4096
+# TRUNC_LEN=4096
 SLIDING_WINDOW=1024
-# TRUNC_LEN=1024
+TRUNC_LEN=1024
 # SLIDING_WINDOW=256
 # TRUNC_LEN=512
 # SLIDING_WINDOW=128
@@ -201,21 +204,23 @@ SLIDING_WINDOW=1024
 # TRUNC_LEN=32
 # SLIDING_WINDOW=32
 
-ALPHA=2
-BETA=-2
-# ALPHA=1
-# BETA=-1
+# ALPHA=2
+# BETA=-2
+ALPHA=1
+BETA=-1
 
-KEY_TOKEN_SAVE_PATH=key_token/${MODEL_NAME}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 # KEY_TOKEN_LOAD_PATH=key_token/${MODEL_NAME}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
-KEY_TOKEN_LOAD_PATH=key_token/Qwen2.5-72B-Instruct_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+# KEY_TOKEN_LOAD_PATH=key_token/Qwen2.5-72B-Instruct_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+KEY_TOKEN_PATH=key_token/Qwen2.5-72B-Instruct_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+# KEY_TOKEN_PATH=/NAS/SJ/actquant/search/key_token/Qwen2.5-72B-Instruct_8sample_16384seqlen_16384min_1024trunc_1024sw_1alpha_-1beta
 
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k${K_GROUP_SIZE_TEXT}v${V_GROUP_SIZE_TEXT}group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_${LOSS_FUNC}/loss
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_${LOSS_FUNC}/loss
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128v128group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_jsd/loss
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_hqq_w24k24v24bits_w${W_GROUP_SIZE}k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_gsm8k_32sample_256seqlen_0minseq_jsd/loss
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_hqq_kv_${KV_METHOD}_w24k24v24bits_w128k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_${DATASET}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}minseq_${LOSS_FUNC}/loss
-SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_hqq_kv_${KV_METHOD}_w24k24v24bits_w128k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_2048seqlen_0minseq_${LOSS_FUNC}/loss
+# SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_hqq_kv_${KV_METHOD}_w24k24v24bits_w128k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_2048seqlen_0minseq_${LOSS_FUNC}/loss
+SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_hqq_kv_${KV_METHOD}_w24k24v24bits_w128k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_2048seqlen_0minseq_jsd/loss
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_hqq_kv_${KV_METHOD}_w24k24v24bits_w128k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_${SEQLEN}seqlen_${MIN_SEQLEN}minseq_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta_${LOSS_FUNC}/loss
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_${W_METHOD_TEXT}_kv_${KV_METHOD}_w${W_BITS_TEXT}k24v24bits_w${W_GROUP_SIZE}k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_${SEQLEN}seqlen_${MIN_SEQLEN}minseq_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta_${LOSS_FUNC}/loss
 
@@ -251,6 +256,7 @@ ARGS="--gpu_id ${DEVICES} \
 --k_quant_scheme ${K_QUANT_SCHEME} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
 --quant_kv_output \
+--sensitivity_result_path ${SENSITIVITY_RESULT_PATH} \
 --predictor ${PREDICTOR} \
 --save ${SAVE} \
 --iterations ${ITER} \
@@ -275,16 +281,13 @@ ARGS="--gpu_id ${DEVICES} \
 --sliding_window ${SLIDING_WINDOW} \
 --alpha ${ALPHA} \
 --beta ${BETA} \
---key_token_save_path ${KEY_TOKEN_SAVE_PATH}"
-# --key_token_load_path ${KEY_TOKEN_LOAD_PATH}"
+--key_token_path ${KEY_TOKEN_PATH}"
 
 
 
 
 
 
-
-# --sensitivity_result_path ${SENSITIVITY_RESULT_PATH} \
 
 
 for g in "${KV_GROUP_SIZE[@]}"

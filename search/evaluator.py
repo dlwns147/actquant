@@ -48,9 +48,8 @@ class LlamaEvaluator:
                  task_dict=None,
                  verbosity='FATAL',
                  use_key_token=False,
-                 eval_model_id='',
-                 key_token_save_path='',
-                 key_token_load_path='',
+                #  key_token_save_path='',
+                 key_token_path='',
                  trunc_len=512,
                  sliding_window=128,
                  alpha=2,
@@ -70,7 +69,7 @@ class LlamaEvaluator:
 
         # with accelerator.main_process_first():
         self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=True, seed=seed, seqlen=seqlen, min_seqlen=min_seqlen)) for dataset in datasets}
-        self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, batch_size=data_batch_size, train=False, seqlen=seqlen)) for dataset in datasets}
+        self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=False, seed=seed, seqlen=seqlen, min_seqlen=min_seqlen)) for dataset in datasets}
 
         self.loss_func = loss_func
         self.dense_logits = {dataset: None for dataset in self.train_loaders.keys()}
@@ -93,21 +92,20 @@ class LlamaEvaluator:
                                 self.outlier[f'{blk_idx}.{linear}'] = [outlier[key], get_fp16_channel(getsubattr(getblock(model, config)[blk_idx], linear), outlier[key])]
 
             if use_key_token:
-                if key_token_save_path:
-                    key_token_save_path_list = {dataset: os.path.join(key_token_save_path, dataset) for dataset in self.train_loaders}
-                if key_token_load_path:
-                    key_token_load_path_list = {dataset: os.path.join(key_token_load_path, dataset) for dataset in self.train_loaders}
-
-                self.key_token_list = {dataset: get_key_token_list(model=model, 
-                                                                tokenizer=get_tokenizer(eval_model_id if eval_model_id else model_id, use_fast=True), 
-                                                                loader=loader, 
-                                                                trunc_len=trunc_len, 
-                                                                sliding_window=sliding_window, 
-                                                                alpha=alpha, 
-                                                                beta=beta, 
-                                                                save_path=key_token_save_path_list[dataset] if key_token_save_path else '', 
-                                                                load_path=key_token_load_path_list[dataset] if key_token_load_path else ''
-                                                            ) for dataset, loader in self.train_loaders.items()}
+                key_token_path_list = {dataset: os.path.join(key_token_path, dataset) for dataset in self.train_loaders}
+                self.key_token_list = {
+                    dataset: get_key_token_list(
+                        evaluator_model=model,
+                        evaluator_tokenizer=get_tokenizer(model_id, use_fast=True),
+                        loader=loader,
+                        trunc_len=trunc_len, 
+                        sliding_window=sliding_window, 
+                        alpha=alpha, 
+                        beta=beta, 
+                        load_path=key_token_path_list[dataset],
+                        mode='offline'
+                    ) for dataset, loader in self.train_loaders.items()
+                }
                 for dataset in self.train_loaders:
                     n_key_token = sum([len(key_token) for key_token in self.key_token_list[dataset]])
                     n_key_token = sum(accelerator.gather_for_metrics([n_key_token], use_gather_object=True))
@@ -188,9 +186,7 @@ class LlamaEvaluator:
         self.packing = packing
         
         self.use_key_token = use_key_token
-        self.eval_model_id = eval_model_id
-        self.key_token_save_path = key_token_save_path
-        self.key_token_load_path = key_token_load_path
+        self.key_token_path = key_token_path
         self.trunc_len = trunc_len
         self.sliding_window = sliding_window
         self.alpha = alpha
@@ -279,66 +275,41 @@ class LlamaEvaluator:
     #         assert all([b in [0, self.small_model_bits, self.large_model_bits] for b in linear_bits]), f'{linear}: {linear_bits} are not compatible with the evaluator.'
 
     def eval(self, accelerator, arch, metric, model=None, loss_func='cross_entropy'):
-        # if metric == 'latency':
-        #     measure_latency(model=self.sample(arch))
         if metric == 'ppl':
             loaders = self.test_loaders
         elif metric == 'loss':
             loaders = self.train_loaders
-        elif metric == 'longppl' or metric == 'longppl_jsd':
-            loaders = self.test_loaders
         elif 'gsm8k' in metric:
             loaders = {metric: None}
         else:
-            raise NotImplementedError(f"metric should be 'ppl', 'loss', 'longppl', 'longppl_jsd', or 'gsm8k', not {metric}")
+            raise NotImplementedError(f"metric should be 'ppl', 'loss', or 'gsm8k', not {metric}")
+        
         metric_list = dict()
         for dataset, loader in loaders.items():
-            # Get evaluator model and tokenizer for longppl metrics
-            evaluator_model = None
-            evaluator_tokenizer = None
-            if metric == 'longppl' or metric == 'longppl_jsd':
-                # Load evaluator model if needed (for online mode)
-                eval_model_id = getattr(self, 'eval_model_id', '') if hasattr(self, 'eval_model_id') else ''
-                if eval_model_id:
-                    from utils.func import get_hfmodel, get_tokenizer
-                    evaluator_model = get_hfmodel(eval_model_id, dtype=self.dtype, device_map=self.device_map)
-                    evaluator_tokenizer = get_tokenizer(eval_model_id, use_fast=True)
-                elif not getattr(self, 'key_token_load_path', ''):
-                    # If no eval_model_id and no load_path, use the main model as evaluator
-                    evaluator_model = None
-                    evaluator_tokenizer = None
+            result = eval_metric(
+                model=self.sample(arch) if model is None else model, 
+                accelerator=accelerator,
+                metric=metric, 
+                loader=loader, 
+                seqlen=self.seqlen, 
+                loss_func=loss_func, 
+                dense_logits_list=self.dense_logits[dataset] if (self.loss_func in ['jsd', 'kld', 'topk']) else None, 
+                key_token_list=self.key_token_list[dataset] if self.use_key_token else None, 
+                tokenizer=self.tokenizer,
+                num_fewshot=self.num_fewshot, 
+                limit=self.limit,
+                batch_size=self.lm_eval_batch_size,
+                verbosity=self.verbosity,
+                task_manager=self.task_manager,
+                task_dict=self.task_dict
+            )
             
-            result = eval_metric(model=self.sample(arch) if model is None else model, 
-                                accelerator=accelerator,
-                                metric=metric, 
-                                loader=loader, 
-                                seqlen=self.seqlen, 
-                                loss_func=loss_func, 
-                                dense_logits_list=self.dense_logits[dataset] if (self.loss_func in ['jsd', 'kld', 'topk'] or metric == 'longppl_jsd') else None, 
-                                key_token_list=self.key_token_list[dataset] if (self.use_key_token or metric in ['longppl', 'longppl_jsd']) else None, 
-                                tokenizer=self.tokenizer,
-                                num_fewshot=self.num_fewshot, 
-                                limit=self.limit,
-                                batch_size=self.lm_eval_batch_size,
-                                verbosity=self.verbosity,
-                                task_manager=self.task_manager,
-                                task_dict=self.task_dict,
-                                evaluator_model=evaluator_model,
-                                evaluator_tokenizer=evaluator_tokenizer,
-                                trunc_len=self.trunc_len,
-                                sliding_window=self.sliding_window,
-                                alpha=self.alpha,
-                                beta=self.beta,
-                                save_path=getattr(self, 'key_token_save_path', '') if hasattr(self, 'key_token_save_path') else '',
-                                mode='offline' if (hasattr(self, 'key_token_load_path') and getattr(self, 'key_token_load_path', '')) else 'online',
-                                evaluator_name=getattr(self, 'eval_model_id', '') if hasattr(self, 'eval_model_id') else '')
             if 'gsm8k' in metric:
                 result = 1 - float(result[metric]['exact_match,strict-match'])
                 # result = 1 - float(result[metric]['exact_match,flexible-extract'])
-            elif metric == 'longppl' or metric == 'longppl_jsd':
-                # Extract longppl value from result dict
-                result = result.get('longppl', result.get('ppl'))
+            
             metric_list[dataset] = result
+        
         complexity = get_net_info(arch, self.config, self.group_size, n_token=self.n_token)
         return metric_list, complexity
     

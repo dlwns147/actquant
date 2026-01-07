@@ -134,8 +134,11 @@ def main(args):
         model.config.use_cache = False
 
         metric, complexity = evaluator.eval(arch=arch, metric='ppl', model=model, accelerator=accelerator)
+        print(f'[0] {args.metric}: {[p for p in metric.values()]}, metric: {list(metric.values())}, prev_metric: [0]')
+        print(f'complexity: {list(complexity.keys())}')
+        print(f'complexity: {list(complexity.values())}')
         # accelerator.print(arch)
-        print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}')
+        # print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}')
 
     if args.pass_key_file:
         clean_up()

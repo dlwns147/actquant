@@ -109,8 +109,7 @@ class Search:
         self.sliding_window = kwargs.pop('sliding_window', 128)
         self.alpha = kwargs.pop('alpha', 2)
         self.beta = kwargs.pop('beta', -2)
-        self.key_token_save_path = kwargs.pop('key_token_save_path', '')
-        self.key_token_load_path = kwargs.pop('key_token_load_path', '')
+        self.key_token_path = kwargs.pop('key_token_path', '')
 
         self.sensitivity_result_path = kwargs.pop('sensitivity_result_path', '')
         total_module = dict()
@@ -178,8 +177,7 @@ class Search:
             sliding_window=self.sliding_window,
             alpha=self.alpha,
             beta=self.beta,
-            key_token_save_path=self.key_token_save_path,
-            key_token_load_path=self.key_token_load_path
+            key_token_path=self.key_token_path
         )
         self.search_space = LlamaGroupSizeSearchSpace(
             bits=self.bits,
@@ -725,9 +723,7 @@ if __name__ == '__main__':
                         help='Long-short distance (LSD) threshold for long PPL/JSD calculation')
     parser.add_argument('--beta', type=int, default=-2, 
                         help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
-    parser.add_argument('--key_token_save_path', type=str, default='',
-                        help='')
-    parser.add_argument('--key_token_load_path', type=str, default='',
+    parser.add_argument('--key_token_path', type=str, default='',
                         help='')
     
     parser.add_argument('--packing', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
