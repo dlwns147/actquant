@@ -20,6 +20,9 @@ CONFIG=config/llama.json
 # DTYPE=float16
 # CONFIG=config/mistral.json
 
+USE_KEY_TOKEN=True
+# USE_KEY_TOKEN=False
+
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
 
@@ -71,7 +74,30 @@ TASKS="coqa gsm8k truthfulqa"
 # TASKS="gsm8k_cot"
 
 N=1
-DATASETS="wikitext2 c4"
+# DATASETS="wikitext2 c4"
+# # DATASETS="gov_report"
+# METRIC="ppl"
+# LOSS_FUNC="cross_entropy"
+
+
+DATASETS="gov_report"
+METRIC="loss"
+LOSS_FUNC="cross_entropy"
+# LOSS_FUNC="jsd"
+
+# N_SAMPLE=4
+N_SAMPLE=8
+# N_SAMPLE=16
+# N_SAMPLE=32
+# N_SAMPLE=64
+# SEQLEN=2048
+# MIN_SEQLEN=2048
+SEQLEN=8192
+MIN_SEQLEN=8192
+# SEQLEN=16384
+# MIN_SEQLEN=16384
+DATA_BATCH_SIZE=1
+# MIN_SEQLEN=0
 
 # LM_EVAL_BATCH_SIZE=1
 # LM_EVAL_BATCH_SIZE=4
@@ -104,9 +130,30 @@ RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_ME
 
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
+# TRUNC_LEN=4096
+# SLIDING_WINDOW=1024
+# TRUNC_LEN=1024
+# # SLIDING_WINDOW=1024
+# SLIDING_WINDOW=256
+# TRUNC_LEN=512
+# SLIDING_WINDOW=128
+TRUNC_LEN=256
+# SLIDING_WINDOW=128
+SLIDING_WINDOW=64
+# TRUNC_LEN=32
+# SLIDING_WINDOW=32
+
+# ALPHA=2
+# BETA=-2
+ALPHA=1
+BETA=-1
+# KEY_TOKEN_PATH=key_token/${MODEL_NAME}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+KEY_TOKEN_PATH=key_token/Qwen2.5-72B-Instruct_${DATASETS}_test_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+
 N_PROC=1
 
-CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} awqgptq.py \
+
+ARGS="
 --gpu_id ${DEVICES} \
 --w_method ${W_METHOD} \
 --kv_method ${KV_METHOD} \
@@ -126,16 +173,36 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 -n ${N} \
 --save ${SAVE} \
 --clip_asym \
---ruler \
---ruler_task ${RULER_TASK} \
---ruler_yaml_path ${RULER_YAML_PATH} \
---ruler_result_path ${RULER_RESULT_PATH} \
---ruler_batch_size ${RULER_BATCH_SIZE} \
---ruler_sample ${RULER_SAMPLE} \
---ruler_length ${RULER_LENGTH} \
---long_eval \
---
-# --datasets ${DATASETS} \
+--datasets ${DATASETS} \
+--metric ${METRIC} \
+--loss_func ${LOSS_FUNC} \
+--n_sample ${N_SAMPLE} \
+--seqlen ${SEQLEN} \
+--min_seqlen ${MIN_SEQLEN} \
+--data_batch_size ${DATA_BATCH_SIZE}"
+# --ruler \
+# --ruler_task ${RULER_TASK} \
+# --ruler_yaml_path ${RULER_YAML_PATH} \
+# --ruler_result_path ${RULER_RESULT_PATH} \
+# --ruler_batch_size ${RULER_BATCH_SIZE} \
+# --ruler_sample ${RULER_SAMPLE} \
+# --ruler_length ${RULER_LENGTH} \
+# --long_eval \
+
+if [ ${USE_KEY_TOKEN} == 'True' ]; then
+    ARGS+=" --use_key_token \
+    --trunc_len ${TRUNC_LEN} \
+    --sliding_window ${SLIDING_WINDOW} \
+    --alpha ${ALPHA} \
+    --beta ${BETA} \
+    --key_token_path ${KEY_TOKEN_PATH}"
+fi
+
+CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} awqgptq.py ${ARGS}
+
+
+
+
 
 # --zeroshot \
 # --tasks ${TASKS} \

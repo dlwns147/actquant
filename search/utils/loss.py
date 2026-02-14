@@ -43,7 +43,8 @@ def get_key_token_list(
     alpha=2, 
     beta=-2,
     mode='offline',
-    verbosity=False
+    verbosity=False,
+    split='train'
 ):
     """
     Get key token list from loader.

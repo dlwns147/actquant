@@ -30,17 +30,18 @@ DTYPE=float16
 
 DATASET=gov_report
 # N_SAMPLE=4
-# N_SAMPLE=8
-N_SAMPLE=16
-SEQLEN=2048
-DATA_BATCH_SIZE=1
-MIN_SEQLEN=2048
+N_SAMPLE=8
+# N_SAMPLE=16
+# N_SAMPLE=50
+# SEQLEN=2048
+# DATA_BATCH_SIZE=1
+# MIN_SEQLEN=2048
 # SEQLEN=4096
 # DATA_BATCH_SIZE=1
 # MIN_SEQLEN=4096
-# SEQLEN=8192
-# DATA_BATCH_SIZE=1
-# MIN_SEQLEN=8192
+SEQLEN=8192
+DATA_BATCH_SIZE=1
+MIN_SEQLEN=8192
 # SEQLEN=16384
 # DATA_BATCH_SIZE=1
 # MIN_SEQLEN=16384
@@ -59,10 +60,10 @@ MIN_SEQLEN=2048
 # SLIDING_WINDOW=256
 # TRUNC_LEN=512
 # SLIDING_WINDOW=128
-# TRUNC_LEN=256
-# SLIDING_WINDOW=64
-TRUNC_LEN=128
-SLIDING_WINDOW=128
+TRUNC_LEN=256
+SLIDING_WINDOW=64
+# TRUNC_LEN=128
+# SLIDING_WINDOW=128
 # TRUNC_LEN=32
 # SLIDING_WINDOW=32
 
@@ -71,12 +72,15 @@ SLIDING_WINDOW=128
 ALPHA=1
 BETA=-1
 
-KEY_TOKEN_SAVE_PATH=key_token/${MODEL_NAME}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+# SPLIT='train'
+SPLIT='test'
+
+KEY_TOKEN_SAVE_PATH=key_token/${MODEL_NAME}_${DATASET}_${SPLIT}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+# KEY_TOKEN_SAVE_PATH=key_token/${MODEL_NAME}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 # KEY_TOKEN_LOAD_PATH=key_token/${MODEL_NAME}_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 # KEY_TOKEN_LOAD_PATH=key_token/Qwen2.5-72B-Instruct_${N_SAMPLE}sample_${SEQLEN}seqlen_${MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 
-CUDA_VISIBLE_DEVICES=${DEVICES} python gen_key_token.py \
-    --gpu_id ${DEVICES} \
+ARGS="--gpu_id ${DEVICES} \
     --model_path ${MODEL_PATH} \
     --model_name ${MODEL_NAME} \
     --config ${CONFIG} \
@@ -90,4 +94,10 @@ CUDA_VISIBLE_DEVICES=${DEVICES} python gen_key_token.py \
     --alpha ${ALPHA} \
     --beta ${BETA} \
     --save_path ${KEY_TOKEN_SAVE_PATH} \
-    --verbosity
+    --verbosity"
+
+if [ ${SPLIT} == 'train' ]; then
+    ARGS+=" --train"
+fi
+
+CUDA_VISIBLE_DEVICES=${DEVICES} python gen_key_token.py ${ARGS}

@@ -272,7 +272,7 @@ class LlamaGroupSizeSearchSpace:
                 group_size,
                 pass_module,
                 config=None,
-                comp_obj='bits',
+                comp_obj='',
                 comp_obj_min=[],
                 comp_obj_max=[],
                 outlier_bits=[],

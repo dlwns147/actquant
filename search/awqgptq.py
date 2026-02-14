@@ -101,9 +101,13 @@ def main(args):
         method={'w': args.w_method, 'kv': args.kv_method},
         quant_model_paths=args.quant_model_paths,
         outlier=torch.load(args.outlier_path) if args.outlier_path else None,
+        metric=args.metric,
+        loss_func=args.loss_func,
         seqlen=args.seqlen,
         n_sample=args.n_sample,
         datasets=args.datasets,
+        min_seqlen=args.min_seqlen,
+        data_batch_size=args.data_batch_size,
         device_map=device_map,
         bits=bits,
         dtype=dtype,
@@ -112,6 +116,12 @@ def main(args):
         # use_flash=args.use_flash,
         k_quant_scheme=args.k_quant_scheme,
         v_quant_scheme=args.v_quant_scheme,
+        use_key_token=args.use_key_token,
+        trunc_len=args.trunc_len,
+        sliding_window=args.sliding_window,
+        alpha=args.alpha,
+        beta=args.beta,
+        key_token_path=args.key_token_path
     )
 
     arch = dict()
@@ -133,7 +143,7 @@ def main(args):
         model.config.quant_kv_output = True
         model.config.use_cache = False
 
-        metric, complexity = evaluator.eval(arch=arch, metric='ppl', model=model, accelerator=accelerator)
+        metric, complexity = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator)
         print(f'[0] {args.metric}: {[p for p in metric.values()]}, metric: {list(metric.values())}, prev_metric: [0]')
         print(f'complexity: {list(complexity.keys())}')
         print(f'complexity: {list(complexity.values())}')
@@ -377,11 +387,20 @@ if __name__ == '__main__':
                         help='number of architectures desired')
     parser.add_argument('--seqlen', type=int, default=2048,
                         help='')
+    parser.add_argument('--min_seqlen', type=int, default=0,
+                        help='')
+    parser.add_argument('--data_batch_size', type=int, default=1,
+                        help='')
     parser.add_argument('--n_sample', type=int, default=128,
                         help='')
     parser.add_argument('--n_token', type=int, default=0, 
                         help='target sequence length for memory calculation')
     
+    parser.add_argument('--metric', type=str, default='ppl',
+                        help='which metric predictor model to fit (ppl/loss)')
+    parser.add_argument('--loss_func', type=str, default='cross_entropy',
+                        help='')
+
     # parser.add_argument('--debug', action='store_true', help='')
     # parser.add_argument('--sec_obj', type=str, default='bits',
     #                     help='second objective to optimize simultaneously')
@@ -414,6 +433,19 @@ if __name__ == '__main__':
     parser.add_argument('--num_fewshot', type=int, default=None,
                         help='')
     
+    parser.add_argument('--use_key_token', action='store_true',
+                        help='Only use key tokens for loss calculation (Long PPL/JSD)')
+    parser.add_argument('--trunc_len', type=int, default=512,
+                        help='truncation length for long PPL/JSD calculation')
+    parser.add_argument('--sliding_window', type=int, default=128,
+                        help='sliding_window length for long PPL/JSD calculation')
+    parser.add_argument('--alpha', type=int, default=2,
+                        help='Long-short distance (LSD) threshold for long PPL/JSD calculation')
+    parser.add_argument('--beta', type=int, default=-2,
+                        help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
+    parser.add_argument('--key_token_path', type=str, default='',
+                        help='')
+
     parser.add_argument('--longbench', action='store_true', help='')
     parser.add_argument('--longbench_e', action='store_true',
                         help='number of architectures desired')

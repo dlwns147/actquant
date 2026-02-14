@@ -3,12 +3,13 @@ import os
 import json
 import torch
 import warnings
-warnings.simplefilter("ignore")
-
+from time import time
 from accelerate import Accelerator
 from utils.func import init_accelerator, set_seed, get_hfmodel, clean_up
 from utils.data import get_loader, get_tokenizer
 from utils.loss import get_key_token_list
+
+warnings.simplefilter("ignore")
 
 def main(args):
     set_seed(args.seed)
@@ -39,8 +40,7 @@ def main(args):
         model=model_id,
         n_sample=args.n_sample,
         batch_size=args.data_batch_size,
-        # train=True,
-        train=False,
+        train=args.train,
         seed=args.seed,
         seqlen=args.seqlen,
         min_seqlen=args.min_seqlen
@@ -62,6 +62,7 @@ def main(args):
     
     # Generate key token list
     accelerator.print("Generating key token list...")
+    start_time = time()
     key_token_list = get_key_token_list(
         evaluator_model=model,
         evaluator_tokenizer=tokenizer,
@@ -75,6 +76,8 @@ def main(args):
         mode='online',
         verbosity=args.verbosity
     )
+    end_time = time()
+    accelerator.print(f"Time taken to generate key token list: {(end_time - start_time):.2f} seconds")
     
     # Count total key tokens
     n_key_token = sum([len(key_token) if key_token is not None else 0 for key_token in key_token_list])
@@ -161,6 +164,8 @@ if __name__ == '__main__':
     parser.add_argument('--dtype', type=str, default='auto',
                         help='model dtype (auto, float16, bfloat16, etc.)')
     parser.add_argument('--verbosity', action='store_true',
+                        help='')
+    parser.add_argument('--train', action='store_true',
                         help='')
     
     args = parser.parse_args()

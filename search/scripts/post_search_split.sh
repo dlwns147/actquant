@@ -27,6 +27,9 @@ CONFIG=config/llama.json
 # DTYPE=float16
 # CONFIG=config/mistral.json
 
+# USE_KEY_TOKEN=True
+USE_KEY_TOKEN=False
+
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
 
@@ -93,9 +96,9 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 
 COMP_OBJ=(memory)
 
-COMP_OBJ_VAL=(5862072320)
+# COMP_OBJ_VAL=(5862072320)
 # # COMP_OBJ_VAL=(5666250752)
-# # COMP_OBJ_VAL=(5649473536) # LLama 3.1 8B
+COMP_OBJ_VAL=(5649473536) # LLama 3.1 8B
 # # # COMP_OBJ_VAL=(5006434304) # LLama 3.1 8B
 # # # COMP_OBJ_VAL=(4989657088) # LLama 3.1 8B
 # # # COMP_OBJ_VAL=(4793835520) # LLama 3.1 8B
@@ -162,15 +165,17 @@ MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
-# DATASETS="wikitext2 c4"
-# DATASETS_TEXT="wikitext2_c4"
-# METRIC="ppl"
-# LOSS_FUNC="cross_entropy"
+DATASETS="wikitext2 c4"
+DATASETS_TEXT="wikitext2_c4"
+# DATASETS="gov_report"
+# DATASETS_TEXT="gov_report"
+METRIC="ppl"
+LOSS_FUNC="cross_entropy"
 
-DATASETS="wikitext2"
-DATASETS_TEXT="wikitext2"
-METRIC="loss"
-LOSS_FUNC="jsd"
+# DATASETS="wikitext2"
+# DATASETS_TEXT="wikitext2"
+# METRIC="loss"
+# LOSS_FUNC="jsd"
 
 # LOSS_FUNC="cross_entropy"
 
@@ -196,8 +201,11 @@ BETA=-2
 
 # EXPR_FOLDER=save/search/quant
 
-W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_200.stats
-KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
+W_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_200.stats
+KV_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_100.stats
+
+# W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_200.stats
+# KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
 
 LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONGBENCH_CONFIG=utils/longbench_config
@@ -223,7 +231,13 @@ N=1
 # N=10
 
 RANDOM_SAMPLE=1000
-SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+
+if [ ${USE_KEY_TOKEN} == 'True' ]; then
+    SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
+else
+    SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale
+fi
+
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_sqrt_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 
@@ -255,18 +269,12 @@ ARGS="--gpu_id ${DEVICES} \
 --metric ${METRIC} \
 --loss_func ${LOSS_FUNC} \
 -n ${N}
---random_sample ${RANDOM_SAMPLE} \
 --save ${SAVE} \
 --quant_model_paths ${QMODEL_PATHS} \
 --kv_scale ${KV_SCALE} \
---ruler \
---ruler_task ${RULER_TASK} \
---ruler_yaml_path ${RULER_YAML_PATH} \
---ruler_result_path ${RULER_RESULT_PATH} \
---ruler_batch_size ${RULER_BATCH_SIZE} \
---ruler_sample ${RULER_SAMPLE} \
---ruler_length ${RULER_LENGTH}"
-# --datasets ${DATASETS} \
+--datasets ${DATASETS} "
+
+# --random_sample ${RANDOM_SAMPLE} \
 
 #  \
 # --random_sample_path ${RANDOM_SAMPLE_PATH} \
@@ -284,7 +292,24 @@ ARGS="--gpu_id ${DEVICES} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
 # --longbench \
 # --longbench_result_path ${LONGBENCH_RESULT_PATH} \
-# --longbench_config ${LONGBENCH_CONFIG}
+# --longbench_config ${LONGBENCH_CONFIG} \
+# --ruler \
+# --ruler_task ${RULER_TASK} \
+# --ruler_yaml_path ${RULER_YAML_PATH} \
+# --ruler_result_path ${RULER_RESULT_PATH} \
+# --ruler_batch_size ${RULER_BATCH_SIZE} \
+# --ruler_sample ${RULER_SAMPLE} \
+# --ruler_length ${RULER_LENGTH}
+
+
+if [ ${USE_KEY_TOKEN} == 'True' ]; then
+    ARGS+=" --use_key_token \
+    --trunc_len ${TRUNC_LEN} \
+    --sliding_window ${SLIDING_WINDOW} \
+    --alpha ${ALPHA} \
+    --beta ${BETA} \
+    --key_token_path ${KEY_TOKEN_PATH}"
+fi
 
 for g in "${K_GROUP_SIZE[@]}"
 do
