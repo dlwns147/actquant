@@ -651,6 +651,8 @@ if __name__ == '__main__':
                         help='sequential length of the calibaration (train) set')
     parser.add_argument('--min_seqlen', type=int, default=0,
                         help='minimum sequential length of the calibaration gsm8k set')
+    parser.add_argument('--data_batch_size', type=int, default=1,
+                        help='')
     
     parser.add_argument('--debug', action='store_true', help='')
     parser.add_argument('--datasets', type=str, nargs='+', default=[], 
