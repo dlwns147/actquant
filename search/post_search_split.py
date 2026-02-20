@@ -303,14 +303,27 @@ def main(args):
         #     accelerator.print(f'Selected arch[{idx}] {comp_obj}: {pf_list[i][idx, 1:].tolist()}, metric: {pf_list[i][idx_list[i], 0].tolist()}')            
             
         if args.datasets:
-            if args.kv_method == 'kivi':
-                model.config.kivi_config.residual_length = 0
-            elif args.kv_method == 'hqq':
-                model.generation_config.cache_config = 0
-            model.config.quant_kv_output = True
-            model.config.use_cache = False
+            if args.stride is not None:
+                if args.kv_method == 'kivi':
+                    model.config.kivi_config.residual_length = args.residual_length
+                elif args.kv_method == 'hqq':
+                    model.generation_config.cache_config = args.residual_length
+                model.config.quant_kv_output = False
+                model.config.use_cache = True
+                
+            else:
+                if args.kv_method == 'kivi':
+                    model.config.kivi_config.residual_length = 0
+                elif args.kv_method == 'hqq':
+                    model.generation_config.cache_config = 0
+                model.config.quant_kv_output = True
+                model.config.use_cache = False
+            # model.config.quant_kv_output = True
+            # model.config.use_cache = False
+            # model.config.quant_kv_output = True if args.stride is None else False
+            # model.config.use_cache = True if args.stride is not None else False
 
-            metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func)[0] if args.datasets else 0
+            metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride, last_tokens=args.last_tokens)[0] if args.datasets else 0
             complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
             # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
             # print(f'[{idx}] complexity: {complexity}, {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
@@ -624,7 +637,11 @@ if __name__ == '__main__':
                         help='which metric predictor model to fit (ppl/loss)')
     parser.add_argument('--loss_func', type=str, default='cross_entropy',
                         help='')
-    
+    parser.add_argument('--stride', type=int, default=None, 
+                        help='')
+    parser.add_argument('--last_tokens', type=int, default=None, 
+                        help='')
+                        
     parser.add_argument('--save', type=str, default='',
                         help='location of dir to save')
     # parser.add_argument('--expr', type=str, nargs='+', default=[''],

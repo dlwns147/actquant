@@ -20,8 +20,8 @@ CONFIG=config/llama.json
 # DTYPE=float16
 # CONFIG=config/mistral.json
 
-USE_KEY_TOKEN=True
-# USE_KEY_TOKEN=False
+# USE_KEY_TOKEN=True
+USE_KEY_TOKEN=False
 
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
@@ -84,6 +84,8 @@ DATASETS="gov_report"
 METRIC="loss"
 LOSS_FUNC="cross_entropy"
 # LOSS_FUNC="jsd"
+STRIDE=256
+LAST_TOKENS=1024
 
 # N_SAMPLE=4
 N_SAMPLE=8
@@ -179,7 +181,10 @@ ARGS="
 --n_sample ${N_SAMPLE} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
---data_batch_size ${DATA_BATCH_SIZE}"
+--data_batch_size ${DATA_BATCH_SIZE} \
+--last_tokens ${LAST_TOKENS}
+"
+# --stride ${STRIDE} \
 # --ruler \
 # --ruler_task ${RULER_TASK} \
 # --ruler_yaml_path ${RULER_YAML_PATH} \

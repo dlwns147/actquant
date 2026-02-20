@@ -30,65 +30,40 @@ def load_and_eval_ppl(model, model_name='', device=torch.device("cuda:0"), datas
     return ppl_test 
 
 @torch.no_grad()
-def eval_ppl(model, accelerator, loader, seqlen=2048, key_token_list=None, ignore_index=-100):
+def eval_ppl(model, accelerator, loader, seqlen=2048):
     # # Get input IDs
     # testenc = testenc.input_ids
 
     # # Calculate number of samples
     # n_sample = testenc.numel() // seqlen
 
-    # If key_token_list is provided, ensure it matches the loader length
-    if key_token_list is not None:
-        assert len(loader) == len(key_token_list)
-
-    # Lists to store summed negative log likelihoods and token counts
+    # List to store negative log likelihoods
     nlls = []
-    token_counts = []
-
+    # print(f"n_sample {n_sample}")
+    
     # Loop through each batch
-    for batch_idx, (inputs, attention_mask, labels) in enumerate(tqdm(loader, desc='Eval PPL')):
-
-        batch_size = inputs.shape[0]
+    # for inputs in tqdm(loader, desc='Eval PPL'):
+    for inputs, attention_mask, labels in tqdm(loader, desc='Eval PPL'):
 
         # Forward pass through the model
+        # outputs = model(inputs)
         outputs = model(inputs, attention_mask=attention_mask)
         lm_logits = outputs.logits
 
         # Shift logits and labels for next token prediction
-        shift_logits = lm_logits[:, :-1, :].contiguous()          # [B, T-1, V]
-        shift_labels = labels[:, 1:].contiguous()                 # [B, T-1]
+        shift_logits = lm_logits[:, :-1, :].contiguous()
+        shift_logits = shift_logits.reshape(-1, shift_logits.size(-1))
+        shift_labels = inputs[:, 1:].reshape(-1)
+        
+        # Compute loss
+        loss_fct = nn.CrossEntropyLoss()
+        loss = loss_fct(shift_logits, shift_labels)
 
-        # Base mask: valid (non-ignore) tokens
-        mask = torch.where(shift_labels == ignore_index, False, True)  # [B, T-1]
+        # Calculate negative log likelihood
+        neg_log_likelihood = loss.float() * seqlen * lm_logits.shape[0]
 
-        # Apply key_token filtering if provided
-        if key_token_list is not None:
-            batch_key_tokens = key_token_list[batch_idx]
-            key_mask = torch.zeros_like(mask, dtype=torch.bool)
-            for seq_idx in range(batch_size):
-                key_tokens = batch_key_tokens[seq_idx]
-                if key_tokens is None:
-                    continue
-                key_mask[seq_idx][key_tokens] = True
-            mask = mask & key_mask
-
-        # If no valid tokens in this batch, skip
-        if mask.sum().item() == 0:
-            continue
-
-        # Flatten for loss computation
-        shift_logits_flat = shift_logits.reshape(-1, shift_logits.size(-1))  # [B*(T-1), V]
-        shift_labels_flat = shift_labels.reshape(-1)                         # [B*(T-1)]
-        mask_flat = mask.reshape(-1)                                         # [B*(T-1)]
-
-        # Compute per-token loss on selected tokens
-        loss_fct = nn.CrossEntropyLoss(reduction='none')
-        per_token_loss = loss_fct(shift_logits_flat[mask_flat], shift_labels_flat[mask_flat])
-
-        # Sum negative log likelihood over selected tokens in this batch
-        batch_nll = per_token_loss.sum().float()
-        nlls.append(batch_nll)
-        token_counts.append(mask_flat.sum().item())
+        # Append to list of negative log likelihoods
+        nlls.append(neg_log_likelihood)
 
     # # Loop through each batch
     # for i in tqdm(range(0,n_sample,bs), desc='Eval PPL'):
@@ -117,17 +92,16 @@ def eval_ppl(model, accelerator, loader, seqlen=2048, key_token_list=None, ignor
     #     # Append to list of negative log likelihoods
     #     nlls.append(neg_log_likelihood)
 
-
-    # Gather across processes
+    # print(f'{accelerator.device} nlls : {len(nlls)}')
+    # nlls = accelerator.gather_for_metrics(nlls)
+    # print(f'{accelerator.device} gathered nlls : {len(nlls)}')
+    # nlls = torch.cat(nlls)
+    # print(f'{accelerator.device} torch nlls : {nlls.shape}')
     nlls = torch.stack(accelerator.gather_for_metrics(nlls)).flatten()
-    total_tokens = sum(accelerator.gather_for_metrics(token_counts))
 
-    # Compute perplexity over selected tokens
-    if total_tokens > 0:
-        avg_nll = nlls.sum() / total_tokens
-        ppl = torch.exp(avg_nll)
-    else:
-        ppl = torch.tensor(0.0)
+    # Compute perplexity
+    # ppl = torch.exp(torch.stack(nlls).sum() / (len(nlls) * seqlen))
+    ppl = torch.exp(nlls.sum() / (len(nlls) * seqlen))
 
     # Empty CUDA cache to save memory
     # torch.cuda.empty_cache()
@@ -153,7 +127,7 @@ def get_logits(model, loader):
 
 
 @torch.no_grad()
-def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, ignore_index=-100):
+def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=None, last_tokens=None, ignore_index=-100):
     """
     Evaluate loss on a model using a data loader.
     
@@ -215,7 +189,16 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
                 key_mask[key_tokens] = True
                 mask = mask & key_mask
             
+            # Restrict to latter tokens only if last_n_tokens is set
+            if last_tokens is not None:
+                seq_shift_len = seq_shift_logits.size(0)
+                start_idx = max(0, seq_shift_len - last_tokens)
+                last_tokens_mask = torch.arange(seq_shift_len, device=mask.device) >= start_idx
+                mask = mask & last_tokens_mask
+            
             cur_seqlen = mask.sum().item()
+            if cur_seqlen == 0:
+                continue
             
             # Reshape for loss computation
             seq_shift_logits = seq_shift_logits.reshape(-1, seq_shift_logits.size(-1))
@@ -265,7 +248,7 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=None, last_tokens=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
     """
     Evaluate metric on a model using a data loader.
     
@@ -282,7 +265,9 @@ def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_ent
         seqlen: Sequence length
         loss_func: 'cross_entropy' or 'jsd' (for 'loss' metric)
         dense_logits_list: List of dense logits for JSD calculation (required for 'jsd')
-        key_token_list: Pre-computed key token list (optional, for 'loss' and 'ppl' metrics)
+        key_token_list: Pre-computed key token list (optional, for 'loss' metric)
+        stride: Stride for stride-aware loss calculation
+        last_tokens: If set, loss is computed only on the last N tokens per sequence (for 'loss' metric)
         tokenizer: Tokenizer (required for 'gsm8k')
         limit: Limit number of samples (for 'gsm8k')
         batch_size: Batch size (for 'gsm8k')
@@ -295,9 +280,9 @@ def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_ent
         Metric value
     """
     if metric == 'ppl':
-        return eval_ppl(model, accelerator, loader, seqlen=seqlen, key_token_list=key_token_list)
+        return eval_ppl(model, accelerator, loader, seqlen=seqlen)
     elif metric == 'loss':
-        return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list)
+        return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list, stride=stride, last_tokens=last_tokens)
     elif 'gsm8k' in metric:
         return eval_zeroshot(model, tokenizer, task_list=[metric], limit=limit, batch_size=batch_size, num_fewshot=num_fewshot, verbosity=verbosity, task_manager=task_manager, task_dict=task_dict)
     else:

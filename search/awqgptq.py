@@ -140,10 +140,10 @@ def main(args):
             model.config.kivi_config.residual_length = 0
         elif args.kv_method == 'hqq':
             model.generation_config.cache_config = 0
-        model.config.quant_kv_output = True
-        model.config.use_cache = False
+        model.config.quant_kv_output = True if args.stride is None else False
+        model.config.use_cache = True if args.stride is not None else False
 
-        metric, complexity = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator)
+        metric, complexity = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, stride=args.stride, last_tokens=args.last_tokens)
         print(f'[0] {args.metric}: {[p for p in metric.values()]}, metric: {list(metric.values())}, prev_metric: [0]')
         print(f'complexity: {list(complexity.keys())}')
         print(f'complexity: {list(complexity.values())}')
@@ -400,7 +400,11 @@ if __name__ == '__main__':
                         help='which metric predictor model to fit (ppl/loss)')
     parser.add_argument('--loss_func', type=str, default='cross_entropy',
                         help='')
-
+    parser.add_argument('--stride', type=int, default=None, 
+                        help='')
+    parser.add_argument('--last_tokens', type=int, default=None, 
+                        help='')
+                        
     # parser.add_argument('--debug', action='store_true', help='')
     # parser.add_argument('--sec_obj', type=str, default='bits',
     #                     help='second objective to optimize simultaneously')

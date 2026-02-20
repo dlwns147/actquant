@@ -483,6 +483,7 @@ class KIVIFakeCache(DynamicCache):
         return self._seen_tokens if layer_idx == 0 else self._seen_tokens - 1
 
     def _update_prefill(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int):
+        # import pdb; pdb.set_trace()
         if key_states.shape[-2] % self.kivi_config.residual_length != 0:
             if key_states.shape[-2] < self.kivi_config.residual_length:
                 key_states_quant = None

@@ -165,19 +165,40 @@ MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
-DATASETS="wikitext2 c4"
-DATASETS_TEXT="wikitext2_c4"
-# DATASETS="gov_report"
-# DATASETS_TEXT="gov_report"
-METRIC="ppl"
-LOSS_FUNC="cross_entropy"
+# DATASETS="wikitext2 c4"
+# DATASETS_TEXT="wikitext2_c4"
+# # DATASETS="gov_report"
+# # DATASETS_TEXT="gov_report"
+# METRIC="ppl"
+# LOSS_FUNC="cross_entropy"
 
 # DATASETS="wikitext2"
 # DATASETS_TEXT="wikitext2"
-# METRIC="loss"
+DATASETS="gov_report"
+DATASETS_TEXT="gov_report"
+METRIC="loss"
 # LOSS_FUNC="jsd"
+LOSS_FUNC="cross_entropy"
+# STRIDE=128
+# STRIDE=256
+STRIDE=1024
+# LAST_TOKENS=1024
+LAST_TOKENS=512
 
-# LOSS_FUNC="cross_entropy"
+
+# N_SAMPLE=4
+N_SAMPLE=8
+# N_SAMPLE=16
+# N_SAMPLE=32
+# N_SAMPLE=64
+# SEQLEN=2048
+# MIN_SEQLEN=2048
+SEQLEN=8192
+MIN_SEQLEN=8192
+# SEQLEN=16384
+# MIN_SEQLEN=16384
+DATA_BATCH_SIZE=1
+# MIN_SEQLEN=0
 
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
 # TASKS="coqa gsm8k truthfulqa"
@@ -272,7 +293,15 @@ ARGS="--gpu_id ${DEVICES} \
 --save ${SAVE} \
 --quant_model_paths ${QMODEL_PATHS} \
 --kv_scale ${KV_SCALE} \
---datasets ${DATASETS} "
+--datasets ${DATASETS} \
+--seqlen ${SEQLEN} \
+--min_seqlen ${MIN_SEQLEN} \
+--data_batch_size ${DATA_BATCH_SIZE} \
+"
+# --last_tokens ${LAST_TOKENS}
+
+# --stride ${STRIDE} \
+
 
 # --random_sample ${RANDOM_SAMPLE} \
 

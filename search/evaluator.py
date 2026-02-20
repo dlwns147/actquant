@@ -274,7 +274,7 @@ class LlamaEvaluator:
     #         _, linear = linear.split('.')
     #         assert all([b in [0, self.small_model_bits, self.large_model_bits] for b in linear_bits]), f'{linear}: {linear_bits} are not compatible with the evaluator.'
 
-    def eval(self, accelerator, arch, metric, model=None, loss_func='cross_entropy'):
+    def eval(self, accelerator, arch, metric, model=None, loss_func='cross_entropy', stride=None, last_tokens=None):
         if metric == 'ppl':
             loaders = self.test_loaders
         elif metric == 'loss':
@@ -293,6 +293,8 @@ class LlamaEvaluator:
                 loader=loader, 
                 seqlen=self.seqlen, 
                 loss_func=loss_func, 
+                stride=stride,
+                last_tokens=last_tokens,
                 dense_logits_list=self.dense_logits[dataset] if (self.loss_func in ['jsd', 'kld', 'topk']) else None, 
                 key_token_list=self.key_token_list[dataset] if self.use_key_token else None, 
                 tokenizer=self.tokenizer,
