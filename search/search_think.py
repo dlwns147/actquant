@@ -3,7 +3,7 @@ import json
 import torch
 import argparse
 import numpy as np
-from evaluator_think import LlamaEvaluatorThink
+from evaluator import LlamaEvaluator
 from tqdm import tqdm
 from time import time
 from copy import deepcopy
@@ -44,7 +44,7 @@ class SearchThink:
         self.dataset = kwargs.pop('dataset', 'wikitext2')  # which dataset to run search on
         self.loss_func = kwargs.pop('loss_func', 'jsd')
 
-        self.method = {'w': kwargs.pop('w_method', ['fp16']), 'kv': kwargs.pop('kv_method', 'kivi')}
+        self.method = {'w': kwargs.pop('w_method', ['fp16']), 'kv': kwargs.pop('kv_method', 'think')}
         self.quant_model_paths = kwargs.pop('quant_model_paths', [])
 
         model_path = kwargs.pop('model_path', 'meta-llama')
@@ -135,7 +135,7 @@ class SearchThink:
         self.args['pass_module'] = pass_module
         print(f'pass_module: {pass_module}')
 
-        self.evaluator = LlamaEvaluatorThink(
+        self.evaluator = LlamaEvaluator(
             self.config,
             accelerator=accelerator,
             model_id=model_id,

@@ -8,6 +8,37 @@ import torch
 import torch.nn as nn
 from .data import *
 from .loss import JSD, TopK
+from .func import clean_up
+
+
+def get_loss_mask(seq_shift_labels, key_tokens=None, last_tokens=None, ignore_index=-100, device=None):
+    """
+    Create a boolean mask for loss/logits based on labels, key_token, and last_tokens.
+    Used in eval_loss and get_logits to keep only positions that participate in loss.
+
+    Parameters:
+        seq_shift_labels: [seq_len-1] tensor of labels (shifted, i.e. labels[:, 1:])
+        key_tokens: Optional list of token indices to keep. If None, all valid positions are kept.
+        last_tokens: Optional int. If set, keep only the last N positions.
+        ignore_index: Label value to ignore (excluded from mask).
+        device: Device for new tensors; defaults to seq_shift_labels.device.
+
+    Returns:
+        mask: [seq_len-1] bool tensor, True where loss is computed.
+    """
+    if device is None:
+        device = seq_shift_labels.device
+    mask = (seq_shift_labels != ignore_index)
+    if key_tokens is not None:
+        key_mask = torch.zeros_like(mask, dtype=torch.bool)
+        key_mask[key_tokens] = True
+        mask = mask & key_mask
+    if last_tokens is not None:
+        seq_len = seq_shift_labels.size(0)
+        start_idx = max(0, seq_len - last_tokens)
+        last_tokens_mask = torch.arange(seq_len, device=device) >= start_idx
+        mask = mask & last_tokens_mask
+    return mask
 
 
 # Function to evaluate perplexity (ppl) on a specified model and tokenizer
@@ -109,20 +140,44 @@ def eval_ppl(model, accelerator, loader, seqlen=2048):
     return ppl.item()
 
 @torch.no_grad()
-def get_logits(model, loader):    
-    # List to store negative log likelihoods
+def get_logits(model, loader, key_token_list=None, last_tokens=None, ignore_index=-100):
+    """
+    Get model logits for each batch, storing only positions that participate in loss
+    (masked by get_loss_mask) to reduce memory.
+
+    Parameters:
+        model: The model to run.
+        loader: DataLoader yielding (inputs, attention_mask, labels).
+        key_token_list: Optional list of key token indices per batch/seq (same format as in eval_loss).
+        last_tokens: Optional int; only last N positions per sequence are kept.
+        ignore_index: Label value to ignore.
+
+    Returns:
+        dense_logits_list: List of batches. Each batch is a list of tensors of shape
+            [num_masked, vocab_size] per sequence (masked positions only).
+    """
+    if key_token_list is not None:
+        assert len(loader) == len(key_token_list)
     dense_logits_list = []
-    # for inputs in loader:
-    for inputs, attention_mask, labels in loader:
-
+    for batch_idx, (inputs, attention_mask, labels) in enumerate(loader):
         outputs = model(inputs)
-        # outputs = model(inputs, attention_mask=attention_mask)
-        # lm_logits = outputs.logits
         lm_logits = outputs.logits[:, :-1, :].contiguous().detach()
-        dense_logits_list.append(lm_logits)
-        
-    # dense_logits_list = torch.cat(dense_logits_list, dim=0).detach()
+        shift_labels = labels[:, 1:].contiguous()
+        batch_size = lm_logits.shape[0]
+        batch_masked = []
+        for seq_idx in range(batch_size):
+            seq_shift_labels = shift_labels[seq_idx]
+            key_tokens = key_token_list[batch_idx][seq_idx] if key_token_list is not None else None
+            if key_tokens is None and key_token_list is not None:
+                batch_masked.append(torch.empty(0, lm_logits.size(-1), device=lm_logits.device, dtype=lm_logits.dtype))
+                continue
+            mask = get_loss_mask(seq_shift_labels, key_tokens=key_tokens, last_tokens=last_tokens, ignore_index=ignore_index, device=lm_logits.device)
+            logits_s = lm_logits[seq_idx][mask]
+            batch_masked.append(logits_s)
+        del lm_logits
+        clean_up()
 
+        dense_logits_list.append(batch_masked)
     return dense_logits_list
 
 
@@ -176,26 +231,12 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
             # Get sequence-specific logits and labels
             seq_shift_logits = shift_logits[seq_idx]  # [seq_len-1, vocab_size]
             seq_shift_labels = shift_labels[seq_idx]  # [seq_len-1]
-            
-            # Create mask for valid tokens (excluding ignore_index)
-            mask = torch.where(seq_shift_labels == ignore_index, False, True)
-            
-            # Apply key_token filtering if provided
-            if key_token_list is not None:
-                key_tokens = key_token_list[batch_idx][seq_idx]
-                if key_tokens is None:
-                    continue
-                key_mask = torch.zeros_like(mask, dtype=torch.bool)
-                key_mask[key_tokens] = True
-                mask = mask & key_mask
-            
-            # Restrict to latter tokens only if last_n_tokens is set
-            if last_tokens is not None:
-                seq_shift_len = seq_shift_logits.size(0)
-                start_idx = max(0, seq_shift_len - last_tokens)
-                last_tokens_mask = torch.arange(seq_shift_len, device=mask.device) >= start_idx
-                mask = mask & last_tokens_mask
-            
+
+            key_tokens = key_token_list[batch_idx][seq_idx] if key_token_list is not None else None
+            if key_tokens is None and key_token_list is not None:
+                continue
+            mask = get_loss_mask(seq_shift_labels, key_tokens=key_tokens, last_tokens=last_tokens, ignore_index=ignore_index, device=seq_shift_labels.device)
+
             cur_seqlen = mask.sum().item()
             if cur_seqlen == 0:
                 continue
@@ -210,15 +251,11 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
                 loss = loss_fct(seq_shift_logits[mask], seq_shift_labels[mask])
             
             elif loss_func == 'jsd':
-                # Get dense logits for this batch
-                dense_logits = dense_logits_list[batch_idx]
-                
-                dense_logits_seq = dense_logits[seq_idx].contiguous()
-                dense_logits_seq = dense_logits_seq.reshape(-1, dense_logits_seq.size(-1))
-                               
+                # Dense logits for this sequence are already masked (same mask as seq_shift_logits)
+                dense_logits_seq = dense_logits_list[batch_idx][seq_idx].contiguous()
                 # Compute JSD on selected tokens
                 loss_fct = JSD()
-                loss = loss_fct(seq_shift_logits[mask], dense_logits_seq[mask])
+                loss = loss_fct(seq_shift_logits[mask], dense_logits_seq)
             
             else:
                 raise NotImplementedError(f'{loss_func} is not implemented')

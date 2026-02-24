@@ -110,6 +110,7 @@ def main(args):
         data_batch_size=args.data_batch_size,
         device_map=device_map,
         bits=bits,
+        pruning_ratio=args.pruning_ratio,
         dtype=dtype,
         group_size=group_size,
         residual_length=args.residual_length,
@@ -121,7 +122,8 @@ def main(args):
         sliding_window=args.sliding_window,
         alpha=args.alpha,
         beta=args.beta,
-        key_token_path=args.key_token_path
+        key_token_path=args.key_token_path,
+        last_tokens=args.last_tokens
     )
 
     arch = dict()
@@ -131,22 +133,37 @@ def main(args):
         arch['k'] = [[args.k_bits, args.k_group_size]] * config['n_block']
     if args.v_bits is not None:
         arch['v'] = [[args.v_bits, args.v_group_size]] * config['n_block']
+    if args.pruning_ratio is not None:
+        arch['k_prune'] = [args.pruning_ratio] * config['n_block']
+        arch['v_prune'] = [args.pruning_ratio] * config['n_block']
     accelerator.print(arch)
     
     model = evaluator.sample(arch)
 
     if args.datasets:
-        if args.kv_method == 'kivi':
-            model.config.kivi_config.residual_length = 0
-        elif args.kv_method == 'hqq':
-            model.generation_config.cache_config = 0
-        model.config.quant_kv_output = True if args.stride is None else False
-        model.config.use_cache = True if args.stride is not None else False
+        if args.stride is not None:
+            if args.kv_method == 'kivi':
+                model.config.kivi_config.residual_length = args.residual_length
+            elif args.kv_method == 'hqq':
+                model.generation_config.cache_config = args.residual_length
+            model.config.quant_kv_output = False
+            model.config.use_cache = True
+            
+        else:
+            if args.kv_method == 'kivi':
+                model.config.kivi_config.residual_length = 0
+            elif args.kv_method == 'hqq':
+                model.generation_config.cache_config = 0
+            model.config.quant_kv_output = True
+            model.config.use_cache = False
 
-        metric, complexity = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, stride=args.stride, last_tokens=args.last_tokens)
+        metric_start = time()
+        metric, complexity = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride)
+        metric_time = time() - metric_start
         print(f'[0] {args.metric}: {[p for p in metric.values()]}, metric: {list(metric.values())}, prev_metric: [0]')
         print(f'complexity: {list(complexity.keys())}')
         print(f'complexity: {list(complexity.values())}')
+        print(f'Metric Time: {metric_time:.2f}s')
         # accelerator.print(arch)
         # print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}')
 
@@ -334,7 +351,7 @@ if __name__ == '__main__':
     
     parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
                         help='')
-    parser.add_argument('--kv_method', type=str, default='kivi', choices=['fp16', 'hqq', 'kivi'],
+    parser.add_argument('--kv_method', type=str, nargs='+', default=['kivi'], choices=['fp16', 'hqq', 'kivi', 'think'],
                         help='')
     
     parser.add_argument('--w_bits', type=int, default=4, 
@@ -360,6 +377,8 @@ if __name__ == '__main__':
                         help='')
     # parser.add_argument('--use_flash', action='store_true', help='')
 
+    parser.add_argument('--pruning_ratio', type=float, default=0.0, 
+                        help='pruning ratio for ThinK')
 
     parser.add_argument('--clip_asym', action='store_true', help='')
     parser.add_argument('--comp_obj', type=str, nargs='+', default=['bits'], 

@@ -15,8 +15,8 @@ def replace_kv_cache(model,
                     residual_length=128,
                     packing=False,
                     quant_kv_output=False):
-    
-    if method == 'hqq':
+                    
+    if 'hqq' in method:
         model.config.cache_implementation = 'HQQ'
         model.generation_config.cache_implementation = "quantized"
         model.generation_config.cache_config = {
@@ -30,7 +30,7 @@ def replace_kv_cache(model,
             'v_quant_scheme': v_quant_scheme,
             'residual_length': residual_length,
         }
-    else:
+    elif 'kivi' in method:
         model.config.kivi_config = KIVICacheConfig(
             k_bits=[16] * n_block,
             v_bits=[16] * n_block,
@@ -41,17 +41,24 @@ def replace_kv_cache(model,
             residual_length=residual_length,
             packing=packing,
         )
-        if isinstance(model, Qwen2ForCausalLM):
-            from .qwen2_kivi import convert_model_kivi
-            convert_model_kivi(model)
-        elif isinstance(model, LlamaForCausalLM):
-            from .llama_kivi import convert_model_kivi
-            convert_model_kivi(model)
-        elif isinstance(model, MistralForCausalLM):
-            from .mistral_kivi import convert_model_kivi
-            convert_model_kivi(model)
+        if "think" in method :
+            if isinstance(model, LlamaForCausalLM):
+                from .llama_kivi_think import convert_model_think_kivi
+                convert_model_think_kivi(model)
+            else:
+                raise NotImplementedError(f"Think_kivi not implemented for {model.__class__}")
         else:
-            raise NotImplementedError(f"Unsupported model: {model.__class__}")
+            if isinstance(model, Qwen2ForCausalLM):
+                from .qwen2_kivi import convert_model_kivi
+                convert_model_kivi(model)
+            elif isinstance(model, LlamaForCausalLM):
+                from .llama_kivi import convert_model_kivi
+                convert_model_kivi(model)
+            elif isinstance(model, MistralForCausalLM):
+                from .mistral_kivi import convert_model_kivi
+                convert_model_kivi(model)
+            else:
+                raise NotImplementedError(f"Unsupported model: {model.__class__}")
         # model.config.use_cache = use_cache
         model.config.quant_kv_output = quant_kv_output
         convert_generation(model.config)
@@ -71,7 +78,7 @@ def set_cache_config(model,
                     packing=False,
                     quant_kv_output=False):
     
-    if method == 'hqq':
+    if 'hqq' in method:
         model.config.cache_implementation = 'HQQ'
         model.generation_config.cache_implementation = "quantized"
         model.generation_config.cache_config = {
@@ -85,7 +92,7 @@ def set_cache_config(model,
             'v_quant_scheme': v_quant_scheme,
             'residual_length': residual_length,
         }
-    elif method == 'kivi':
+    elif 'kivi' in method:
         model.config.kivi_config = KIVICacheConfig(
             k_bits=[16] * n_block,
             v_bits=[16] * n_block,

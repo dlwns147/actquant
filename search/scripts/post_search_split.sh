@@ -176,14 +176,17 @@ MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 # DATASETS_TEXT="wikitext2"
 DATASETS="gov_report"
 DATASETS_TEXT="gov_report"
+# DATASETS="minilongbench"
+# DATASETS_TEXT="minilongbench"
 METRIC="loss"
 # LOSS_FUNC="jsd"
 LOSS_FUNC="cross_entropy"
 # STRIDE=128
-# STRIDE=256
-STRIDE=1024
+STRIDE=256
+# STRIDE=1024
 # LAST_TOKENS=1024
-LAST_TOKENS=512
+# LAST_TOKENS=512
+LAST_TOKENS=128
 
 
 # N_SAMPLE=4
@@ -297,10 +300,11 @@ ARGS="--gpu_id ${DEVICES} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
+--stride ${STRIDE} \
+--last_tokens ${LAST_TOKENS}
 "
-# --last_tokens ${LAST_TOKENS}
 
-# --stride ${STRIDE} \
+
 
 
 # --random_sample ${RANDOM_SAMPLE} \

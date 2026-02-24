@@ -1,8 +1,13 @@
 # Import necessary modules
+import json
 import torch
+import os
+import glob
 from datasets import load_dataset
 from transformers import AutoTokenizer, LlamaTokenizer
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
+from huggingface_hub import snapshot_download
+
 
 class TokenizerWrapper:
     def __init__(self, input_ids):
@@ -177,6 +182,74 @@ def get_gov_report(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, split='
     return DataLoader(TensorDataset(input_ids_dataset, attention_mask_dataset, labels_dataset), batch_size=batch_size)
 
 
+# MiniLongBench (LongBench format): each example has input, context, answers (list), length, dataset, language, all_classes, _id.
+# Prompt templates from LongBench (dataset2prompt.json). See: https://github.com/MilkThink-Lab/MiniLongBench
+
+
+def _load_minilongbench_prompt_templates():
+    path = os.path.join(os.path.dirname(__file__), "longbench_config", "dataset2prompt.json")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_minilongbench(tokenizer, cache_dir=None, require_answer=True, ignore_index=-100):
+    """
+    Load all MiniLongBench sub-datasets and build LLM-style examples.
+
+    Uses LongBench prompt templates from utils/longbench_config/dataset2prompt.json.
+    - require_answer=False: each example is prompt only (input_ids, attention_mask, labels=input_ids).
+    - require_answer=True: prompt + answer; labels use ignore_index on the prompt part so loss is only on answer tokens.
+    No shuffle, batch_size=1, no padding, no seqlen/min_seqlen.
+    """
+    root = snapshot_download(repo_id="linggm/MiniLongBench", repo_type="dataset", cache_dir=cache_dir)
+    data_dir = os.path.join(root, "data")
+    files = sorted(glob.glob(os.path.join(data_dir, "*.jsonl")))
+    if not files:
+        raise FileNotFoundError(f"No *.jsonl under {data_dir}")
+
+    dataset2prompt = _load_minilongbench_prompt_templates()
+    all_examples = []
+    for fp in files:
+        sub_name = os.path.splitext(os.path.basename(fp))[0]
+        if sub_name not in dataset2prompt:
+            continue
+        prompt_format = dataset2prompt[sub_name]
+        with open(fp, "r", encoding="utf-8") as f:
+            for line in f:
+                item = json.loads(line)
+                context = item["context"]
+                input_str = item.get("input", "")
+                prompt = prompt_format.format(context=context, input=input_str)
+                if require_answer:
+                    answers = item.get("answers") or []
+                    target = answers[0] if answers else ""
+                    text = prompt + target
+                else:
+                    text = prompt
+                tokenized = tokenizer(text, return_tensors="pt", truncation=False, add_special_tokens=True)
+                input_ids = tokenized["input_ids"][0]
+                attention_mask = tokenized["attention_mask"][0]
+                labels = input_ids.clone()
+                if require_answer and target:
+                    len_prompt = len(tokenizer(prompt, return_tensors="pt", add_special_tokens=True)["input_ids"][0])
+                    labels[:len_prompt] = ignore_index
+                all_examples.append((input_ids, attention_mask, labels))
+
+    # dataset = Dataset(all_examples)
+    return DataLoader(all_examples, batch_size=1)
+    # class _MiniLongBenchDataset(Dataset):
+    #     def __init__(self, examples):
+    #         self.examples = examples
+
+    #     def __len__(self):
+    #         return len(self.examples)
+
+    #     def __getitem__(self, i):
+    #         return self.examples[i]
+
+    # dataset = _MiniLongBenchDataset(all_examples)
+    # return DataLoader(dataset, batch_size=1, drop_last=False, shuffle=False)
+
 def get_trainloaders(name, n_sample=128, seed=0, seqlen=2048, model='', batch_size=1, cache_dir=None):
     tokenizer = get_tokenizer(model)
     if 'wikitext2' in name:
@@ -186,9 +259,11 @@ def get_trainloaders(name, n_sample=128, seed=0, seqlen=2048, model='', batch_si
     if 'gsm8k' in name:
         return get_gsm8k_trainenc(seed, n_sample, seqlen, model, tokenizer, batch_size, cache_dir=cache_dir)
 
-def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0, batch_size=1, tokenizer=None, model='', cache_dir=None):
+def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0, batch_size=1, tokenizer=None, model='', cache_dir=None, sub_dataset=None, require_answer=False):
     if tokenizer is None:
         tokenizer = get_tokenizer(model, cache_dir=cache_dir)
+    if "minilongbench" in name:
+        return get_minilongbench(tokenizer=tokenizer, cache_dir=cache_dir, require_answer=require_answer)
     if train:
         if 'wikitext2' in name:
             return get_wikitext2_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)

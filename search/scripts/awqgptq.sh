@@ -40,17 +40,24 @@ W_BITS=16
 W_GROUP_SIZE=128
 
 # KV_METHOD="hqq"
-# KV_METHOD="kivi"
-KV_METHOD="fp16"
+# KV_METHOD_TEXT="hqq"
+KV_METHOD="kivi"
+KV_METHOD_TEXT="kivi"
+# KV_METHOD="kivi think"
+# KV_METHOD_TEXT="kivi_think"
+# KV_METHOD="fp16"
+# KV_METHOD_TEXT="fp16"
 
-# K_BITS=2
-# V_BITS=2
+K_BITS=2
+V_BITS=2
+# K_BITS=3
+# V_BITS=3
 # K_BITS=4
 # V_BITS=4
 # K_BITS=8
 # V_BITS=8
-K_BITS=16
-V_BITS=16
+# K_BITS=16
+# V_BITS=16
 
 # KV_GROUP_SIZE=0
 # KV_GROUP_SIZE=32
@@ -62,49 +69,62 @@ RESIDUAL_LENGTH=128
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
+PRUNING_RATIO=0.76
+# PRUNING_RATIO=0.7
+# PRUNING_RATIO=0.69
+# PRUNING_RATIO=0.66
+# PRUNING_RATIO=0.3
+# PRUNING_RATIO=0.4
+# PRUNING_RATIO=0.5
+
 COMP_OBJ="bits"
 COMP_OBJ_TEXT=bits
 
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
-TASKS="coqa gsm8k truthfulqa"
-# TASKS="coqa truthfulqa"
+# TASKS="coqa gsm8k truthfulqa"
+TASKS="coqa truthfulqa"
 # TASKS="truthfulqa"
 # TASKS="coqa"
 # TASKS="gsm8k"
 # TASKS="gsm8k_cot"
 
 N=1
-# DATASETS="wikitext2 c4"
-# # DATASETS="gov_report"
-# METRIC="ppl"
-# LOSS_FUNC="cross_entropy"
-
-
-DATASETS="gov_report"
-METRIC="loss"
+DATASETS="wikitext2 c4"
+# DATASETS="gov_report"
+METRIC="ppl"
 LOSS_FUNC="cross_entropy"
+
+
+# DATASETS="gov_report"
+# DATASETS="minilongbench"
+# METRIC="loss"
+# LOSS_FUNC="cross_entropy"
 # LOSS_FUNC="jsd"
 STRIDE=256
 LAST_TOKENS=1024
+# LAST_TOKENS=512
+# LAST_TOKENS=256
+# LAST_TOKENS=128
+
 
 # N_SAMPLE=4
 N_SAMPLE=8
 # N_SAMPLE=16
 # N_SAMPLE=32
 # N_SAMPLE=64
-# SEQLEN=2048
-# MIN_SEQLEN=2048
-SEQLEN=8192
-MIN_SEQLEN=8192
+SEQLEN=2048
+MIN_SEQLEN=2048
+# SEQLEN=8192
+# MIN_SEQLEN=8192
 # SEQLEN=16384
 # MIN_SEQLEN=16384
 DATA_BATCH_SIZE=1
 # MIN_SEQLEN=0
 
-# LM_EVAL_BATCH_SIZE=1
+LM_EVAL_BATCH_SIZE=1
 # LM_EVAL_BATCH_SIZE=4
 # LM_EVAL_BATCH_SIZE=16
-LM_EVAL_BATCH_SIZE=32
+# LM_EVAL_BATCH_SIZE=32
 
 # NUM_FEWSHOT=0
 # NUM_FEWSHOT=5
@@ -113,7 +133,7 @@ LM_EVAL_BATCH_SIZE=32
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${METHOD}_${BITS}
 SAVE=save/result/${TODAY}_test
 
-LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
+LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONGBENCH_CONFIG=utils/longbench_config
 
 # RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
@@ -128,7 +148,7 @@ RULER_LENGTH=65536
 RULER_SAMPLE=1
 # RULER_SAMPLE=50
 RULER_BATCH_SIZE=1
-RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs
+RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs
 
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
@@ -175,16 +195,19 @@ ARGS="
 -n ${N} \
 --save ${SAVE} \
 --clip_asym \
---datasets ${DATASETS} \
 --metric ${METRIC} \
 --loss_func ${LOSS_FUNC} \
 --n_sample ${N_SAMPLE} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
---last_tokens ${LAST_TOKENS}
+--zeroshot \
+--tasks ${TASKS}
 "
-# --stride ${STRIDE} \
+# --pruning_ratio ${PRUNING_RATIO} \
+# --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
+# --longbench \
+# --longbench_result_path ${LONGBENCH_RESULT_PATH} \
 # --ruler \
 # --ruler_task ${RULER_TASK} \
 # --ruler_yaml_path ${RULER_YAML_PATH} \
@@ -192,6 +215,11 @@ ARGS="
 # --ruler_batch_size ${RULER_BATCH_SIZE} \
 # --ruler_sample ${RULER_SAMPLE} \
 # --ruler_length ${RULER_LENGTH} \
+# --datasets ${DATASETS} \
+
+# --last_tokens ${LAST_TOKENS}
+# --stride ${STRIDE} \
+#
 # --long_eval \
 
 if [ ${USE_KEY_TOKEN} == 'True' ]; then
@@ -216,7 +244,6 @@ CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --nu
 # --longbench_result_path ${LONGBENCH_RESULT_PATH} \
 # --longbench_config ${LONGBENCH_CONFIG} \
 # --pass_key_file ${PASS_KEY_FILE} \
-# --num_fewshot ${NUM_FEWSHOT}
 # --use_flash \
 # --quant_kv_output \
 

@@ -54,6 +54,8 @@ class LlamaEvaluator:
                  sliding_window=128,
                  alpha=2,
                  beta=-2,
+                 pruning_ratio_options=None,
+                 last_tokens=None,
                  **kwargs):
         
         # model_id = os.path.join(model_path, model_name)
@@ -75,13 +77,11 @@ class LlamaEvaluator:
         self.dense_logits = {dataset: None for dataset in self.train_loaders.keys()}
         self.key_token_list = {dataset: None for dataset in self.train_loaders.keys()}
         self.outlier = dict()
+        self.last_tokens = last_tokens
         
         if loss_func in ['jsd', 'kld', 'topk'] or outlier is not None or use_key_token:
             # model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', device_map=device_map, low_cpu_mem_usage=True)
             model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
-
-            if loss_func in ['jsd', 'kld', 'topk']:
-                self.dense_logits = {dataset: get_logits(model, loader) for dataset, loader in self.train_loaders.items()}
 
             if outlier is not None:
                 for blk_idx in range(n_block):
@@ -98,10 +98,10 @@ class LlamaEvaluator:
                         evaluator_model=model,
                         evaluator_tokenizer=get_tokenizer(model_id, use_fast=True),
                         loader=loader,
-                        trunc_len=trunc_len, 
-                        sliding_window=sliding_window, 
-                        alpha=alpha, 
-                        beta=beta, 
+                        trunc_len=trunc_len,
+                        sliding_window=sliding_window,
+                        alpha=alpha,
+                        beta=beta,
                         load_path=key_token_path_list[dataset],
                         mode='offline'
                     ) for dataset, loader in self.train_loaders.items()
@@ -111,6 +111,15 @@ class LlamaEvaluator:
                     n_key_token = sum(accelerator.gather_for_metrics([n_key_token], use_gather_object=True))
                     accelerator.print(f'dataset: {dataset}, n_key_token: {n_key_token}')
                     accelerator.wait_for_everyone()
+
+            if loss_func in ['jsd', 'kld', 'topk']:
+                self.dense_logits = {
+                    dataset: get_logits(
+                        model, loader,
+                        key_token_list=self.key_token_list[dataset] if use_key_token else None,
+                        last_tokens=self.last_tokens
+                    ) for dataset, loader in self.train_loaders.items()
+                }
 
             del model
             clean_up()
@@ -122,7 +131,8 @@ class LlamaEvaluator:
                 # with accelerator.main_process_first():
                 self.model = load_hqq_model(quant_model_paths[np.argmax(bits['w'])], device_map, inference)
 
-                if self.method['kv'] in ['hqq', 'kivi'] and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
+                if ('hqq' in self.method['kv'] or 'kivi' in self.method['kv'] or 'think' in self.method['kv']) \
+                    and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
                     self.model = replace_kv_cache(model=self.model,
                                                 tokenizer=self.tokenizer,
                                                 method=method['kv'],
@@ -140,7 +150,8 @@ class LlamaEvaluator:
             # self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
             self.model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
             
-            if self.method['kv'] in ['hqq', 'kivi'] and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
+            if ('hqq' in self.method['kv'] or 'kivi' in self.method['kv'] or 'think' in self.method['kv']) \
+                and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
                 self.model = replace_kv_cache(model=self.model,
                                             tokenizer=self.tokenizer,
                                             method=method['kv'],
@@ -192,6 +203,8 @@ class LlamaEvaluator:
         self.alpha = alpha
         self.beta = beta
 
+        self.pruning_ratio_options = pruning_ratio_options if pruning_ratio_options is not None else [0.25, 0.5, 0.75, 1.0]
+
         accelerator.wait_for_everyone()
 
     def sample(self, arch):
@@ -234,7 +247,8 @@ class LlamaEvaluator:
             # self.model = get_hfmodel(self.model_id, self.device_map, self.dtype, use_cache=False)
             self.model.eval()
             # if (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
-            if self.method['kv'] in ['hqq', 'kivi']:
+            # if self.method['kv'] in ['hqq', 'kivi', 'think']:
+            if 'hqq' in self.method['kv'] or 'kivi' in self.method['kv'] or 'think' in self.method['kv']:
                 self.model = replace_kv_cache(model=self.model,
                                             tokenizer=self.tokenizer,
                                             method=self.method['kv'],
@@ -245,14 +259,14 @@ class LlamaEvaluator:
                                             packing=self.packing,
                                             quant_kv_output=self.quant_kv_output)
         
-        if self.method['kv'] == 'hqq':
+        if 'hqq' in self.method['kv']:
             if 'k' in arch:
                 self.model.generation_config.cache_config['k_bits'] = [x[0] for x in arch['k']]
                 self.model.generation_config.cache_config['k_group_size'] = [x[1] for x in arch['k']]
             if 'v' in arch:
                 self.model.generation_config.cache_config['v_bits'] = [x[0] for x in arch['v']]
                 self.model.generation_config.cache_config['v_group_size'] = [x[1] for x in arch['v']]
-        elif self.method['kv'] == 'kivi':
+        elif 'kivi' in self.method['kv']:
             if 'k' in arch:
                 self.model.config.kivi_config.k_bits = [x[0] for x in arch['k']]
                 self.model.config.kivi_config.k_group_size = [x[1] for x in arch['k']]
@@ -260,7 +274,22 @@ class LlamaEvaluator:
             if 'v' in arch:
                 self.model.config.kivi_config.v_bits = [x[0] for x in arch['v']]
                 self.model.config.kivi_config.v_group_size = [x[1] for x in arch['v']]
-        elif self.method['kv'] == 'fp16':
+
+            if 'think' in self.method['kv']:
+                self.model.config.kivi_config.k_prune = arch['k_prune']
+                self.model.config.kivi_config.v_prune = arch['v_prune']
+                # n_block = int(self.config['n_block'])
+                # if hasattr(self.model.config, 'kivi_config'):
+                #     self.model.config.kivi_config.k_prune = k_prune
+                #     self.model.config.kivi_config.v_prune = v_prune
+                # for layer_idx in range(n_block):
+                #     layer = getblock(self.model, self.config)[layer_idx]
+                #     if hasattr(layer, 'self_attn'):
+                #         if k_prune is not None and layer_idx < len(k_prune):
+                #             setattr(layer.self_attn, 'k_prune', k_prune[layer_idx])
+                #         if v_prune is not None and layer_idx < len(v_prune):
+                #             setattr(layer.self_attn, 'v_prune', v_prune[layer_idx])
+        elif 'fp16' in self.method['kv']:
             pass
         else:
             raise NotImplementedError(self.method['kv'])
@@ -274,7 +303,7 @@ class LlamaEvaluator:
     #         _, linear = linear.split('.')
     #         assert all([b in [0, self.small_model_bits, self.large_model_bits] for b in linear_bits]), f'{linear}: {linear_bits} are not compatible with the evaluator.'
 
-    def eval(self, accelerator, arch, metric, model=None, loss_func='cross_entropy', stride=None, last_tokens=None):
+    def eval(self, accelerator, arch, metric, model=None, loss_func='cross_entropy', stride=None):
         if metric == 'ppl':
             loaders = self.test_loaders
         elif metric == 'loss':
@@ -294,7 +323,7 @@ class LlamaEvaluator:
                 seqlen=self.seqlen, 
                 loss_func=loss_func, 
                 stride=stride,
-                last_tokens=last_tokens,
+                last_tokens=self.last_tokens,
                 dense_logits_list=self.dense_logits[dataset] if (self.loss_func in ['jsd', 'kld', 'topk']) else None, 
                 key_token_list=self.key_token_list[dataset] if self.use_key_token else None, 
                 tokenizer=self.tokenizer,

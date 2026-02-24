@@ -278,6 +278,7 @@ def main(args):
         k_quant_scheme=args.k_quant_scheme,
         v_quant_scheme=args.v_quant_scheme,
         loss_func=args.loss_func,
+        last_tokens=args.last_tokens,
         use_key_token=args.use_key_token,
         trunc_len=args.trunc_len,
         sliding_window=args.sliding_window,
@@ -323,7 +324,7 @@ def main(args):
             # model.config.quant_kv_output = True if args.stride is None else False
             # model.config.use_cache = True if args.stride is not None else False
 
-            metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride, last_tokens=args.last_tokens)[0] if args.datasets else 0
+            metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride)[0] if args.datasets else 0
             complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
             # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
             # print(f'[{idx}] complexity: {complexity}, {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
