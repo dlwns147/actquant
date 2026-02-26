@@ -14,7 +14,7 @@ from evaluator import LlamaEvaluator
 from tqdm import tqdm
 import csv
 from matplotlib import pyplot as plt
-from utils.func import init_accelerator, clean_up, process_dtype, get_net_info
+from utils.func import init_accelerator, clean_up, process_dtype, get_net_info, set_seed
 from utils.eval import measure_latency, eval_zeroshot
 from utils.longbench import pred_longbench, eval_longbench
 from utils.data import get_tokenizer
@@ -142,17 +142,17 @@ def main(args):
 
     if args.datasets:
         if args.stride is not None:
-            if args.kv_method == 'kivi':
+            if 'kivi' in args.kv_method:
                 model.config.kivi_config.residual_length = args.residual_length
-            elif args.kv_method == 'hqq':
+            elif 'hqq' in args.kv_method:
                 model.generation_config.cache_config = args.residual_length
             model.config.quant_kv_output = False
             model.config.use_cache = True
             
         else:
-            if args.kv_method == 'kivi':
+            if 'kivi' in args.kv_method:
                 model.config.kivi_config.residual_length = 0
-            elif args.kv_method == 'hqq':
+            elif 'hqq' in args.kv_method:
                 model.generation_config.cache_config = 0
             model.config.quant_kv_output = True
             model.config.use_cache = False
@@ -170,9 +170,9 @@ def main(args):
     if args.pass_key_file:
         clean_up()
         # model.config.residual_length = args.residual_length
-        if args.kv_method == 'kivi':
+        if 'kivi' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
-        elif args.kv_method == 'hqq':
+        elif 'hqq' in args.kv_method:
             model.generation_config.cache_config = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
@@ -207,9 +207,9 @@ def main(args):
     if args.zeroshot:
         clean_up()
         # model.config.residual_length = args.residual_length
-        if args.kv_method == 'kivi':
+        if 'kivi' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
-        elif args.kv_method == 'hqq':
+        elif 'hqq' in args.kv_method:
             model.generation_config.cache_config = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
@@ -243,9 +243,9 @@ def main(args):
     if args.longbench:
         clean_up()
         # model.config.residual_length = args.residual_length
-        if args.kv_method == 'kivi':
+        if 'kivi' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
-        elif args.kv_method == 'hqq':
+        elif 'hqq' in args.kv_method:
             model.generation_config.cache_config = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
@@ -267,9 +267,10 @@ def main(args):
         
     if args.ruler:
         clean_up()
-        if args.kv_method == 'kivi':
+        set_seed(args.seed, deterministic=True)
+        if 'kivi' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
-        elif args.kv_method == 'hqq':
+        elif 'hqq' in args.kv_method:
             model.generation_config.cache_config = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
@@ -277,16 +278,16 @@ def main(args):
         # tokenizer.pad_token = tokenizer.eos_token
         
         ruler_start = time()
-        eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path)
+        eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path, seed=args.seed)
         ruler_time = time() - ruler_start
         print(f'RULER Time: {ruler_time:.2f}s')
 
 
     if args.longeval:
         clean_up()
-        if args.kv_method == 'kivi':
+        if 'kivi' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
-        elif args.kv_method == 'hqq':
+        elif 'hqq' in args.kv_method:
             model.generation_config.cache_config = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
@@ -377,7 +378,7 @@ if __name__ == '__main__':
                         help='')
     # parser.add_argument('--use_flash', action='store_true', help='')
 
-    parser.add_argument('--pruning_ratio', type=float, default=0.0, 
+    parser.add_argument('--pruning_ratio', type=float, default=1.0, 
                         help='pruning ratio for ThinK')
 
     parser.add_argument('--clip_asym', action='store_true', help='')
@@ -424,6 +425,8 @@ if __name__ == '__main__':
     parser.add_argument('--last_tokens', type=int, default=None, 
                         help='')
                         
+    parser.add_argument('--seed', type=int, default=0,
+                        help='')
     # parser.add_argument('--debug', action='store_true', help='')
     # parser.add_argument('--sec_obj', type=str, default='bits',
     #                     help='second objective to optimize simultaneously')

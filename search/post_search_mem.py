@@ -17,7 +17,7 @@ import csv
 import math
 import scipy.stats as stats
 from matplotlib import pyplot as plt
-from utils.func import init_accelerator, get_net_info, clean_up, process_dtype
+from utils.func import init_accelerator, get_net_info, clean_up, process_dtype, set_seed
 from utils.eval import measure_latency, eval_zeroshot
 from utils.longbench import pred_longbench, eval_longbench
 from utils.data import get_tokenizer
@@ -198,9 +198,9 @@ def main(args):
         #     accelerator.print(f'Selected arch[{idx}] {comp_obj}: {pf_list[i][idx, 1:].tolist()}, metric: {pf_list[i][idx_list[i], 0].tolist()}')            
             
         if args.datasets:
-            if args.kv_method == 'kivi':
+            if 'kivi' in args.kv_method:
                 model.config.kivi_config.residual_length = 0
-            elif args.kv_method == 'hqq':
+            elif 'hqq' in args.kv_method:
                 model.generation_config.cache_config = 0
             model.config.quant_kv_output = True
             model.config.use_cache = False
@@ -232,9 +232,9 @@ def main(args):
         if args.pass_key_file:
             clean_up()
             # model.config.residual_length = args.residual_length
-            if args.kv_method == 'kivi':
+            if 'kivi' in args.kv_method:
                 model.config.kivi_config.residual_length = args.residual_length
-            elif args.kv_method == 'hqq':
+            elif 'hqq' in args.kv_method:
                 model.generation_config.cache_config = args.residual_length
             model.config.quant_kv_output = False
             model.config.use_cache = True
@@ -268,9 +268,9 @@ def main(args):
         if args.zeroshot:
             clean_up()
             # model.config.residual_length = args.residual_length
-            if args.kv_method == 'kivi':
+            if 'kivi' in args.kv_method:
                 model.config.kivi_config.residual_length = args.residual_length
-            elif args.kv_method == 'hqq':
+            elif 'hqq' in args.kv_method:
                 model.generation_config.cache_config = args.residual_length
             model.config.quant_kv_output = False
             model.config.use_cache = True
@@ -293,9 +293,9 @@ def main(args):
         if args.longbench:
             clean_up()
             # model.config.residual_length = args.residual_length
-            if args.kv_method == 'kivi':
+            if 'kivi' in args.kv_method:
                 model.config.kivi_config.residual_length = args.residual_length
-            elif args.kv_method == 'hqq':
+            elif 'hqq' in args.kv_method:
                 model.generation_config.cache_config = args.residual_length
             model.config.quant_kv_output = False
             model.config.use_cache = True
@@ -319,9 +319,10 @@ def main(args):
                     
         if args.ruler:
             clean_up()
-            if args.kv_method == 'kivi':
+            set_seed(args.seed, deterministic=True)
+            if 'kivi' in args.kv_method:
                 model.config.kivi_config.residual_length = args.residual_length
-            elif args.kv_method == 'hqq':
+            elif 'hqq' in args.kv_method:
                 model.generation_config.cache_config = args.residual_length
             model.config.quant_kv_output = False
             model.config.use_cache = True
@@ -329,7 +330,7 @@ def main(args):
             # tokenizer.pad_token = tokenizer.eos_token
             
             ruler_start = time()
-            eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path)
+            eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path, seed=args.seed)
             ruler_time = time() - ruler_start
             print(f'RULER Time: {ruler_time:.2f}s')
         
@@ -549,6 +550,8 @@ if __name__ == '__main__':
     parser.add_argument("--ruler_batch_size", type=int, default=1, help="Batch size")
     parser.add_argument('--ruler_result_path', type=str, default='',
                         help='')
+    parser.add_argument('--seed', type=int, default=0,
+                        help='Random seed for RULER and other evaluations (reproducibility)')
 
 
     cfgs = parser.parse_args()

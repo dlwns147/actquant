@@ -10,6 +10,8 @@ from lm_eval.tasks import utils
 from .ruler_utils import niah_utils, vt_utils, cwe_utils, fwe_utils, qa_utils, common_utils
 from torch.utils.data import DataLoader
 
+from .func import set_seed
+
 def prepare_generation_kwargs(task_config_map, task_name: str, yaml_path:str, gen_toks=None) -> tuple[dict, int]:
     """태스크별 generation_kwargs와 max_gen_toks를 준비"""
     config_path = task_config_map.get(task_name)
@@ -93,6 +95,9 @@ def eval_ruler(model,
     
     task_function = {task: task_function[task] for task in tasks}
 
+    # Reproducibility: set seed before dataset creation and generation
+    set_seed(seed)
+
     # 태스크별 generation 설정 저장
     task_generation_configs = {task: prepare_generation_kwargs(task_config_map, task, yaml_path, gen_toks) for task in task_function.keys()}
 
@@ -103,7 +108,8 @@ def eval_ruler(model,
         
         dataset.shuffle(seed)
         dataset = dataset.select(range(nsample))
-        dataset = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        # shuffle=False: dataset already shuffled with seed above; preserves reproducibility
+        dataset = DataLoader(dataset, batch_size=batch_size, shuffle=False)
         # dataset = dataset.batch(batch_size)
         
         datasets[task] = dataset

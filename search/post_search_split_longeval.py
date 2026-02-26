@@ -17,11 +17,11 @@ import csv
 import math
 import scipy.stats as stats
 from matplotlib import pyplot as plt
-from utils.func import init_accelerator, get_net_info, clean_up, process_dtype
+from utils.func import init_accelerator, get_net_info, clean_up, process_dtype, set_seed
 from utils.eval import measure_latency, eval_zeroshot
 from utils.eval_long_bench import pred_long_bench, eval_long_bench
 from utils.data import get_tokenizer
-from utils.eval_ruler import eval_ruler
+from utils.ruler import eval_ruler
 from utils.eval_longeval import eval_longeval_lines
 import warnings
 warnings.simplefilter("ignore")
@@ -405,6 +405,7 @@ def main(args):
 
         if args.ruler:
             clean_up()
+            set_seed(args.seed, deterministic=True)
             if args.kv_method == 'kivi':
                 model.config.kivi_config.residual_length = args.residual_length
             elif args.kv_method == 'hqq':
@@ -415,7 +416,7 @@ def main(args):
             # tokenizer.pad_token = tokenizer.eos_token
             
             ruler_start = time()
-            eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path)
+            eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path, seed=args.seed)
             ruler_time = time() - ruler_start
             print(f'RULER Time: {ruler_time:.2f}s')
         
@@ -682,6 +683,8 @@ if __name__ == '__main__':
     parser.add_argument("--ruler_batch_size", type=int, default=1, help="Batch size")
     parser.add_argument('--ruler_result_path', type=str, default='',
                         help='')
+    parser.add_argument('--seed', type=int, default=0,
+                        help='Random seed for RULER and other evaluations (reproducibility)')
     
     # LongEval arguments
     parser.add_argument('--longeval', action='store_true', help='Enable LongEval lines task evaluation')

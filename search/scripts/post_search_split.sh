@@ -95,6 +95,7 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 # N_TOKEN=1024
 
 COMP_OBJ=(memory)
+SEED=0
 
 # COMP_OBJ_VAL=(5862072320)
 # # COMP_OBJ_VAL=(5666250752)
@@ -292,6 +293,7 @@ ARGS="--gpu_id ${DEVICES} \
 --kv_expr ${KV_EXPR} \
 --metric ${METRIC} \
 --loss_func ${LOSS_FUNC} \
+--seed ${SEED} \
 -n ${N}
 --save ${SAVE} \
 --quant_model_paths ${QMODEL_PATHS} \

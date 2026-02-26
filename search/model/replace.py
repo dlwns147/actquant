@@ -42,12 +42,14 @@ def replace_kv_cache(model,
             packing=packing,
         )
         if "think" in method :
+            print(f'ThinK KiVi model')
             if isinstance(model, LlamaForCausalLM):
                 from .llama_kivi_think import convert_model_think_kivi
                 convert_model_think_kivi(model)
             else:
                 raise NotImplementedError(f"Think_kivi not implemented for {model.__class__}")
         else:
+            print(f'KiVi model')
             if isinstance(model, Qwen2ForCausalLM):
                 from .qwen2_kivi import convert_model_kivi
                 convert_model_kivi(model)

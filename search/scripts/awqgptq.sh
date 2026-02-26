@@ -69,7 +69,8 @@ RESIDUAL_LENGTH=128
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
-PRUNING_RATIO=0.76
+PRUNING_RATIO=1.0
+# PRUNING_RATIO=0.76
 # PRUNING_RATIO=0.7
 # PRUNING_RATIO=0.69
 # PRUNING_RATIO=0.66
@@ -79,6 +80,7 @@ PRUNING_RATIO=0.76
 
 COMP_OBJ="bits"
 COMP_OBJ_TEXT=bits
+SEED=0
 
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
 # TASKS="coqa gsm8k truthfulqa"
@@ -201,21 +203,23 @@ ARGS="
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
---zeroshot \
---tasks ${TASKS}
+--seed ${SEED} \
+--pruning_ratio ${PRUNING_RATIO} \
+--ruler \
+--ruler_task ${RULER_TASK} \
+--ruler_yaml_path ${RULER_YAML_PATH} \
+--ruler_result_path ${RULER_RESULT_PATH} \
+--ruler_batch_size ${RULER_BATCH_SIZE} \
+--ruler_sample ${RULER_SAMPLE} \
+--ruler_length ${RULER_LENGTH}
 "
-# --pruning_ratio ${PRUNING_RATIO} \
+# --datasets ${DATASETS} \
+# --zeroshot \
+# --tasks ${TASKS} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
 # --longbench \
 # --longbench_result_path ${LONGBENCH_RESULT_PATH} \
-# --ruler \
-# --ruler_task ${RULER_TASK} \
-# --ruler_yaml_path ${RULER_YAML_PATH} \
-# --ruler_result_path ${RULER_RESULT_PATH} \
-# --ruler_batch_size ${RULER_BATCH_SIZE} \
-# --ruler_sample ${RULER_SAMPLE} \
-# --ruler_length ${RULER_LENGTH} \
-# --datasets ${DATASETS} \
+
 
 # --last_tokens ${LAST_TOKENS}
 # --stride ${STRIDE} \
