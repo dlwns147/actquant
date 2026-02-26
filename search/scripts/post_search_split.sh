@@ -183,8 +183,8 @@ METRIC="loss"
 # LOSS_FUNC="jsd"
 LOSS_FUNC="cross_entropy"
 # STRIDE=128
-STRIDE=256
-# STRIDE=1024
+# STRIDE=256
+STRIDE=1024
 # LAST_TOKENS=1024
 # LAST_TOKENS=512
 LAST_TOKENS=128
@@ -302,10 +302,9 @@ ARGS="--gpu_id ${DEVICES} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
---stride ${STRIDE} \
---last_tokens ${LAST_TOKENS}
+--stride ${STRIDE}
 "
-
+# --last_tokens ${LAST_TOKENS}
 
 
 

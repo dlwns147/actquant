@@ -17,7 +17,7 @@ from transformers.utils import logging, is_hqq_available, is_optimum_quanto_avai
 from transformers.generation.utils import GenerationMixin
 from transformers.generation.configuration_utils import CACHE_CONFIG_MAPPING, QUANT_BACKEND_CLASSES_MAPPING
 
-from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache
+from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache, ThinkKIVIDynamicCache, ThinkKIVIFakeCache
 from model.HQQCache import QuantizedCacheConfig, HQQQuantizedCache
 
 logger = logging.get_logger(__name__)
@@ -135,17 +135,29 @@ def convert_generation(model_config):
                 model_kwargs[cache_name] = OffloadedCache()
             elif generation_config.cache_implementation == "dynamic" \
                 or generation_config.cache_implementation == "kivi":
-                model_kwargs[cache_name] = KIVIDynamicCache(model_config.kivi_config) if model_config.kivi_config.packing else KIVIFakeCache(model_config.kivi_config)
+                print(f'getattr(self.config, "kv_method", []): {getattr(self.config, "kv_method", [])}')
+                use_think = "think" in getattr(self.config, "kv_method", [])
+                if model_config.kivi_config.packing:
+                    cache_cls = ThinkKIVIDynamicCache if use_think else KIVIDynamicCache
+                else:
+                    cache_cls = ThinkKIVIFakeCache if use_think else KIVIFakeCache
+                model_kwargs[cache_name] = cache_cls(model_config.kivi_config)
 
         # Use DynamicCache() instance by default. This will avoid back and forth from legacy format that
         # keeps copying the cache thus using much more memory
         else:
+            use_think = "think" in getattr(self.config, "kv_method", [])
+            if model_config.kivi_config.packing:
+                cache_cls = ThinkKIVIDynamicCache if use_think else KIVIDynamicCache
+            else:
+                cache_cls = ThinkKIVIFakeCache if use_think else KIVIFakeCache
             model_kwargs[cache_name] = (
-                KIVIDynamicCache(model_config.kivi_config) if model_config.kivi_config.packing else KIVIFakeCache(model_config.kivi_config)
+                cache_cls(model_config.kivi_config)
                 if not requires_cross_attention_cache
-                else EncoderDecoderCache(KIVIDynamicCache(model_config.kivi_config)
-                if model_config.kivi_config.packing else KIVIFakeCache(model_config.kivi_config),
-                KIVIDynamicCache(model_config.kivi_config) if model_config.kivi_config.packing else KIVIFakeCache(model_config.kivi_config))
+                else EncoderDecoderCache(
+                    cache_cls(model_config.kivi_config),
+                    cache_cls(model_config.kivi_config),
+                )
             )
 
     GenerationMixin._prepare_cache_for_generation = _prepare_cache_for_generation

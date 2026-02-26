@@ -18,7 +18,7 @@ from transformers.models.llama.modeling_llama import (
     LLAMA_INPUTS_DOCSTRING,
 )
 
-from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache, ThinkKIVIDynamicCache
+from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache, ThinkKIVIDynamicCache, ThinkKIVIFakeCache
 from model.kivi_utils import quant_kv_output, update_causal_mask, lazy_update
 from model.kivi_utils_think import get_past_key_values_think, attention_forward_think, apply_think_pruning_kv_output
 
@@ -58,7 +58,7 @@ def replace_attention_forward_think(self):
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            if isinstance(past_key_value, ThinkKIVIDynamicCache):
+            if isinstance(past_key_value, (ThinkKIVIDynamicCache, ThinkKIVIFakeCache)):
                 cache_kwargs["query_states"] = query_states
             key_states, value_states = past_key_value.update(
                 key_states, value_states, self.layer_idx, cache_kwargs
@@ -129,8 +129,8 @@ def replace_model_forward_think(model_inner):
 
         if past_key_values is not None:
             assert isinstance(
-                past_key_values, (KIVIDynamicCache, KIVIFakeCache, ThinkKIVIDynamicCache)
-            ), "past_key_values must be KIVIDynamicCache, KIVIFakeCache, or ThinkKIVIDynamicCache"
+                past_key_values, (KIVIDynamicCache, KIVIFakeCache, ThinkKIVIDynamicCache, ThinkKIVIFakeCache)
+            ), "past_key_values must be KIVIDynamicCache, KIVIFakeCache, ThinkKIVIDynamicCache, or ThinkKIVIFakeCache"
             assert self.config.quant_kv_output is False, "quant_kv_output must be False when packing is False"
 
         if cache_position is None:

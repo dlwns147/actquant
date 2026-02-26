@@ -69,8 +69,8 @@ RESIDUAL_LENGTH=128
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
-PRUNING_RATIO=1.0
-# PRUNING_RATIO=0.76
+# PRUNING_RATIO=1.0
+PRUNING_RATIO=0.76
 # PRUNING_RATIO=0.7
 # PRUNING_RATIO=0.69
 # PRUNING_RATIO=0.66
@@ -138,17 +138,17 @@ SAVE=save/result/${TODAY}_test
 LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONGBENCH_CONFIG=utils/longbench_config
 
-# RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
-RULER_TASK="niah_single_1"
+RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
+# RULER_TASK="niah_single_1"
 RULER_YAML_PATH=utils/ruler_utils
 # RULER_LENGTH=4096
-# RULER_LENGTH=16384
-RULER_LENGTH=65536
+RULER_LENGTH=16384
+# RULER_LENGTH=65536
 # RULER_LENGTH=128000
 # RULER_LENGTH=131072
 
-RULER_SAMPLE=1
-# RULER_SAMPLE=50
+# RULER_SAMPLE=1
+RULER_SAMPLE=50
 RULER_BATCH_SIZE=1
 RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs
 

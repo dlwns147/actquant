@@ -13,11 +13,13 @@ try:
         compute_v_channel_scores,
         get_top_k_indices,
         prune_kv_by_indices,
+        expand_pruned_to_full,
         DEFAULT_S_OBS,
     )
     _THINK_AVAILABLE = True
 except ImportError:
     _THINK_AVAILABLE = False
+    expand_pruned_to_full = None
     DEFAULT_S_OBS = 256
 
 @dataclass
@@ -775,3 +777,83 @@ class KIVIFakeCache(DynamicCache):
                 self.value_states_quant_cache[layer_idx] = torch.cat([self.value_states_quant_cache[layer_idx], value_states_quant_new], dim=2)
             else:
                 self.value_states_quant_cache[layer_idx] = value_states_quant_new
+
+
+class ThinkKIVIFakeCache(KIVIFakeCache):
+    """
+    KIVIFakeCache + ThinK: applies channel pruning before storing, for use when packing=False.
+    Pruned channels are zeroed so standard attention works with the cached K/V.
+    """
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        cache_kwargs = cache_kwargs or {}
+        query_states = cache_kwargs.get("query_states")
+
+        if self.is_prefill and query_states is not None and _THINK_AVAILABLE and expand_pruned_to_full is not None:
+            k_ratio = self.kivi_config.k_prune[layer_idx]
+            v_ratio = self.kivi_config.v_prune[layer_idx]
+            if k_ratio < 1.0 or v_ratio < 1.0:
+                head_dim = key_states.shape[-1]
+                k_indices = None
+                v_indices = None
+                n_rep = query_states.shape[1] // key_states.shape[1] if query_states.shape[1] != key_states.shape[1] else 1
+                key_for_scores = key_states
+                value_for_scores = value_states
+                if n_rep > 1:
+                    key_for_scores = torch.repeat_interleave(key_states, n_rep, dim=1)
+                    value_for_scores = torch.repeat_interleave(value_states, n_rep, dim=1)
+
+                if k_ratio < 1.0:
+                    k_scores = compute_k_channel_scores_efficient(query_states, key_for_scores, DEFAULT_S_OBS)
+                    if key_for_scores.shape[1] != key_states.shape[1]:
+                        bsz, nq, d = k_scores.shape
+                        nkv = key_states.shape[1]
+                        k_scores = k_scores.view(bsz, nkv, n_rep, d).mean(dim=2)
+                    k_indices = get_top_k_indices(k_scores, k_ratio)
+                    if k_indices.shape[-1] < head_dim and self.kivi_config.k_group_size[layer_idx] > 0:
+                        gs = self.kivi_config.k_group_size[layer_idx]
+                        t_k = k_indices.shape[-1]
+                        eff_gs = min(gs, t_k)
+                        if eff_gs > 0:
+                            t_k_round = (t_k // eff_gs) * eff_gs
+                            if t_k_round > 0 and t_k_round < t_k:
+                                k_indices = k_indices[..., :t_k_round]
+
+                if v_ratio < 1.0:
+                    v_scores = compute_v_channel_scores(
+                        query_states, key_for_scores, value_for_scores, DEFAULT_S_OBS, head_dim
+                    )
+                    if value_for_scores.shape[1] != value_states.shape[1]:
+                        bsz, nq, d = v_scores.shape
+                        nkv = value_states.shape[1]
+                        v_scores = v_scores.view(bsz, nkv, n_rep, d).mean(dim=2)
+                    v_indices = get_top_k_indices(v_scores, v_ratio)
+                    if v_indices.shape[-1] < head_dim and self.kivi_config.v_group_size[layer_idx] > 0:
+                        gs = self.kivi_config.v_group_size[layer_idx]
+                        t_v = v_indices.shape[-1]
+                        eff_gs = min(gs, t_v)
+                        if eff_gs > 0:
+                            t_v_round = (t_v // eff_gs) * eff_gs
+                            if t_v_round > 0 and t_v_round < t_v:
+                                v_indices = v_indices[..., :t_v_round]
+
+                if k_indices is not None or v_indices is not None:
+                    if k_indices is None:
+                        k_indices = torch.arange(head_dim, device=key_states.device).unsqueeze(0).expand(
+                            key_states.shape[1], -1
+                        )
+                    if v_indices is None:
+                        v_indices = torch.arange(head_dim, device=value_states.device).unsqueeze(0).expand(
+                            value_states.shape[1], -1
+                        )
+                    k_pruned, v_pruned = prune_kv_by_indices(key_states, value_states, k_indices, v_indices)
+                    key_states = expand_pruned_to_full(k_pruned, k_indices, head_dim, fill_value=0.0)
+                    value_states = expand_pruned_to_full(v_pruned, v_indices, head_dim, fill_value=0.0)
+
+        return super().update(key_states, value_states, layer_idx, cache_kwargs)
