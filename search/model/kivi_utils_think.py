@@ -119,8 +119,9 @@ def apply_think_pruning_kv_output(module, query_states, key_states, value_states
 
 
 def get_past_key_values_think(module):
-    """Return ThinkKIVIDynamicCache when method is 'think'."""
-    if getattr(module.config, 'kv_method', 'kivi') == 'think':
+    """Return ThinkKIVIDynamicCache when 'think' in kv_method list."""
+    kv_method = getattr(module.config, "kv_method", [])
+    if "think" in kv_method:
         cfg = module.config.kivi_config
         return ThinkKIVIDynamicCache(cfg) if cfg.packing else KIVIFakeCache(cfg)
     cfg = module.config.kivi_config

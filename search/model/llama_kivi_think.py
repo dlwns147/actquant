@@ -201,9 +201,9 @@ def replace_model_forward_think(model_inner):
     model_inner.forward = types.MethodType(forward, model_inner)
 
 
-def convert_model_think_kivi(model):
-    """Convert model to use KIVI + ThinK (Think_kivi)."""
-    model.config.kv_method = "think"
+def convert_model_think_kivi(model, kv_method):
+    """Convert model to use KIVI + ThinK (Think_kivi)."""   
+    model.config.kv_method = kv_method
     replace_model_forward_think(model.model)
     for layer in model.model.layers:
         replace_attention_forward_think(layer.self_attn)

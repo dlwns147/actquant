@@ -135,8 +135,8 @@ def convert_generation(model_config):
                 model_kwargs[cache_name] = OffloadedCache()
             elif generation_config.cache_implementation == "dynamic" \
                 or generation_config.cache_implementation == "kivi":
-                print(f'getattr(self.config, "kv_method", []): {getattr(self.config, "kv_method", [])}')
-                use_think = "think" in getattr(self.config, "kv_method", [])
+                kv_method = getattr(self.config, "kv_method", [])
+                use_think = "think" in kv_method
                 if model_config.kivi_config.packing:
                     cache_cls = ThinkKIVIDynamicCache if use_think else KIVIDynamicCache
                 else:
@@ -146,7 +146,9 @@ def convert_generation(model_config):
         # Use DynamicCache() instance by default. This will avoid back and forth from legacy format that
         # keeps copying the cache thus using much more memory
         else:
-            use_think = "think" in getattr(self.config, "kv_method", [])
+            kv_method = getattr(self.config, "kv_method", [])
+            use_think = "think" in kv_method
+            print(f'kv_method: {kv_method}, use_think: {use_think}')
             if model_config.kivi_config.packing:
                 cache_cls = ThinkKIVIDynamicCache if use_think else KIVIDynamicCache
             else:

@@ -8,7 +8,7 @@ from .generation import convert_generation
 
 def replace_kv_cache(model,
                     tokenizer,
-                    method='kivi',
+                    method=['kivi'],
                     n_block=-1,
                     k_quant_scheme='channel',
                     v_quant_scheme='token',
@@ -41,11 +41,13 @@ def replace_kv_cache(model,
             residual_length=residual_length,
             packing=packing,
         )
-        if "think" in method :
+        # Store kv_method as list for downstream use (e.g. generation)
+        model.config.kv_method = method
+        if "think" in method:
             print(f'ThinK KiVi model')
             if isinstance(model, LlamaForCausalLM):
                 from .llama_kivi_think import convert_model_think_kivi
-                convert_model_think_kivi(model)
+                convert_model_think_kivi(model, method)
             else:
                 raise NotImplementedError(f"Think_kivi not implemented for {model.__class__}")
         else:
