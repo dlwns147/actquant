@@ -6,21 +6,51 @@ from transformers.cache_utils import DynamicCache, CacheConfig
 from transformers.configuration_utils import PretrainedConfig
 
 from quant.kivi_utils.new_pack import triton_quantize_and_pack_along_last_dim, fake_quant, unpack_and_dequant_kcache, unpack_and_dequant_vcache
+import math
 
-try:
-    from .think_utils import (
-        compute_k_channel_scores_efficient,
-        compute_v_channel_scores,
-        get_top_k_indices,
-        prune_kv_by_indices,
-        expand_pruned_to_full,
-        DEFAULT_S_OBS,
-    )
-    _THINK_AVAILABLE = True
-except ImportError:
-    _THINK_AVAILABLE = False
-    expand_pruned_to_full = None
-    DEFAULT_S_OBS = 256
+def _think_key_pruner_query_driven(kv_states: torch.Tensor, q_states: torch.Tensor, ratio: float):
+    """
+    Query-driven key pruning (ThinK). Prunes along head_dim.
+
+    kv_states: (B, n_kv, L, D)
+    q_states:  (B, n_h,  L, D)
+    Returns:
+      pruned_kv_states: (B, n_kv, L, D-k)
+      keep_mask: (B, n_kv, D) boolean mask of kept dims
+    """
+    if ratio is None or ratio <= 0.0:
+        keep_mask = torch.ones(kv_states.shape[0], kv_states.shape[1], kv_states.shape[3], dtype=torch.bool, device=kv_states.device)
+        return kv_states, keep_mask
+
+    bz, n_kv, seqlen, head_dim = kv_states.shape
+    n_h = q_states.shape[1]
+    k = int(head_dim * ratio)
+    if k <= 0 or k >= head_dim:
+        keep_mask = torch.ones(bz, n_kv, head_dim, dtype=torch.bool, device=kv_states.device)
+        return kv_states, keep_mask
+
+    q_tail = q_states[..., -32:, :] if seqlen >= 32 else q_states
+    queries_norm = torch.pow(q_tail, 2).mean(dim=2)  # (B, n_h, D)
+    keys_norm = torch.pow(kv_states, 2).mean(dim=2)  # (B, n_kv, D)
+
+    if n_h != n_kv:
+        assert n_h % n_kv == 0, f"n_h={n_h}, n_kv={n_kv} not divisible"
+        groups = n_h // n_kv
+        queries_norm = queries_norm.view(bz, n_kv, groups, head_dim).mean(dim=2)
+
+    score = queries_norm * keys_norm
+
+    # ThinK: prune the *least important* k dimensions (smallest scores),
+    # then keep the remaining (head_dim - k) dimensions.
+    _, prune_indices = torch.topk(score, k, dim=-1, largest=False)
+    prune_idx = prune_indices.sort().values
+    prune_mask = torch.zeros(score.shape, dtype=torch.bool, device=kv_states.device).scatter_(-1, prune_idx, 1)
+
+    # keep_mask: True for kept dimensions (shape: B, n_kv, D)
+    keep_mask = ~prune_mask
+    keep_mask_k = keep_mask.unsqueeze(2).expand(-1, -1, seqlen, -1)
+    kept = kv_states[keep_mask_k].reshape(bz, n_kv, seqlen, head_dim - k)
+    return kept, keep_mask
 
 @dataclass
 class KIVICacheConfig(CacheConfig):
@@ -52,10 +82,6 @@ class KIVICacheConfig(CacheConfig):
         k_group_size: Optional[List[int]] = [],
         v_group_size: Optional[List[int]] = [],
 
-        # pruning config (per layer retention ratio for ThinK / Think_kivi)
-        k_prune: Optional[List[float]] = None,
-        v_prune: Optional[List[float]] = None,
-
         # quantization config
         k_quant_scheme: Optional[str] = 'channel',
         v_quant_scheme: Optional[str] = 'token',
@@ -76,22 +102,13 @@ class KIVICacheConfig(CacheConfig):
         self.v_quant_scheme = v_quant_scheme
         self.residual_length = residual_length
 
-        # pruning config
-        # By default, no pruning (retention ratio 1.0 for all layers)
-        if k_prune is None:
-            self.k_prune = [1.0] * len(self.k_bits)
-        else:
-            assert len(k_prune) == len(self.k_bits), "k_prune length must match k_bits"
-            self.k_prune = k_prune
-
-        if v_prune is None:
-            self.v_prune = [1.0] * len(self.v_bits)
-        else:
-            assert len(v_prune) == len(self.v_bits), "v_prune length must match v_bits"
-            self.v_prune = v_prune
-
         # packing config
         self.packing = packing
+
+        # ThinK options (optional)
+        self.enable_think = False
+        self.k_pruning_ratio: List[float] = [0.0] * len(k_bits)
+        self.v_pruning_ratio: List[float] = [0.0] * len(v_bits)
 
 
 class KIVIDynamicCache(DynamicCache):
@@ -133,6 +150,8 @@ class KIVIDynamicCache(DynamicCache):
         self.value_states_full_cache: List[torch.Tensor] = []
         self.value_scale_cache: List[torch.Tensor] = []
         self.value_mn_cache: List[torch.Tensor] = []
+        # ThinK: store last keep-mask per layer for generation path
+        self.key_keep_mask_cache: List[torch.Tensor] = []
 
         # for sageattention
         self.km: List[torch.Tensor] = []
@@ -204,6 +223,7 @@ class KIVIDynamicCache(DynamicCache):
                 self.value_states_full_cache.append([])
                 self.value_scale_cache.append([])
                 self.value_mn_cache.append([])
+                self.key_keep_mask_cache.append([])
 
                 # for sageattention
                 self.km.append([])
@@ -213,7 +233,7 @@ class KIVIDynamicCache(DynamicCache):
             key_states -= self.km[layer_idx]
             # key_states.sub_(self.km[layer_idx])
             
-            self._update_prefill(key_states, value_states, layer_idx)
+            self._update_prefill(key_states, value_states, layer_idx, cache_kwargs=cache_kwargs)
         # generation
         else:
             # for sageattention
@@ -300,7 +320,7 @@ class KIVIDynamicCache(DynamicCache):
             self.key_cache[layer_idx] = self.key_cache[layer_idx][indices, ...]
             self.value_cache[layer_idx] = self.value_cache[layer_idx][indices, ...]
 
-    def _update_prefill(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int):
+    def _update_prefill(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int, cache_kwargs: Optional[Dict[str, Any]] = None):
         if key_states.shape[-2] % self.kivi_config.residual_length != 0:
             if key_states.shape[-2] < self.kivi_config.residual_length:
                 key_states_quant = None
@@ -313,7 +333,19 @@ class KIVIDynamicCache(DynamicCache):
             key_states_full = None
 
         # quantize key states
+        key_keep_mask = None
         if key_states_quant is not None:
+            # ThinK: prune key dimensions using query-driven mask (needs query_states from attention forward)
+            if getattr(self.kivi_config, "enable_think", False):
+                q_states = None if cache_kwargs is None else cache_kwargs.get("query_states", None)
+                if q_states is not None:
+                    ratio = 0.0
+                    try:
+                        ratio = float(self.kivi_config.k_pruning_ratio[layer_idx])
+                    except Exception:
+                        ratio = 0.0
+                    key_states_quant, key_keep_mask = _think_key_pruner_query_driven(key_states_quant, q_states, ratio)
+
             key_states_quant_trans, key_scale_trans, key_mn_trans = triton_quantize_and_pack_along_last_dim(
                 key_states_quant.transpose(2, 3).contiguous(), self.kivi_config.k_group_size[layer_idx], self.kivi_config.k_bits[layer_idx]
                 )
@@ -321,6 +353,7 @@ class KIVIDynamicCache(DynamicCache):
             key_states_quant_trans = None
             key_scale_trans = None
             key_mn_trans = None
+            key_keep_mask = None
 
         # quantize value states
         if value_states.shape[-2] <= self.kivi_config.residual_length:
@@ -343,6 +376,7 @@ class KIVIDynamicCache(DynamicCache):
         self.value_states_full_cache.append(value_states_full)
         self.value_scale_cache.append(value_scale)
         self.value_mn_cache.append(value_mn)
+        self.key_keep_mask_cache.append(key_keep_mask)
 
     def _update_generation(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int):
         if self.key_states_full_cache[layer_idx] is not None:
@@ -357,9 +391,26 @@ class KIVIDynamicCache(DynamicCache):
 
         if self.key_states_full_cache[layer_idx].shape[-2] == self.kivi_config.residual_length:
             assert self.kivi_config.residual_length % self.kivi_config.k_group_size[layer_idx] == 0
-            key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(self.key_states_full_cache[layer_idx].transpose(2, 3).contiguous(), 
-                                                                                                                        self.kivi_config.k_group_size[layer_idx], 
-                                                                                                                        self.kivi_config.k_bits[layer_idx])
+
+            key_to_pack = self.key_states_full_cache[layer_idx]
+            # ThinK: if we pruned key dimensions during prefill, apply the same keep-mask
+            # before packing the residual window, so packed K dims stay consistent.
+            if getattr(self.kivi_config, "enable_think", False):
+                keep_mask = None
+                try:
+                    keep_mask = self.key_keep_mask_cache[layer_idx]
+                except Exception:
+                    keep_mask = None
+                if keep_mask is not None and isinstance(keep_mask, torch.Tensor):
+                    b, n_kv, seqlen, d = key_to_pack.shape
+                    keep_mask_k = keep_mask.unsqueeze(2).expand(-1, -1, seqlen, -1)
+                    key_to_pack = key_to_pack[keep_mask_k].reshape(b, n_kv, seqlen, -1)
+
+            key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(
+                key_to_pack.transpose(2, 3).contiguous(),
+                self.kivi_config.k_group_size[layer_idx],
+                self.kivi_config.k_bits[layer_idx],
+            )
             self.key_states_full_cache[layer_idx] = None
             if self.key_states_quant_trans_cache[layer_idx] is not None:
                 self.key_states_quant_trans_cache[layer_idx] = torch.cat([self.key_states_quant_trans_cache[layer_idx], key_states_quant_trans_new], dim=3)
@@ -385,207 +436,6 @@ class KIVIDynamicCache(DynamicCache):
                 self.value_states_quant_cache[layer_idx] = value_states_quant_new
                 self.value_scale_cache[layer_idx] = scale
                 self.value_mn_cache[layer_idx] = mn
-
-
-class ThinkKIVIDynamicCache(KIVIDynamicCache):
-    """
-    KIVI + ThinK cache: applies channel pruning (ThinK) before quantization (KIVI).
-    Supports both K and V pruning per Appendix D of ThinK.
-    """
-
-    def __init__(self, cache_config: "KIVICacheConfig", s_obs: int = None) -> None:
-        super().__init__(cache_config)
-        self.s_obs = s_obs if s_obs is not None else DEFAULT_S_OBS
-        self.k_keep_indices: List[Optional[torch.Tensor]] = []
-        self.v_keep_indices: List[Optional[torch.Tensor]] = []
-
-    def _apply_pruning_prefill(
-        self,
-        query_states: torch.Tensor,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """Compute channel scores and prune K, V. Returns pruned key_states, value_states, k_indices, v_indices."""
-        if not _THINK_AVAILABLE:
-            return key_states, value_states, None, None
-
-        k_ratio = self.kivi_config.k_prune[layer_idx]
-        v_ratio = self.kivi_config.v_prune[layer_idx]
-        if k_ratio >= 1.0 and v_ratio >= 1.0:
-            return key_states, value_states, None, None
-
-        head_dim = key_states.shape[-1]
-        k_indices = None
-        v_indices = None
-
-        if k_ratio < 1.0:
-            k_scores = compute_k_channel_scores_efficient(
-                query_states, key_states, self.s_obs
-            )
-            k_indices = get_top_k_indices(k_scores, k_ratio)
-            if k_indices.shape[-1] < head_dim:
-                gs = self.kivi_config.k_group_size[layer_idx]
-                t_k = k_indices.shape[-1]
-                eff_gs = min(gs, t_k) if gs > 0 else t_k
-                if eff_gs > 0:
-                    t_k_round = (t_k // eff_gs) * eff_gs
-                    if t_k_round > 0 and t_k_round < t_k:
-                        k_indices = k_indices[..., :t_k_round]
-
-        if v_ratio < 1.0:
-            v_scores = compute_v_channel_scores(
-                query_states, key_states, value_states,
-                self.s_obs, head_dim
-            )
-            v_indices = get_top_k_indices(v_scores, v_ratio)
-            if v_indices.shape[-1] < head_dim:
-                gs = self.kivi_config.v_group_size[layer_idx]
-                t_v = v_indices.shape[-1]
-                eff_gs = min(gs, t_v) if gs > 0 else t_v
-                if eff_gs > 0:
-                    t_v_round = (t_v // eff_gs) * eff_gs
-                    if t_v_round > 0 and t_v_round < t_v:
-                        v_indices = v_indices[..., :t_v_round]
-
-        k_indices_stored = None
-        v_indices_stored = None
-        if k_indices is not None or v_indices is not None:
-            if k_indices is None:
-                k_indices = torch.arange(head_dim, device=key_states.device).unsqueeze(0).expand(
-                    key_states.shape[1], -1
-                )
-            if v_indices is None:
-                v_indices = torch.arange(head_dim, device=value_states.device).unsqueeze(0).expand(
-                    value_states.shape[1], -1
-                )
-            key_states, value_states = prune_kv_by_indices(
-                key_states, value_states, k_indices, v_indices
-            )
-            k_indices_stored = k_indices[0].cpu().clone() if k_indices.shape[0] > 0 else None
-            v_indices_stored = v_indices[0].cpu().clone() if v_indices.shape[0] > 0 else None
-
-        return key_states, value_states, k_indices_stored, v_indices_stored
-
-    def _prune_full_for_lazy_update(
-        self, full_tensor: torch.Tensor, indices: torch.Tensor, layer_idx: int
-    ) -> torch.Tensor:
-        """Prune full cache by channel indices (for lazy_update)."""
-        if indices is None or not _THINK_AVAILABLE:
-            return full_tensor
-        device = full_tensor.device
-        indices = indices.to(device)
-        if indices.dim() == 2:
-            indices = indices.unsqueeze(0).expand(full_tensor.shape[0], -1, -1)
-        return torch.gather(
-            full_tensor, dim=3,
-            index=indices.unsqueeze(2).expand(-1, -1, full_tensor.shape[2], -1),
-        )
-
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        cache_kwargs = cache_kwargs or {}
-        query_states = cache_kwargs.get("query_states")
-
-        if self.is_prefill and query_states is not None and _THINK_AVAILABLE:
-            while len(self.k_keep_indices) <= layer_idx:
-                self.k_keep_indices.append(None)
-                self.v_keep_indices.append(None)
-
-            k_ratio = self.kivi_config.k_prune[layer_idx]
-            v_ratio = self.kivi_config.v_prune[layer_idx]
-            if k_ratio < 1.0 or v_ratio < 1.0:
-                key_states, value_states, k_idx, v_idx = self._apply_pruning_prefill(
-                    query_states, key_states, value_states, layer_idx
-                )
-                self.k_keep_indices[layer_idx] = k_idx
-                self.v_keep_indices[layer_idx] = v_idx
-
-        return super().update(key_states, value_states, layer_idx, cache_kwargs)
-
-    def _update_prefill(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int):
-        # key_states, value_states may already be pruned by update() when query was passed
-        super()._update_prefill(key_states, value_states, layer_idx)
-
-    def _update_generation(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int):
-        super()._update_generation(key_states, value_states, layer_idx)
-
-    def lazy_update(self, layer_idx: int):
-        if layer_idx >= len(self.k_keep_indices):
-            self.k_keep_indices.append(None)
-            self.v_keep_indices.append(None)
-
-        k_idx = self.k_keep_indices[layer_idx] if layer_idx < len(self.k_keep_indices) else None
-        v_idx = self.v_keep_indices[layer_idx] if layer_idx < len(self.v_keep_indices) else None
-
-        full_k = self.key_states_full_cache[layer_idx]
-        full_v = self.value_states_full_cache[layer_idx]
-        if full_k is not None and full_k.shape[-2] == self.kivi_config.residual_length:
-            if k_idx is not None and _THINK_AVAILABLE:
-                full_k = self._prune_full_for_lazy_update(full_k, k_idx, layer_idx)
-            gs = self.kivi_config.k_group_size[layer_idx]
-            t_k = full_k.shape[-1]
-            eff_gs = min(gs, t_k) if gs > 0 else t_k
-            if eff_gs > 0 and t_k % eff_gs != 0:
-                t_k = (t_k // eff_gs) * eff_gs
-                full_k = full_k[..., :t_k]
-            eff_gs = min(gs, full_k.shape[-1]) if gs > 0 else full_k.shape[-1]
-            key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(
-                full_k.transpose(2, 3).contiguous(), eff_gs, self.kivi_config.k_bits[layer_idx]
-            )
-            self.key_states_full_cache[layer_idx] = None
-            if self.key_states_quant_trans_cache[layer_idx] is not None:
-                self.key_states_quant_trans_cache[layer_idx] = torch.cat(
-                    [self.key_states_quant_trans_cache[layer_idx], key_states_quant_trans_new], dim=3
-                )
-                self.key_scale_trans_cache[layer_idx] = torch.cat(
-                    [self.key_scale_trans_cache[layer_idx], key_scale_trans_new], dim=3
-                )
-                self.key_mn_trans_cache[layer_idx] = torch.cat(
-                    [self.key_mn_trans_cache[layer_idx], key_mn_trans_new], dim=3
-                )
-            else:
-                self.key_states_quant_trans_cache[layer_idx] = key_states_quant_trans_new
-                self.key_scale_trans_cache[layer_idx] = key_scale_trans_new
-                self.key_mn_trans_cache[layer_idx] = key_mn_trans_new
-
-        value_full_length = self.value_states_full_cache[layer_idx].shape[-2]
-        if value_full_length > self.kivi_config.residual_length:
-            assert value_full_length == self.kivi_config.residual_length + 1
-            chunk = self.value_states_full_cache[layer_idx][:, :, :1, :].contiguous()
-            if v_idx is not None and _THINK_AVAILABLE:
-                chunk = self._prune_full_for_lazy_update(chunk, v_idx, layer_idx)
-            v_gs = self.kivi_config.v_group_size[layer_idx]
-            t_v = chunk.shape[-1]
-            v_eff_gs = min(v_gs, t_v) if v_gs > 0 else t_v
-            if v_eff_gs > 0 and t_v % v_eff_gs != 0:
-                t_v = (t_v // v_eff_gs) * v_eff_gs
-                chunk = chunk[..., :t_v]
-            v_eff_gs = min(v_gs, chunk.shape[-1]) if v_gs > 0 else chunk.shape[-1]
-            value_states_quant_new, scale, mn = triton_quantize_and_pack_along_last_dim(
-                chunk, v_eff_gs, self.kivi_config.v_bits[layer_idx]
-            )
-            self.value_states_full_cache[layer_idx] = self.value_states_full_cache[layer_idx][:, :, 1:, :].contiguous()
-            if self.value_states_quant_cache[layer_idx] is not None:
-                self.value_states_quant_cache[layer_idx] = torch.cat(
-                    [self.value_states_quant_cache[layer_idx], value_states_quant_new], dim=2
-                )
-                self.value_scale_cache[layer_idx] = torch.cat(
-                    [self.value_scale_cache[layer_idx], scale], dim=2
-                )
-                self.value_mn_cache[layer_idx] = torch.cat(
-                    [self.value_mn_cache[layer_idx], mn], dim=2
-                )
-            else:
-                self.value_states_quant_cache[layer_idx] = value_states_quant_new
-                self.value_scale_cache[layer_idx] = scale
-                self.value_mn_cache[layer_idx] = mn
-
 
 class KIVIFakeCache(DynamicCache):
     """
@@ -622,6 +472,8 @@ class KIVIFakeCache(DynamicCache):
         self.key_states_full_cache: List[torch.Tensor] = []
         self.value_states_quant_cache: List[torch.Tensor] = []
         self.value_states_full_cache: List[torch.Tensor] = []
+        # ThinK: keep_mask per layer for lazy_update (apply same channel mask to residual window)
+        self.key_keep_mask_cache: List[Optional[torch.Tensor]] = []
 
         # for sageattention
         self.km: List[torch.Tensor] = []
@@ -686,12 +538,13 @@ class KIVIFakeCache(DynamicCache):
                 self.key_states_full_cache.append([])
                 self.value_states_quant_cache.append([])
                 self.value_states_full_cache.append([])
+                self.key_keep_mask_cache.append(None)
 
             # for sageattention
             # self.km.append(key_states.mean(dim=2).unsqueeze(2))
             # key_states -= self.km[layer_idx]
             
-            self._update_prefill(key_states, value_states, layer_idx)
+            self._update_prefill(key_states, value_states, layer_idx, cache_kwargs=cache_kwargs)
 
             keys_to_return = key_states
             values_to_return = value_states
@@ -716,8 +569,18 @@ class KIVIFakeCache(DynamicCache):
         # this part of code otherwise fails when used to verify attn_weight shape in some models
         return self._seen_tokens if layer_idx == 0 else self._seen_tokens - 1
 
-    def _update_prefill(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int):
+    def _update_prefill(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ):
         # import pdb; pdb.set_trace()
+        key_keep_mask = None
+        if cache_kwargs is not None and getattr(self.kivi_config, "enable_think", False):
+            key_keep_mask = cache_kwargs.get("key_keep_mask", None)
+
         if key_states.shape[-2] % self.kivi_config.residual_length != 0:
             if key_states.shape[-2] < self.kivi_config.residual_length:
                 key_states_quant = None
@@ -730,7 +593,12 @@ class KIVIFakeCache(DynamicCache):
             key_states_full = None
 
         if key_states_quant is not None:
+            # ThinK: apply keep_mask before and after fake_quant so stored cache has exact zeros in pruned dims (decode matches ThinK_kivi)
+            if key_keep_mask is not None and isinstance(key_keep_mask, torch.Tensor):
+                key_states_quant = key_states_quant * key_keep_mask.unsqueeze(2).to(key_states_quant.dtype)
             key_states_quant = fake_quant(key_states_quant, self.kivi_config.k_group_size[layer_idx], self.kivi_config.k_bits[layer_idx], self.kivi_config.k_quant_scheme)
+            if key_keep_mask is not None and isinstance(key_keep_mask, torch.Tensor):
+                key_states_quant = key_states_quant * key_keep_mask.unsqueeze(2).to(key_states_quant.dtype)
 
         if value_states.shape[-2] <= self.kivi_config.residual_length:
             value_states_quant = None
@@ -745,6 +613,7 @@ class KIVIFakeCache(DynamicCache):
         self.key_states_full_cache.append(key_states_full)
         self.value_states_quant_cache.append(value_states_quant)
         self.value_states_full_cache.append(value_states_full)
+        self.key_keep_mask_cache.append(key_keep_mask)
 
     def _update_generation(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int):
         if self.key_states_full_cache[layer_idx] is not None:
@@ -757,7 +626,15 @@ class KIVIFakeCache(DynamicCache):
     def lazy_update(self, layer_idx: int):
         if self.key_states_full_cache[layer_idx].shape[-2] == self.kivi_config.residual_length:
             assert self.kivi_config.residual_length % self.kivi_config.k_group_size[layer_idx] == 0
-            key_states_quant_trans_new = fake_quant(self.key_states_full_cache[layer_idx], self.kivi_config.k_group_size[layer_idx], self.kivi_config.k_bits[layer_idx], self.kivi_config.k_quant_scheme)
+            key_to_pack = self.key_states_full_cache[layer_idx]
+            # ThinK: apply same channel mask (zero out pruned dims) so all quant keys are consistent with prefill
+            keep_mask = None
+            if layer_idx < len(self.key_keep_mask_cache):
+                keep_mask = self.key_keep_mask_cache[layer_idx]
+            if keep_mask is not None and isinstance(keep_mask, torch.Tensor):
+                # keep shape (B, n_kv, seqlen, D); zero pruned dims to match prefill masked keys
+                key_to_pack = key_to_pack * keep_mask.unsqueeze(2).to(key_to_pack.dtype)
+            key_states_quant_trans_new = fake_quant(key_to_pack, self.kivi_config.k_group_size[layer_idx], self.kivi_config.k_bits[layer_idx], self.kivi_config.k_quant_scheme)
 
             self.key_states_full_cache[layer_idx] = None
             if self.key_states_quant_trans_cache[layer_idx] is not None:
@@ -778,82 +655,7 @@ class KIVIFakeCache(DynamicCache):
             else:
                 self.value_states_quant_cache[layer_idx] = value_states_quant_new
 
-
-class ThinkKIVIFakeCache(KIVIFakeCache):
-    """
-    KIVIFakeCache + ThinK: applies channel pruning before storing, for use when packing=False.
-    Pruned channels are zeroed so standard attention works with the cached K/V.
-    """
-
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        cache_kwargs = cache_kwargs or {}
-        query_states = cache_kwargs.get("query_states")
-
-        if self.is_prefill and query_states is not None and _THINK_AVAILABLE and expand_pruned_to_full is not None:
-            k_ratio = self.kivi_config.k_prune[layer_idx]
-            v_ratio = self.kivi_config.v_prune[layer_idx]
-            if k_ratio < 1.0 or v_ratio < 1.0:
-                head_dim = key_states.shape[-1]
-                k_indices = None
-                v_indices = None
-                n_rep = query_states.shape[1] // key_states.shape[1] if query_states.shape[1] != key_states.shape[1] else 1
-                key_for_scores = key_states
-                value_for_scores = value_states
-                if n_rep > 1:
-                    key_for_scores = torch.repeat_interleave(key_states, n_rep, dim=1)
-                    value_for_scores = torch.repeat_interleave(value_states, n_rep, dim=1)
-
-                if k_ratio < 1.0:
-                    k_scores = compute_k_channel_scores_efficient(query_states, key_for_scores, DEFAULT_S_OBS)
-                    if key_for_scores.shape[1] != key_states.shape[1]:
-                        bsz, nq, d = k_scores.shape
-                        nkv = key_states.shape[1]
-                        k_scores = k_scores.view(bsz, nkv, n_rep, d).mean(dim=2)
-                    k_indices = get_top_k_indices(k_scores, k_ratio)
-                    if k_indices.shape[-1] < head_dim and self.kivi_config.k_group_size[layer_idx] > 0:
-                        gs = self.kivi_config.k_group_size[layer_idx]
-                        t_k = k_indices.shape[-1]
-                        eff_gs = min(gs, t_k)
-                        if eff_gs > 0:
-                            t_k_round = (t_k // eff_gs) * eff_gs
-                            if t_k_round > 0 and t_k_round < t_k:
-                                k_indices = k_indices[..., :t_k_round]
-
-                if v_ratio < 1.0:
-                    v_scores = compute_v_channel_scores(
-                        query_states, key_for_scores, value_for_scores, DEFAULT_S_OBS, head_dim
-                    )
-                    if value_for_scores.shape[1] != value_states.shape[1]:
-                        bsz, nq, d = v_scores.shape
-                        nkv = value_states.shape[1]
-                        v_scores = v_scores.view(bsz, nkv, n_rep, d).mean(dim=2)
-                    v_indices = get_top_k_indices(v_scores, v_ratio)
-                    if v_indices.shape[-1] < head_dim and self.kivi_config.v_group_size[layer_idx] > 0:
-                        gs = self.kivi_config.v_group_size[layer_idx]
-                        t_v = v_indices.shape[-1]
-                        eff_gs = min(gs, t_v)
-                        if eff_gs > 0:
-                            t_v_round = (t_v // eff_gs) * eff_gs
-                            if t_v_round > 0 and t_v_round < t_v:
-                                v_indices = v_indices[..., :t_v_round]
-
-                if k_indices is not None or v_indices is not None:
-                    if k_indices is None:
-                        k_indices = torch.arange(head_dim, device=key_states.device).unsqueeze(0).expand(
-                            key_states.shape[1], -1
-                        )
-                    if v_indices is None:
-                        v_indices = torch.arange(head_dim, device=value_states.device).unsqueeze(0).expand(
-                            value_states.shape[1], -1
-                        )
-                    k_pruned, v_pruned = prune_kv_by_indices(key_states, value_states, k_indices, v_indices)
-                    key_states = expand_pruned_to_full(k_pruned, k_indices, head_dim, fill_value=0.0)
-                    value_states = expand_pruned_to_full(v_pruned, v_indices, head_dim, fill_value=0.0)
-
-        return super().update(key_states, value_states, layer_idx, cache_kwargs)
+# Backwards-compatible aliases used by generation.py.
+# ThinK is enabled via `KIVICacheConfig.enable_think` and the keep-mask stored in `KIVIDynamicCache`.
+ThinkKIVIDynamicCache = KIVIDynamicCache
+ThinkKIVIFakeCache = KIVIFakeCache

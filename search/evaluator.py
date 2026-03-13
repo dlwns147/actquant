@@ -41,6 +41,8 @@ class LlamaEvaluator:
                  v_quant_scheme='token',
                  packing=False,
                 #  use_flash=False,
+                 k_pruning_ratio=0.0,
+                 v_pruning_ratio=0.0,
                  limit=20,
                  num_fewshot=None,
                  lm_eval_batch_size=1,
@@ -54,7 +56,6 @@ class LlamaEvaluator:
                  sliding_window=128,
                  alpha=2,
                  beta=-2,
-                 pruning_ratio_options=None,
                  last_tokens=None,
                  **kwargs):
         
@@ -131,17 +132,19 @@ class LlamaEvaluator:
                 # with accelerator.main_process_first():
                 self.model = load_hqq_model(quant_model_paths[np.argmax(bits['w'])], device_map, inference)
 
-                if ('hqq' in self.method['kv'] or 'kivi' in self.method['kv'] or 'think' in self.method['kv']) \
-                    and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
+                kv_methods = self.method['kv'] if isinstance(self.method.get('kv'), list) else [self.method.get('kv')]
+                if any(m in ['hqq', 'kivi', 'think'] for m in kv_methods) and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
                     self.model = replace_kv_cache(model=self.model,
                                                 tokenizer=self.tokenizer,
-                                                method=method['kv'],
+                                                method=kv_methods,
                                                 n_block=n_block,
                                                 k_quant_scheme=k_quant_scheme,
                                                 v_quant_scheme=v_quant_scheme,
                                                 residual_length=residual_length,
                                                 packing=packing,
-                                                quant_kv_output=quant_kv_output)
+                                                quant_kv_output=quant_kv_output,
+                                                k_pruning_ratio=k_pruning_ratio,
+                                                v_pruning_ratio=v_pruning_ratio)
 
                 self.remove_linears(self.model, config)
                 self.quant_models = [load_hqq_model(p, device_map) for p in quant_model_paths]                
@@ -150,17 +153,19 @@ class LlamaEvaluator:
             # self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
             self.model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
             
-            if ('hqq' in self.method['kv'] or 'kivi' in self.method['kv'] or 'think' in self.method['kv']) \
-                and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
+            kv_methods = self.method['kv'] if isinstance(self.method.get('kv'), list) else [self.method.get('kv')]
+            if any(m in ['hqq', 'kivi', 'think'] for m in kv_methods) and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
                 self.model = replace_kv_cache(model=self.model,
                                             tokenizer=self.tokenizer,
-                                            method=method['kv'],
+                                            method=kv_methods,
                                             n_block=n_block,
                                             k_quant_scheme=k_quant_scheme,
                                             v_quant_scheme=v_quant_scheme,
                                             residual_length=residual_length,
                                             packing=packing,
-                                            quant_kv_output=quant_kv_output)
+                                            quant_kv_output=quant_kv_output,
+                                            k_pruning_ratio=k_pruning_ratio,
+                                            v_pruning_ratio=v_pruning_ratio)
                 
         elif not ('awq' in method['w'] or 'gptq' in method['w'] or 'qeft' in method['w']):
             raise NotImplementedError(method['w'])
@@ -195,6 +200,8 @@ class LlamaEvaluator:
         self.residual_length = residual_length
         self.quant_kv_output = quant_kv_output
         self.packing = packing
+        self.k_pruning_ratio = k_pruning_ratio
+        self.v_pruning_ratio = v_pruning_ratio
         
         self.use_key_token = use_key_token
         self.key_token_path = key_token_path
@@ -203,11 +210,11 @@ class LlamaEvaluator:
         self.alpha = alpha
         self.beta = beta
 
-        self.pruning_ratio_options = pruning_ratio_options if pruning_ratio_options is not None else [0.25, 0.5, 0.75, 1.0]
-
         accelerator.wait_for_everyone()
 
     def sample(self, arch):
+        arch = self._normalize_arch(arch)
+
         # self.validate_arch(arch)
         # if 'hqq' in self.method['w'] or 'awq' in self.method['w'] or 'gptq' in self.method['w'] or 'qeft' in self.method['w']:
         if 'hqq' in self.method['w']:
@@ -247,26 +254,32 @@ class LlamaEvaluator:
             # self.model = get_hfmodel(self.model_id, self.device_map, self.dtype, use_cache=False)
             self.model.eval()
             # if (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
-            # if self.method['kv'] in ['hqq', 'kivi', 'think']:
-            if 'hqq' in self.method['kv'] or 'kivi' in self.method['kv'] or 'think' in self.method['kv']:
+            kv_methods = self.method['kv'] if isinstance(self.method.get('kv'), list) else [self.method.get('kv')]
+            if any(m in ['hqq', 'kivi', 'think'] for m in kv_methods):
+                base = 'hqq' if 'hqq' in kv_methods else 'kivi' if 'kivi' in kv_methods else 'kivi'
                 self.model = replace_kv_cache(model=self.model,
                                             tokenizer=self.tokenizer,
-                                            method=self.method['kv'],
+                                            method=kv_methods,
                                             n_block=int(self.config['n_block']),
                                             k_quant_scheme=self.k_quant_scheme,
                                             v_quant_scheme=self.v_quant_scheme,
                                             residual_length=self.residual_length,
                                             packing=self.packing,
-                                            quant_kv_output=self.quant_kv_output)
+                                            quant_kv_output=self.quant_kv_output,
+                                            k_pruning_ratio=self.k_pruning_ratio,
+                                            v_pruning_ratio=self.v_pruning_ratio)
         
-        if 'hqq' in self.method['kv']:
+        kv_methods = self.method['kv'] if isinstance(self.method.get('kv'), list) else [self.method.get('kv')]
+        active_kv = 'hqq' if 'hqq' in kv_methods else 'kivi' if ('kivi' in kv_methods or 'think' in kv_methods) else 'fp16'
+
+        if active_kv == 'hqq':
             if 'k' in arch:
                 self.model.generation_config.cache_config['k_bits'] = [x[0] for x in arch['k']]
                 self.model.generation_config.cache_config['k_group_size'] = [x[1] for x in arch['k']]
             if 'v' in arch:
                 self.model.generation_config.cache_config['v_bits'] = [x[0] for x in arch['v']]
                 self.model.generation_config.cache_config['v_group_size'] = [x[1] for x in arch['v']]
-        elif 'kivi' in self.method['kv']:
+        elif active_kv == 'kivi':
             if 'k' in arch:
                 self.model.config.kivi_config.k_bits = [x[0] for x in arch['k']]
                 self.model.config.kivi_config.k_group_size = [x[1] for x in arch['k']]
@@ -274,27 +287,123 @@ class LlamaEvaluator:
             if 'v' in arch:
                 self.model.config.kivi_config.v_bits = [x[0] for x in arch['v']]
                 self.model.config.kivi_config.v_group_size = [x[1] for x in arch['v']]
+            # ThinK pruning ratios (per-layer lists). V pruning is reserved.
+            if hasattr(self.model.config, "kivi_config"):
+                if 'k_prune' in arch:
+                    self.model.config.kivi_config.k_pruning_ratio = arch['k_prune']
+                if 'v_prune' in arch:
+                    self.model.config.kivi_config.v_pruning_ratio = arch['v_prune']
+                self.model.config.kivi_config.enable_think = ('think' in kv_methods)
 
-            if 'think' in self.method['kv']:
-                self.model.config.kivi_config.k_prune = arch['k_prune']
-                self.model.config.kivi_config.v_prune = arch['v_prune']
-                # n_block = int(self.config['n_block'])
-                # if hasattr(self.model.config, 'kivi_config'):
-                #     self.model.config.kivi_config.k_prune = k_prune
-                #     self.model.config.kivi_config.v_prune = v_prune
-                # for layer_idx in range(n_block):
-                #     layer = getblock(self.model, self.config)[layer_idx]
-                #     if hasattr(layer, 'self_attn'):
-                #         if k_prune is not None and layer_idx < len(k_prune):
-                #             setattr(layer.self_attn, 'k_prune', k_prune[layer_idx])
-                #         if v_prune is not None and layer_idx < len(v_prune):
-                #             setattr(layer.self_attn, 'v_prune', v_prune[layer_idx])
-        elif 'fp16' in self.method['kv']:
+        elif active_kv == 'fp16':
             pass
         else:
-            raise NotImplementedError(self.method['kv'])
+            raise NotImplementedError(self.method.get('kv'))
         
         return self.model
+
+    def _normalize_arch(self, arch):
+        """
+        Normalize multiple arch schema variants into the legacy schema consumed by the evaluator:
+          - legacy: {'w': {linear_group: [bits]*n_block}, 'k': [[bits, gs]]*n_block, 'v': [[bits, gs]]*n_block,
+                     'k_prune': [ratio]*n_block, 'v_prune': [ratio]*n_block}
+          - new:    {'q': {'w': [...], 'k': [...], 'v': [...]}, 'p': {'k': [...], 'v': [...]} }
+
+        For new schema, expected shapes:
+          - q.w: list length n_block, each item either:
+              - dict {linear_group: bits} OR
+              - dict {linear_group: [bits, ...]} (we take first) OR
+              - number (applies to all linear groups)
+          - q.k/q.v: list length n_block, each item either [bits, group_size] or dict with keys {'bits','group_size'}
+          - p.k/p.v: list length n_block of floats
+        """
+        if not isinstance(arch, dict):
+            raise TypeError(f"arch must be dict, got {type(arch)}")
+
+        if 'q' not in arch:
+            return arch
+
+        q_arch = arch.get('q') or {}
+        p_arch = arch.get('p') or {}
+        n_block = int(self.config['n_block'])
+
+        legacy = {}
+
+        # ---- weights ----
+        q_w = q_arch.get('w')
+        if q_w is not None:
+            # target: legacy['w'] = {linear_group: [bits]*n_block}
+            w_dict = {lg: [None] * n_block for lg in self.config['linear']}
+
+            if isinstance(q_w, list):
+                if len(q_w) != n_block:
+                    raise ValueError(f"q.w must have length n_block={n_block}, got {len(q_w)}")
+                for i, wi in enumerate(q_w):
+                    if isinstance(wi, dict):
+                        for lg in self.config['linear']:
+                            if lg in wi:
+                                val = wi[lg]
+                                if isinstance(val, list) and val:
+                                    val = val[0]
+                                w_dict[lg][i] = val
+                            elif all(x is None for x in w_dict[lg][i:i+1]):
+                                # leave None, fill later
+                                pass
+                    else:
+                        # scalar -> apply to all linear groups
+                        for lg in self.config['linear']:
+                            w_dict[lg][i] = wi
+            elif isinstance(q_w, dict):
+                for lg in self.config['linear']:
+                    if lg in q_w:
+                        val = q_w[lg]
+                        if isinstance(val, list):
+                            if len(val) != n_block:
+                                raise ValueError(f"q.w['{lg}'] must have length n_block={n_block}, got {len(val)}")
+                            w_dict[lg] = val
+                        else:
+                            w_dict[lg] = [val] * n_block
+            else:
+                for lg in self.config['linear']:
+                    w_dict[lg] = [q_w] * n_block
+
+            # fill any missing with first non-missing or 0
+            for lg, arr in w_dict.items():
+                fill = next((x for x in arr if x is not None), 0)
+                w_dict[lg] = [fill if x is None else x for x in arr]
+
+            legacy['w'] = w_dict
+
+        # ---- kv quant ----
+        def _norm_kv_list(x, name):
+            if x is None:
+                return None
+            if not isinstance(x, list):
+                raise TypeError(f"q.{name} must be list, got {type(x)}")
+            if len(x) != n_block:
+                raise ValueError(f"q.{name} must have length n_block={n_block}, got {len(x)}")
+            out = []
+            for xi in x:
+                if isinstance(xi, dict):
+                    out.append([xi.get('bits'), xi.get('group_size')])
+                else:
+                    out.append(list(xi))
+            return out
+
+        q_k = _norm_kv_list(q_arch.get('k'), 'k')
+        if q_k is not None:
+            legacy['k'] = q_k
+        q_v = _norm_kv_list(q_arch.get('v'), 'v')
+        if q_v is not None:
+            legacy['v'] = q_v
+
+        # ---- pruning ----
+        if 'k' in p_arch:
+            legacy['k_prune'] = p_arch['k']
+        if 'v' in p_arch:
+            legacy['v_prune'] = p_arch['v']
+
+        return legacy
     
     # def validate_arch(self, arch):
     #     assert all([l in self.config['linear'] for l in list(arch.keys())]), f'{list(arch.keys())} are invalid'

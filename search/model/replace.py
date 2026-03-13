@@ -8,15 +8,18 @@ from .generation import convert_generation
 
 def replace_kv_cache(model,
                     tokenizer,
-                    method=['kivi'],
+                    method='kivi',
                     n_block=-1,
                     k_quant_scheme='channel',
                     v_quant_scheme='token',
                     residual_length=128,
                     packing=False,
-                    quant_kv_output=False):
-                    
-    if 'hqq' in method:
+                    quant_kv_output=False,
+                    k_pruning_ratio=0.0,
+                    v_pruning_ratio=0.0):
+    
+    methods = method if isinstance(method, list) else [method]
+    if 'hqq' in methods:
         model.config.cache_implementation = 'HQQ'
         model.generation_config.cache_implementation = "quantized"
         model.generation_config.cache_config = {
@@ -30,7 +33,7 @@ def replace_kv_cache(model,
             'v_quant_scheme': v_quant_scheme,
             'residual_length': residual_length,
         }
-    elif 'kivi' in method:
+    else:
         model.config.kivi_config = KIVICacheConfig(
             k_bits=[16] * n_block,
             v_bits=[16] * n_block,
@@ -41,28 +44,23 @@ def replace_kv_cache(model,
             residual_length=residual_length,
             packing=packing,
         )
-        # Store kv_method as list for downstream use (e.g. generation)
-        model.config.kv_method = method
-        if "think" in method:
-            print(f'ThinK KiVi model')
-            if isinstance(model, LlamaForCausalLM):
-                from .llama_kivi_think import convert_model_think_kivi
-                convert_model_think_kivi(model, method)
-            else:
-                raise NotImplementedError(f"Think_kivi not implemented for {model.__class__}")
+        # ThinK options (stored in config for cache/attention path)
+        model.config.kv_method = methods
+        model.config.kivi_config.enable_think = ('think' in methods)
+        model.config.kivi_config.k_pruning_ratio = [k_pruning_ratio] * n_block
+        model.config.kivi_config.v_pruning_ratio = [v_pruning_ratio] * n_block
+
+        if isinstance(model, Qwen2ForCausalLM):
+            from .qwen2_kivi import convert_model_kivi
+            convert_model_kivi(model)
+        elif isinstance(model, LlamaForCausalLM):
+            from .llama_kivi import convert_model_kivi
+            convert_model_kivi(model)
+        elif isinstance(model, MistralForCausalLM):
+            from .mistral_kivi import convert_model_kivi
+            convert_model_kivi(model)
         else:
-            print(f'KiVi model')
-            if isinstance(model, Qwen2ForCausalLM):
-                from .qwen2_kivi import convert_model_kivi
-                convert_model_kivi(model)
-            elif isinstance(model, LlamaForCausalLM):
-                from .llama_kivi import convert_model_kivi
-                convert_model_kivi(model)
-            elif isinstance(model, MistralForCausalLM):
-                from .mistral_kivi import convert_model_kivi
-                convert_model_kivi(model)
-            else:
-                raise NotImplementedError(f"Unsupported model: {model.__class__}")
+            raise NotImplementedError(f"Unsupported model: {model.__class__}")
         # model.config.use_cache = use_cache
         model.config.quant_kv_output = quant_kv_output
         convert_generation(model.config)
@@ -82,7 +80,7 @@ def set_cache_config(model,
                     packing=False,
                     quant_kv_output=False):
     
-    if 'hqq' in method:
+    if method == 'hqq':
         model.config.cache_implementation = 'HQQ'
         model.generation_config.cache_implementation = "quantized"
         model.generation_config.cache_config = {
@@ -96,7 +94,7 @@ def set_cache_config(model,
             'v_quant_scheme': v_quant_scheme,
             'residual_length': residual_length,
         }
-    elif 'kivi' in method:
+    elif method == 'kivi':
         model.config.kivi_config = KIVICacheConfig(
             k_bits=[16] * n_block,
             v_bits=[16] * n_block,

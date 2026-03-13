@@ -41,10 +41,10 @@ W_GROUP_SIZE=128
 
 # KV_METHOD="hqq"
 # KV_METHOD_TEXT="hqq"
-KV_METHOD="kivi"
-KV_METHOD_TEXT="kivi"
-# KV_METHOD="kivi think"
-# KV_METHOD_TEXT="kivi_think"
+# KV_METHOD="kivi"
+# KV_METHOD_TEXT="kivi"
+KV_METHOD="kivi think"
+KV_METHOD_TEXT="kivi_think"
 # KV_METHOD="fp16"
 # KV_METHOD_TEXT="fp16"
 
@@ -70,11 +70,23 @@ K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
 # PRUNING_RATIO=1.0
-PRUNING_RATIO=0.76
+# PRUNING_RATIO=0.76
 # PRUNING_RATIO=0.7
 # PRUNING_RATIO=0.69
 # PRUNING_RATIO=0.66
-# PRUNING_RATIO=0.3
+
+# K_PRUNING_RATIO=0.3
+# V_PRUNING_RATIO=0
+
+# K_PRUNING_RATIO=0
+# V_PRUNING_RATIO=0
+# K_PRUNING_RATIO=0.3
+# V_PRUNING_RATIO=0.3
+# K_PRUNING_RATIO=0.4
+# V_PRUNING_RATIO=0.4
+K_PRUNING_RATIO=0.5
+V_PRUNING_RATIO=0.5
+
 # PRUNING_RATIO=0.4
 # PRUNING_RATIO=0.5
 
@@ -138,7 +150,8 @@ SAVE=save/result/${TODAY}_test
 LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONGBENCH_CONFIG=utils/longbench_config
 
-RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
+# RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
+RULER_TASK="niah_single_3"
 # RULER_TASK="niah_single_1"
 RULER_YAML_PATH=utils/ruler_utils
 # RULER_LENGTH=4096
@@ -148,6 +161,7 @@ RULER_LENGTH=16384
 # RULER_LENGTH=131072
 
 # RULER_SAMPLE=1
+# RULER_SAMPLE=5
 RULER_SAMPLE=50
 RULER_BATCH_SIZE=1
 RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs
@@ -194,6 +208,8 @@ ARGS="
 --v_group_size ${KV_GROUP_SIZE} \
 --k_quant_scheme ${K_QUANT_SCHEME} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
+--k_pruning_ratio ${K_PRUNING_RATIO} \
+--v_pruning_ratio ${V_PRUNING_RATIO} \
 -n ${N} \
 --save ${SAVE} \
 --clip_asym \
@@ -204,15 +220,16 @@ ARGS="
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
 --seed ${SEED} \
---pruning_ratio ${PRUNING_RATIO} \
 --ruler \
 --ruler_task ${RULER_TASK} \
 --ruler_yaml_path ${RULER_YAML_PATH} \
 --ruler_result_path ${RULER_RESULT_PATH} \
 --ruler_batch_size ${RULER_BATCH_SIZE} \
 --ruler_sample ${RULER_SAMPLE} \
---ruler_length ${RULER_LENGTH}
+--ruler_length ${RULER_LENGTH} \
+--ruler_task ${RULER_TASK} \
 "
+# --packing \
 # --datasets ${DATASETS} \
 # --zeroshot \
 # --tasks ${TASKS} \

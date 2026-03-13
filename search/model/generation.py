@@ -148,7 +148,7 @@ def convert_generation(model_config):
         else:
             kv_method = getattr(self.config, "kv_method", [])
             use_think = "think" in kv_method
-            print(f'kv_method: {kv_method}, use_think: {use_think}')
+            # print(f'kv_method: {kv_method}, use_think: {use_think}')
             if model_config.kivi_config.packing:
                 cache_cls = ThinkKIVIDynamicCache if use_think else KIVIDynamicCache
             else:

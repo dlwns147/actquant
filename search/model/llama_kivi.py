@@ -35,7 +35,7 @@ from transformers.processing_utils import Unpack
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.cache_utils import Cache, DynamicCache
 
-from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache
+from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache, _think_key_pruner_query_driven
 from model.kivi_utils import (
     is_prefill,
     get_past_key_values,
@@ -69,11 +69,42 @@ def replace_attention_forward(self):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        # ThinK pruning for packing=False (align with ThinK_kivi):
+        # - Prefill: use full Q and full K for attention (do NOT mask in forward).
+        # - Only compute keep_mask and pass to cache; cache applies mask when storing so decode sees masked K.
+        keep_mask_for_cache = None  # for KIVIFakeCache prefill store + lazy_update (packing=False)
+        kivi_config = getattr(self.config, "kivi_config", None)
+        if (
+            kivi_config is not None
+            and getattr(kivi_config, "enable_think", False)
+            and not getattr(kivi_config, "packing", False)
+        ):
+            try:
+                ratio = float(kivi_config.k_pruning_ratio[self.layer_idx])
+            except Exception:
+                ratio = 0.0
+            residual_length = getattr(kivi_config, "residual_length", 0) or 0
+            if ratio is not None and ratio > 0.0 and residual_length >= 0:
+                bsz, n_kv, seqlen, dim = key_states.shape
+                old_len = max(0, seqlen - residual_length) if residual_length > 0 else seqlen
+                if old_len > 0:
+                    key_old = key_states[:, :, :old_len, :]
+                    with torch.no_grad():
+                        _, keep_mask = _think_key_pruner_query_driven(
+                            key_old, query_states, ratio=ratio
+                        )
+                    keep_mask_for_cache = keep_mask  # cache applies this when storing (prefill + lazy_update)
+
         key_states, value_states = quant_kv_output(self, key_states, value_states, attention_mask)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            # ThinK: allow cache to use query_states for query-driven pruning during prefill packing
+            if hasattr(self.config, "kivi_config") and getattr(self.config.kivi_config, "enable_think", False):
+                cache_kwargs["query_states"] = query_states
+                if keep_mask_for_cache is not None:
+                    cache_kwargs["key_keep_mask"] = keep_mask_for_cache
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         is_prefill, attention_interface = attention_forward(self, past_key_value)

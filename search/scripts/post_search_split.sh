@@ -241,8 +241,8 @@ PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 # RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
 RULER_TASK="niah_single_1"
 RULER_YAML_PATH=utils/ruler_utils
-RULER_LENGTH=4096
-# RULER_LENGTH=16384
+# RULER_LENGTH=4096
+RULER_LENGTH=16384
 # RULER_LENGTH=65536
 # RULER_LENGTH=128000
 # RULER_LENGTH=131072
@@ -298,12 +298,19 @@ ARGS="--gpu_id ${DEVICES} \
 --save ${SAVE} \
 --quant_model_paths ${QMODEL_PATHS} \
 --kv_scale ${KV_SCALE} \
---datasets ${DATASETS} \
---seqlen ${SEQLEN} \
---min_seqlen ${MIN_SEQLEN} \
---data_batch_size ${DATA_BATCH_SIZE} \
---stride ${STRIDE}
+--ruler \
+--ruler_task ${RULER_TASK} \
+--ruler_yaml_path ${RULER_YAML_PATH} \
+--ruler_result_path ${RULER_RESULT_PATH} \
+--ruler_batch_size ${RULER_BATCH_SIZE} \
+--ruler_sample ${RULER_SAMPLE} \
+--ruler_length ${RULER_LENGTH}
 "
+# --datasets ${DATASETS} \
+# --seqlen ${SEQLEN} \
+# --min_seqlen ${MIN_SEQLEN} \
+# --data_batch_size ${DATA_BATCH_SIZE} \
+# --stride ${STRIDE}
 # --last_tokens ${LAST_TOKENS}
 
 
@@ -327,13 +334,6 @@ ARGS="--gpu_id ${DEVICES} \
 # --longbench \
 # --longbench_result_path ${LONGBENCH_RESULT_PATH} \
 # --longbench_config ${LONGBENCH_CONFIG} \
-# --ruler \
-# --ruler_task ${RULER_TASK} \
-# --ruler_yaml_path ${RULER_YAML_PATH} \
-# --ruler_result_path ${RULER_RESULT_PATH} \
-# --ruler_batch_size ${RULER_BATCH_SIZE} \
-# --ruler_sample ${RULER_SAMPLE} \
-# --ruler_length ${RULER_LENGTH}
 
 
 if [ ${USE_KEY_TOKEN} == 'True' ]; then

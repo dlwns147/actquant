@@ -156,6 +156,17 @@ def compute_params(arch, config):
     return params / total_params
 
 def get_net_info(arch, config, group_size, n_token=0, residual_length=0):
+    # Support new schema: {'q': {...bits...}, 'p': {...pruning...}}
+    if isinstance(arch, dict) and 'q' in arch:
+        q_arch = arch.get('q', {})
+        p_arch = arch.get('p', {})
+        legacy = dict(q_arch)
+        if 'k' in p_arch:
+            legacy['k_prune'] = p_arch['k']
+        if 'v' in p_arch:
+            legacy['v_prune'] = p_arch['v']
+        arch = legacy
+
     net_info = {}
     net_info['wbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='w') if 'w' in arch else 0
     # net_info['abits'] = compute_bits(arch, config, 'activation') if 'activation' in arch else 0

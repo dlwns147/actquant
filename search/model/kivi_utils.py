@@ -9,6 +9,14 @@ from quant.kivi_utils.new_pack import fake_quant, unpack_and_dequant_kcache, unp
 from transformers.models.llama.modeling_llama import eager_attention_forward
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
+def _repeat_kv_bool_mask(mask: torch.Tensor, n_rep: int) -> torch.Tensor:
+    # mask: (B, n_kv, D) -> (B, n_h, D)
+    if mask is None or n_rep == 1:
+        return mask
+    b, n_kv, d = mask.shape
+    mask = mask[:, :, None, :].expand(b, n_kv, n_rep, d)
+    return mask.reshape(b, n_kv * n_rep, d)
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -26,7 +34,10 @@ def is_prefill(past_key_value: Optional[KIVIDynamicCache], layer_idx: int):
     return False
 
 def get_past_key_values(module):
-    past_key_values = KIVIDynamicCache(module.config.kivi_config) if module.config.kivi_config.packing else KIVIFakeCache(module.config.kivi_config)
+    kivi_config = module.config.kivi_config
+    # packing=True: 실제 KIVI GEMV 경로(양자화/패킹) → KIVIDynamicCache
+    # packing=False: 패킹 없이 표준 attention + (필요시) ThinK 마스킹만 사용 → KIVIFakeCache
+    past_key_values = KIVIDynamicCache(kivi_config) if kivi_config.packing else KIVIFakeCache(kivi_config)
     return past_key_values
 
 def quant_kv_output(module, key_states, value_states, attention_mask):
@@ -101,11 +112,26 @@ def forward_for_kivi_gemv(
     value_states_full = past_key_value.value_states_full_cache[module.layer_idx]
     value_scale = past_key_value.value_scale_cache[module.layer_idx]
     value_mn = past_key_value.value_mn_cache[module.layer_idx]
+    key_keep_mask = getattr(past_key_value, "key_keep_mask_cache", [None])[module.layer_idx] if hasattr(past_key_value, "key_keep_mask_cache") else None
 
     # calculate quantized query-key attention
     if key_states_quant_trans is not None:
-        att_qkquant = cuda_bmm_fA_qB_outer(kivi_config.k_group_size[module.layer_idx], query_states, key_states_quant_trans, 
-                        key_scale_trans, key_mn_trans, kivi_config.k_bits[module.layer_idx])
+        # ThinK: if key_keep_mask exists, prune query dims to match packed K (head_dim reduced)
+        qs = query_states
+        if key_keep_mask is not None:
+            # key_keep_mask is (B, n_kv, D). Expand to attention heads.
+            mask_h = _repeat_kv_bool_mask(key_keep_mask, module.num_key_value_groups)
+            # select kept dims along last axis
+            qs = qs[mask_h.unsqueeze(2)].view(qs.shape[0], qs.shape[1], qs.shape[2], -1)
+
+        att_qkquant = cuda_bmm_fA_qB_outer(
+            kivi_config.k_group_size[module.layer_idx],
+            qs,
+            key_states_quant_trans,
+            key_scale_trans,
+            key_mn_trans,
+            kivi_config.k_bits[module.layer_idx],
+        )
         # att_qkquant = triton_bmm_fA_qB_outer(module.k_group_size, query_states, key_states_quant_trans, 
         #                 key_scale_trans, key_mn_trans, module.k_bits)
     else:

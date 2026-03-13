@@ -210,3 +210,5 @@ CMakeFiles
 *.egg
 Makefile
 *.nsys-rep
+
+*.pdf

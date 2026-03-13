@@ -110,9 +110,11 @@ def main(args):
         data_batch_size=args.data_batch_size,
         device_map=device_map,
         bits=bits,
-        pruning_ratio=args.pruning_ratio,
+        k_pruning_ratio=args.k_pruning_ratio,
+        v_pruning_ratio=args.v_pruning_ratio,
         dtype=dtype,
         group_size=group_size,
+        packing=args.packing,
         residual_length=args.residual_length,
         # use_flash=args.use_flash,
         k_quant_scheme=args.k_quant_scheme,
@@ -126,16 +128,20 @@ def main(args):
         last_tokens=args.last_tokens
     )
 
-    arch = dict()
-    # arch['w'] = 
-    arch = {'w': {linear: [args.w_bits] * config['n_block'] for linear in config['linear']}}
-    if args.k_bits is not None:
-        arch['k'] = [[args.k_bits, args.k_group_size]] * config['n_block']
-    if args.v_bits is not None:
-        arch['v'] = [[args.v_bits, args.v_group_size]] * config['n_block']
-    if args.pruning_ratio is not None:
-        arch['k_prune'] = [args.pruning_ratio] * config['n_block']
-        arch['v_prune'] = [args.pruning_ratio] * config['n_block']
+    # New canonical arch schema:
+    # arch = {'q': {'w': [], 'k': [], 'v': []}, 'p': {'k': [], 'v': []}}
+    # - q.w: per-layer dict of linear_group -> bits
+    # - q.k/q.v: per-layer [bits, group_size]
+    # - p.k/p.v: per-layer pruning ratios
+    arch = {'q': {'w': [], 'k': [], 'v': []}, 'p': {'k': [], 'v': []}}
+    for _ in range(config['n_block']):
+        arch['q']['w'].append({linear: args.w_bits for linear in config['linear']})
+        if args.k_bits is not None:
+            arch['q']['k'].append([args.k_bits, args.k_group_size])
+        if args.v_bits is not None:
+            arch['q']['v'].append([args.v_bits, args.v_group_size])
+        arch['p']['k'].append(args.k_pruning_ratio)
+        arch['p']['v'].append(args.v_pruning_ratio)
     accelerator.print(arch)
     
     model = evaluator.sample(arch)
@@ -378,8 +384,11 @@ if __name__ == '__main__':
                         help='')
     # parser.add_argument('--use_flash', action='store_true', help='')
 
-    parser.add_argument('--pruning_ratio', type=float, default=1.0, 
-                        help='pruning ratio for ThinK')
+    parser.add_argument('--k_pruning_ratio', type=float, default=0.0,
+                        help='Key pruning ratio for ThinK (0.0 disables pruning)')
+    parser.add_argument('--v_pruning_ratio', type=float, default=0.0,
+                        help='Value pruning ratio for ThinK (reserved; not applied yet)')
+    parser.add_argument('--packing', action='store_true', help='')
 
     parser.add_argument('--clip_asym', action='store_true', help='')
     parser.add_argument('--comp_obj', type=str, nargs='+', default=['bits'], 
