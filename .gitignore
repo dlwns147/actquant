@@ -212,3 +212,6 @@ Makefile
 *.nsys-rep
 
 *.pdf
+
+benchmark_proxy/
+longbench_kivi_result/
