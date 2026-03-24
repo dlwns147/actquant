@@ -53,15 +53,20 @@ RESIDUAL_LENGTH=128
 
 # N_TOKEN_LIST=(1024 131072 1048576)
 # N_TOKEN_LIST=(16384 32768 65536 131072)
-N_TOKEN_LIST=(65536)
+N_TOKEN_LIST=(16384)
 
-# W_BITS_LIST=(3)
-# W_GROUP_SIZE=128
-W_BITS_LIST=(4 3)
-W_GROUP_SIZE=-1
+# W_BITS_LIST=(3 4)
+W_BITS_LIST=(4)
+W_GROUP_SIZE=128
+# W_BITS_LIST=(4 3)
+# W_GROUP_SIZE=-1
 
-KV_BITS_LIST=(4 3 2)
+KV_BITS_LIST=(2 3 4)
 KV_GROUP_SIZE=128
+# KV_BITS_LIST=(4 3 2)
+# KV_GROUP_SIZE=128
+
+KV_DIM_LIST=(0 64)
 
 for W_BITS in ${W_BITS_LIST[@]}
 do
@@ -69,18 +74,23 @@ do
     do
         for N_TOKEN in ${N_TOKEN_LIST[@]}
         do
-            python compute_mem.py \
-            --model_path ${MODEL_PATH} \
-            --model_name ${MODEL_NAME} \
-            --config ${CONFIG} \
-            --w_bits ${W_BITS} \
-            --w_group_size ${W_GROUP_SIZE} \
-            --residual_length ${RESIDUAL_LENGTH} \
-            --k_bits ${KV_BITS} \
-            --v_bits ${KV_BITS} \
-            --k_group_size ${KV_GROUP_SIZE} \
-            --v_group_size ${KV_GROUP_SIZE} \
-            --n_token ${N_TOKEN}
+            for KV_DIM in ${KV_DIM_LIST[@]}
+            do
+                python compute_mem.py \
+                    --model_path ${MODEL_PATH} \
+                    --model_name ${MODEL_NAME} \
+                    --config ${CONFIG} \
+                    --w_bits ${W_BITS} \
+                    --w_group_size ${W_GROUP_SIZE} \
+                    --residual_length ${RESIDUAL_LENGTH} \
+                    --k_bits ${KV_BITS} \
+                    --v_bits ${KV_BITS} \
+                    --k_group_size ${KV_GROUP_SIZE} \
+                    --v_group_size ${KV_GROUP_SIZE} \
+                    --n_token ${N_TOKEN} \
+                    --k_dim ${KV_DIM} \
+                    # --v_dim ${KV_DIM}
+            done
         done
     done
 done

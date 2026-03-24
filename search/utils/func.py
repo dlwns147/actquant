@@ -33,12 +33,14 @@ def get_correlation(prediction, target):
 
 
 def compute_bits(arch, config, group_size, target='w'):
+    # arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
     memory_usage = 0
     if target == 'w':
         n_param = 0
         w_group_size = group_size[target]
-        for linear, linear_bits in arch[target].items():
+        for linear in config['linear']:
             out_dim, in_dim = map(int, config['linear_shape'][linear])
+            linear_bits = arch['q']['w'][linear]
             n_param += out_dim * in_dim * len(linear_bits)
             linear_group_size = in_dim if w_group_size == -1 else w_group_size
             assert in_dim % linear_group_size == 0
@@ -47,7 +49,6 @@ def compute_bits(arch, config, group_size, target='w'):
                     memory_usage += out_dim * in_dim * bits
                     if bits < 16:
                         memory_usage += (in_dim // linear_group_size) * out_dim * 32 # scale + zero point
-                        
             elif type(linear_bits[0]) == list and len(linear_bits[0]) == 2:
                 for bits, n_outlier_column in linear_bits:
                     memory_usage += out_dim * in_dim * bits
@@ -56,89 +57,75 @@ def compute_bits(arch, config, group_size, target='w'):
                     memory_usage += out_dim * n_outlier_column * 16
             else:
                 raise NotImplementedError(type(linear_bits[0]))
-                        
-        # return memory_usage / config['model_numel']
         return memory_usage / n_param
-    
-    elif target == 'k' or target == 'v':
-        bits_list, group_size_list = [x[0] for x in arch[target]], [x[1] for x in arch[target]]
-        return np.mean(bits_list).item() + (np.mean(32 / np.array(group_size_list)).item() if 0 not in group_size_list else 0)
-        if len(group_size[target]) == 1:
-            # c_group_size = group_size[target]
-            # if c_group_size == -1:
-            #     if target == 'k':
-            #         c_group_size = config['linear_shape'][config['k_linear']][0]
-            #     else:
-            #         c_group_size = config['linear_shape'][config['v_linear']][0]
-            return np.mean(arch[target]).item() + (32 / group_size[target][0][0])
-        elif len(group_size[target]) > 1:
-            bits_list, group_size_list = [x[0] for x in arch[target]], [x[1] for x in arch[target]]
-            return np.mean(bits_list).item() + np.mean(32 / np.array(group_size_list)).item()
-        else:
-            raise NotImplementedError
 
-    elif target =='kv':
-        k_bits_list, k_group_size_list = [x[0] for x in arch['k']], [x[1] for x in arch['k']]
-        v_bits_list, v_group_size_list = [x[0] for x in arch['v']], [x[1] for x in arch['v']]
-        return np.mean(k_bits_list + v_bits_list).item() + (np.mean(32 / np.array(k_group_size_list + v_group_size_list)).item() if 0 not in k_group_size_list and 0 not in v_group_size_list else 0)
-        if len(group_size['k']) == 1:
-            # k_group_size = config['linear_shape'][config['k_linear']][0] if group_size['k'] == -1 else group_size['k']
-            # v_group_size = config['linear_shape'][config['v_linear']][0] if group_size['v'] == -1 else group_size['v']
-            return np.mean(arch['k'] + arch['v']).item() + np.mean(32 / np.array([group_size['k'][0], group_size['v'][0]])).item() # (16 / group_size['k']) + (16 / v_group_size)
-            
-        elif len(group_size['k']) > 1:
-            k_bits_list, k_group_size_list = [x[0] for x in arch['k']], [x[1] for x in arch['k']]
-            v_bits_list, v_group_size_list = [x[0] for x in arch['v']], [x[1] for x in arch['v']]
-            return np.mean(k_bits_list + v_bits_list).item() + np.mean(32 / np.array(k_group_size_list + v_group_size_list)).item()
-        else:
-            raise NotImplementedError
-    
+    elif target == 'k' or target == 'v':
+        kv_list = arch['q'][target]
+        prune_list = arch.get('p', {}).get(target, [0] * len(kv_list))
+        head_dim = int(config['head_dim'])
+        effective_bits = []
+        for (bits, gs), prune_dim in zip(kv_list, prune_list):
+            scale_overhead = (32 / gs) if gs != 0 else 0
+            effective_bits.append((bits + scale_overhead) * (1 - prune_dim / head_dim))
+        return np.mean(effective_bits).item()
+
+    elif target == 'kv':
+        k_list = arch['q']['k']
+        v_list = arch['q']['v']
+        p_arch = arch.get('p', {})
+        k_prune_list = p_arch.get('k', [0] * len(k_list))
+        v_prune_list = p_arch.get('v', [0] * len(v_list))
+        head_dim = int(config['head_dim'])
+        effective_bits = []
+        for (bits, gs), prune_dim in zip(k_list + v_list, k_prune_list + v_prune_list):
+            scale_overhead = (32 / gs) if gs != 0 else 0
+            effective_bits.append((bits + scale_overhead) * (1 - prune_dim / head_dim))
+        return np.mean(effective_bits).item()
+
     else:
         raise NotImplementedError
 
 def compute_memory(arch, config, group_size, n_token=0, residual_length=0):
+    # arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
+    w_group_size = group_size['w']
     weight_memory = 0
-    for linear, linear_bits in arch['w'].items():
-        w_group_size = group_size['w']
+    for linear in config['linear']:
         out_dim, in_dim = map(int, config['linear_shape'][linear])
         linear_group_size = in_dim if w_group_size == -1 else w_group_size
         assert in_dim % linear_group_size == 0
+        linear_bits = arch['q']['w'][linear]
         if type(linear_bits[0]) == int:
             for bits in linear_bits:
                 weight_memory += out_dim * in_dim * bits // 8
                 if bits < 16:
                     weight_memory += (in_dim // linear_group_size) * out_dim * 4 # scale + zero point
-                    
         elif type(linear_bits[0]) == list and len(linear_bits[0]) == 2:
             for bits, n_outlier_column in linear_bits:
                 weight_memory += out_dim * in_dim * bits // 8
                 if bits < 16:
                     weight_memory += (in_dim // linear_group_size) * out_dim * 4 # scale + zero point
                 weight_memory += out_dim * n_outlier_column * 2
-        
         else:
             raise NotImplementedError(type(linear_bits[0]))
-        # for bits in linear_bits:
-        #     weight_memory += out_dim * in_dim * bits // 8
-        #     if bits < 16:
-        #         weight_memory += (in_dim // linear_group_size) * out_dim * 4 # scale + zero point
-                
+
     weight_memory += int(config['vocab_size']) * int(config['hidden_size']) * 4 # lm_head + embed_token
     weight_memory += int(config['n_norm']) * int(config['hidden_size']) * 2 # norms
     weight_memory += int(config['max_position_embeddings']) * int(config['head_dim']) * 2 # positional embedding
-    
+
+    head_dim = int(config['head_dim'])
+    p_arch = arch.get('p', {})
     cache_memory = 0
     for target in ['k', 'v']:
         kv_dim = int(config['linear_shape'][config[f'{target}_linear']][0])
-        for bits, group_size in arch[target]:
-            cache_memory += kv_dim * bits // 8
+        n_kv_heads = kv_dim // head_dim
+        prune_list = p_arch.get(target, [0] * len(arch['q'][target]))
+        for (bits, gs), prune_dim in zip(arch['q'][target], prune_list):
+            effective_kv_dim = n_kv_heads * (head_dim - prune_dim)
+            layer_mem = effective_kv_dim * bits / 8
             if bits < 16:
-                assert kv_dim % group_size == 0
-                cache_memory += (kv_dim // group_size) * 4 # scale + zero point
-    cache_memory *= n_token
-    # print(f'arch: {arch}')
-    # print(f'weight_memory: {weight_memory}, cache_memory: {cache_memory}')
-    
+                layer_mem += (effective_kv_dim / gs) * 4 # scale + zero point
+            cache_memory += layer_mem * n_token
+
     return weight_memory + cache_memory
 
 
@@ -156,25 +143,20 @@ def compute_params(arch, config):
     return params / total_params
 
 def get_net_info(arch, config, group_size, n_token=0, residual_length=0):
-    # Support new schema: {'q': {...bits...}, 'p': {...pruning...}}
-    if isinstance(arch, dict) and 'q' in arch:
-        q_arch = arch.get('q', {})
-        p_arch = arch.get('p', {})
-        legacy = dict(q_arch)
-        if 'k' in p_arch:
-            legacy['k_prune'] = p_arch['k']
-        if 'v' in p_arch:
-            legacy['v_prune'] = p_arch['v']
-        arch = legacy
-
+    # arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
+    q_arch = arch.get('q', {})
+    p_arch = arch.get('p', {})
     net_info = {}
-    net_info['wbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='w') if 'w' in arch else 0
-    # net_info['abits'] = compute_bits(arch, config, 'activation') if 'activation' in arch else 0
-    net_info['kbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='k') if 'k' in arch else 0
-    net_info['vbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='v') if 'v' in arch else 0
-    net_info['kvbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='kv') if 'v' in arch and 'k' in arch else 0
-    net_info['memory'] = compute_memory(arch=arch, config=config, group_size=group_size, n_token=n_token, residual_length=residual_length) if 'w' in arch and 'k' in arch and 'v' in arch else 0
-    
+    net_info['wbits']  = compute_bits(arch=arch, config=config, group_size=group_size, target='w')  if 'w' in q_arch else 0
+    net_info['kbits']  = compute_bits(arch=arch, config=config, group_size=group_size, target='k')  if 'k' in q_arch else 0
+    net_info['vbits']  = compute_bits(arch=arch, config=config, group_size=group_size, target='v')  if 'v' in q_arch else 0
+    net_info['kvbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='kv') if 'k' in q_arch and 'v' in q_arch else 0
+    net_info['memory'] = compute_memory(arch=arch, config=config, group_size=group_size, n_token=n_token, residual_length=residual_length) if 'w' in q_arch and 'k' in q_arch and 'v' in q_arch else 0
+    head_dim = int(config['head_dim'])
+    net_info['kdim']  = float(np.mean([head_dim - d for d in p_arch['k']])) if 'k' in p_arch else float(head_dim)
+    net_info['vdim']  = float(np.mean([head_dim - d for d in p_arch['v']])) if 'v' in p_arch else float(head_dim)
+    kv_dims = [head_dim - d for d in p_arch.get('k', [])] + [head_dim - d for d in p_arch.get('v', [])]
+    net_info['kvdim'] = float(np.mean(kv_dims)) if kv_dims else float(head_dim)
     return net_info
 
 def getsubattr(obj, attr):

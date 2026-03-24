@@ -188,7 +188,7 @@ def run_awq(
             layer,
             layer_kwargs,
             input_feat=input_feat,
-            module_bit={proj : int(arch['w'][proj][i]) for proj in named_linears},
+            module_bit={proj : int(arch[proj][i]) for proj in named_linears},
             q_config=q_config,
             do_owq=do_owq,
             outlier=outlier_linear,
@@ -205,7 +205,7 @@ def run_awq(
             clip_list = auto_clip_block_asym(
                 layer,
                 input_feat=input_feat,
-                module_bit={proj : int(arch['w'][proj][i]) for proj in named_linears},
+                module_bit={proj : int(arch[proj][i]) for proj in named_linears},
                 q_config=q_config,
                 outlier=outlier_linear,
             )
@@ -214,7 +214,7 @@ def run_awq(
             clip_list = auto_clip_block_sym(
                 layer,
                 input_feat=input_feat,
-                module_bit={proj : int(arch['w'][proj][i]) for proj in named_linears},
+                module_bit={proj : int(arch[proj][i]) for proj in named_linears},
                 q_config=q_config,
             )
             apply_clip_sym(layer, clip_list)
@@ -246,18 +246,18 @@ def apply_awq(model, awq_results, q_config, arch, clip_asym, do_owq, outlier):
         named_linears = {name: m for name, m in layer.named_modules() if isinstance(m, nn.Linear)}
         for n, m in named_linears.items():
             key = append_str_prefix(n, get_op_name(model, layer) + ".")
-            if do_owq and is_owq(arch['w'][n][i]) and key in outlier:
+            if do_owq and is_owq(arch[n][i]) and key in outlier:
                 # assert outlier is not None, "outlier is not provided"
                 # if key in outlier:
                 orig = m.weight.data[:, outlier[key]].detach().clone()
                 m.weight.data[:, outlier[key]] = 0
 
             m.weight.data = pseudo_quantize_tensor(
-                m.weight.data, n_bit=int(arch['w'][n][i]),
+                m.weight.data, n_bit=int(arch[n][i]),
                 **q_config
             )
 
-            if do_owq and is_owq(arch['w'][n][i]) and key in outlier:
+            if do_owq and is_owq(arch[n][i]) and key in outlier:
                 m.weight.data[:, outlier[key]] = orig
                 del orig
                 torch.cuda.empty_cache()

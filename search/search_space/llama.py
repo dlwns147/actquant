@@ -208,14 +208,14 @@ class LlamaSearchSpace:
             n_doe -= 1
             data.append(self.sample(w=[[max(getattr(self, f'{l.split(".")[-1]}_option'))] for l in self.config['linear']], k=[min(self.k_option)], v=[min(self.v_option)])[0])
             n_doe -= 1
-        
+
         # for w_bits in self.q_proj_option:
         #     data.append(self.sample(w=[[w_bits]] * self.n_linear, k=[min(self.k_option)], v=[min(self.v_option)])[0])
         #     data.append(self.sample(w=[[w_bits]] * self.n_linear, k=[max(self.k_option)], v=[max(self.v_option)])[0])
         #     data.append(self.sample(w=[[w_bits]] * self.n_linear)[0])
         #     n_doe -= 3
         
-        data.extend(self.sample(n_samples=n_doe, pool=pool))
+        data.extend(self.sample(n_samples=n_doe, pool=pool + data))
         return data
 
     def encode(self, arch):
@@ -494,7 +494,7 @@ class LlamaGroupSizeSearchSpace:
         #     data.append(self.sample(w=[[w_bits]] * self.n_linear)[0])
         #     n_doe -= 3
         
-        data.extend(self.sample(n_samples=n_doe, pool=pool))
+        data.extend(self.sample(n_samples=n_doe, pool=pool + data))
         return data
 
     def encode(self, arch):
@@ -780,7 +780,7 @@ class LlamaGroupSizeQEFTSearchSpace:
         #     data.append(self.sample(w=[[w_bits]] * self.n_linear)[0])
         #     n_doe -= 3
         
-        data.extend(self.sample(n_samples=n_doe, pool=pool))
+        data.extend(self.sample(n_samples=n_doe, pool=pool + data))
         return data
 
     def encode(self, arch):

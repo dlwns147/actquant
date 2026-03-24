@@ -80,22 +80,22 @@ def replace_attention_forward(self):
             and not getattr(kivi_config, "packing", False)
         ):
             try:
-                ratio = float(kivi_config.k_pruning_ratio[self.layer_idx])
+                pruning_dim = int(kivi_config.k_pruning_dim[self.layer_idx])
             except Exception:
-                ratio = 0.0
+                pruning_dim = 0
             residual_length = getattr(kivi_config, "residual_length", 0) or 0
-            if ratio is not None and ratio > 0.0 and residual_length >= 0:
+            if pruning_dim > 0 and residual_length >= 0:
                 bsz, n_kv, seqlen, dim = key_states.shape
                 old_len = max(0, seqlen - residual_length) if residual_length > 0 else seqlen
                 if old_len > 0:
                     key_old = key_states[:, :, :old_len, :]
                     with torch.no_grad():
                         _, keep_mask = _think_key_pruner_query_driven(
-                            key_old, query_states, ratio=ratio
+                            key_old, query_states, pruning_dim=pruning_dim
                         )
                     keep_mask_for_cache = keep_mask  # cache applies this when storing (prefill + lazy_update)
 
-        key_states, value_states = quant_kv_output(self, key_states, value_states, attention_mask)
+        key_states, value_states = quant_kv_output(self, key_states, value_states, attention_mask, query_states=query_states)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache

@@ -119,7 +119,7 @@ def pseudo_quantize_model_weight(
         for n, m in named_linears.items():
             m.cuda()
             m.weight.data = pseudo_quantize_tensor(
-                m.weight.data, n_bit=int(arch['w'][n][i]), **q_config
+                m.weight.data, n_bit=int(arch[i][n]), **q_config
             )
             # m.cpu()
 

@@ -8,23 +8,24 @@ from transformers.configuration_utils import PretrainedConfig
 from quant.kivi_utils.new_pack import triton_quantize_and_pack_along_last_dim, fake_quant, unpack_and_dequant_kcache, unpack_and_dequant_vcache
 import math
 
-def _think_key_pruner_query_driven(kv_states: torch.Tensor, q_states: torch.Tensor, ratio: float):
+def _think_key_pruner_query_driven(kv_states: torch.Tensor, q_states: torch.Tensor, pruning_dim: int):
     """
     Query-driven key pruning (ThinK). Prunes along head_dim.
 
-    kv_states: (B, n_kv, L, D)
-    q_states:  (B, n_h,  L, D)
+    kv_states:   (B, n_kv, L, D)
+    q_states:    (B, n_h,  L, D)
+    pruning_dim: number of head_dim channels to prune (integer)
     Returns:
-      pruned_kv_states: (B, n_kv, L, D-k)
+      pruned_kv_states: (B, n_kv, L, D-pruning_dim)
       keep_mask: (B, n_kv, D) boolean mask of kept dims
     """
-    if ratio is None or ratio <= 0.0:
+    if pruning_dim is None or pruning_dim <= 0:
         keep_mask = torch.ones(kv_states.shape[0], kv_states.shape[1], kv_states.shape[3], dtype=torch.bool, device=kv_states.device)
         return kv_states, keep_mask
 
     bz, n_kv, seqlen, head_dim = kv_states.shape
     n_h = q_states.shape[1]
-    k = int(head_dim * ratio)
+    k = int(pruning_dim)
     if k <= 0 or k >= head_dim:
         keep_mask = torch.ones(bz, n_kv, head_dim, dtype=torch.bool, device=kv_states.device)
         return kv_states, keep_mask
@@ -107,8 +108,8 @@ class KIVICacheConfig(CacheConfig):
 
         # ThinK options (optional)
         self.enable_think = False
-        self.k_pruning_ratio: List[float] = [0.0] * len(k_bits)
-        self.v_pruning_ratio: List[float] = [0.0] * len(v_bits)
+        self.k_pruning_dim: List[int] = [0] * len(k_bits)
+        self.v_pruning_dim: List[int] = [0] * len(v_bits)
 
 
 class KIVIDynamicCache(DynamicCache):
@@ -140,6 +141,7 @@ class KIVIDynamicCache(DynamicCache):
         super().__init__()
 
         self.is_prefill = True
+        self._is_stride: bool = False
         self.kivi_config = cache_config
 
         self.key_states_quant_trans_cache: List[torch.Tensor] = []
@@ -155,6 +157,10 @@ class KIVIDynamicCache(DynamicCache):
 
         # for sageattention
         self.km: List[torch.Tensor] = []
+
+    @property
+    def is_stride(self) -> bool:
+        return self._is_stride
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -209,6 +215,7 @@ class KIVIDynamicCache(DynamicCache):
         # Update the number of seen tokens
         if layer_idx == 0:
             self.is_prefill = (len(self) <= layer_idx)
+            self._is_stride = (not self.is_prefill) and (key_states.shape[-2] > 1)
             self._seen_tokens += key_states.shape[-2]
 
         # prefill
@@ -232,9 +239,13 @@ class KIVIDynamicCache(DynamicCache):
             self.km.append(key_states.mean(dim=2).unsqueeze(2))
             key_states -= self.km[layer_idx]
             # key_states.sub_(self.km[layer_idx])
-            
+
             self._update_prefill(key_states, value_states, layer_idx, cache_kwargs=cache_kwargs)
-        # generation
+        # stride: non-prefill multi-token chunk
+        elif self._is_stride:
+            key_states -= self.km[layer_idx]
+            return self._update_stride(key_states, value_states, layer_idx)
+        # generation: single-token decoding
         else:
             # for sageattention
             key_states -= self.km[layer_idx]
@@ -339,12 +350,12 @@ class KIVIDynamicCache(DynamicCache):
             if getattr(self.kivi_config, "enable_think", False):
                 q_states = None if cache_kwargs is None else cache_kwargs.get("query_states", None)
                 if q_states is not None:
-                    ratio = 0.0
+                    pruning_dim = 0
                     try:
-                        ratio = float(self.kivi_config.k_pruning_ratio[layer_idx])
+                        pruning_dim = int(self.kivi_config.k_pruning_dim[layer_idx])
                     except Exception:
-                        ratio = 0.0
-                    key_states_quant, key_keep_mask = _think_key_pruner_query_driven(key_states_quant, q_states, ratio)
+                        pruning_dim = 0
+                    key_states_quant, key_keep_mask = _think_key_pruner_query_driven(key_states_quant, q_states, pruning_dim)
 
             key_states_quant_trans, key_scale_trans, key_mn_trans = triton_quantize_and_pack_along_last_dim(
                 key_states_quant.transpose(2, 3).contiguous(), self.kivi_config.k_group_size[layer_idx], self.kivi_config.k_bits[layer_idx]
@@ -383,11 +394,159 @@ class KIVIDynamicCache(DynamicCache):
             self.key_states_full_cache[layer_idx] = torch.cat([self.key_states_full_cache[layer_idx], key_states], dim=2)
         else:
             self.key_states_full_cache[layer_idx] = key_states
-        
+
         self.value_states_full_cache[layer_idx] = torch.cat([self.value_states_full_cache[layer_idx], value_states], dim=2)
+
+    def _update_stride(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Handle a multi-token stride chunk (non-prefill).
+
+        Merges the existing full-precision residual with the new stride tokens,
+        re-partitions into quantized and residual according to the residual_length
+        invariant, and returns the fully reconstructed K/V for standard attention.
+        """
+        cfg = self.kivi_config
+        residual_length = cfg.residual_length
+
+        # ── KEYS ─────────────────────────────────────────────────────────
+        if self.key_states_full_cache[layer_idx] is not None:
+            combined_key = torch.cat([self.key_states_full_cache[layer_idx], key_states], dim=2)
+        else:
+            combined_key = key_states
+
+        key_len = combined_key.shape[2]
+        rem = key_len % residual_length
+        if rem == 0:
+            key_to_quant = combined_key
+            new_key_full = None
+        elif key_len < residual_length:
+            key_to_quant = None
+            new_key_full = combined_key
+        else:
+            key_to_quant = combined_key[:, :, :-rem, :].contiguous()
+            new_key_full = combined_key[:, :, -rem:, :].contiguous()
+
+        if key_to_quant is not None:
+            assert key_to_quant.shape[2] % cfg.k_group_size[layer_idx] == 0, (
+                f"Stride key tokens ({key_to_quant.shape[2]}) must be divisible by "
+                f"k_group_size ({cfg.k_group_size[layer_idx]}). Adjust stride accordingly."
+            )
+            key_to_pack = key_to_quant
+            # ThinK: apply keep_mask to prune head dimensions before packing
+            if getattr(cfg, 'enable_think', False):
+                keep_mask = self.key_keep_mask_cache[layer_idx] if layer_idx < len(self.key_keep_mask_cache) else None
+                if keep_mask is not None and isinstance(keep_mask, torch.Tensor):
+                    b, n_kv, slen, d = key_to_pack.shape
+                    keep_mask_k = keep_mask.unsqueeze(2).expand(-1, -1, slen, -1)
+                    key_to_pack = key_to_pack[keep_mask_k].reshape(b, n_kv, slen, -1)
+
+            kq_new, ks_new, km_new = triton_quantize_and_pack_along_last_dim(
+                key_to_pack.transpose(2, 3).contiguous(),
+                cfg.k_group_size[layer_idx],
+                cfg.k_bits[layer_idx],
+            )
+            if self.key_states_quant_trans_cache[layer_idx] is not None:
+                self.key_states_quant_trans_cache[layer_idx] = torch.cat(
+                    [self.key_states_quant_trans_cache[layer_idx], kq_new], dim=3)
+                self.key_scale_trans_cache[layer_idx] = torch.cat(
+                    [self.key_scale_trans_cache[layer_idx], ks_new], dim=3)
+                self.key_mn_trans_cache[layer_idx] = torch.cat(
+                    [self.key_mn_trans_cache[layer_idx], km_new], dim=3)
+            else:
+                self.key_states_quant_trans_cache[layer_idx] = kq_new
+                self.key_scale_trans_cache[layer_idx] = ks_new
+                self.key_mn_trans_cache[layer_idx] = km_new
+
+        self.key_states_full_cache[layer_idx] = new_key_full
+
+        # ── VALUES ───────────────────────────────────────────────────────
+        combined_val = torch.cat([self.value_states_full_cache[layer_idx], value_states], dim=2)
+        val_len = combined_val.shape[2]
+        if val_len <= residual_length:
+            val_to_quant = None
+            new_val_full = combined_val
+        else:
+            val_to_quant = combined_val[:, :, :-residual_length, :].contiguous()
+            new_val_full = combined_val[:, :, -residual_length:, :].contiguous()
+
+        if val_to_quant is not None:
+            assert val_to_quant.shape[2] % cfg.v_group_size[layer_idx] == 0, (
+                f"Stride value tokens ({val_to_quant.shape[2]}) must be divisible by "
+                f"v_group_size ({cfg.v_group_size[layer_idx]}). Adjust stride accordingly."
+            )
+            vq_new, vs_new, vm_new = triton_quantize_and_pack_along_last_dim(
+                val_to_quant,
+                cfg.v_group_size[layer_idx],
+                cfg.v_bits[layer_idx],
+            )
+            if self.value_states_quant_cache[layer_idx] is not None:
+                self.value_states_quant_cache[layer_idx] = torch.cat(
+                    [self.value_states_quant_cache[layer_idx], vq_new], dim=2)
+                self.value_scale_cache[layer_idx] = torch.cat(
+                    [self.value_scale_cache[layer_idx], vs_new], dim=2)
+                self.value_mn_cache[layer_idx] = torch.cat(
+                    [self.value_mn_cache[layer_idx], vm_new], dim=2)
+            else:
+                self.value_states_quant_cache[layer_idx] = vq_new
+                self.value_scale_cache[layer_idx] = vs_new
+                self.value_mn_cache[layer_idx] = vm_new
+
+        self.value_states_full_cache[layer_idx] = new_val_full
+
+        # ── Reconstruct full K/V for standard attention ───────────────────
+        # Keys are stored as (B, n_kv, D, T_q//feat_per_int) with scale/mn (B, n_kv, D, num_groups).
+        # This layout is identical to value layout, so unpack_and_dequant_vcache (pack_dim=3)
+        # dequantizes it to (B, n_kv, D, T_q); we then transpose to (B, n_kv, T_q, D).
+        if self.key_states_quant_trans_cache[layer_idx] is not None:
+            kq = self.key_states_quant_trans_cache[layer_idx]
+            ks = self.key_scale_trans_cache[layer_idx]
+            km_s = self.key_mn_trans_cache[layer_idx]
+            key_dequant_DT = unpack_and_dequant_vcache(
+                kq, ks, km_s, cfg.k_group_size[layer_idx], cfg.k_bits[layer_idx]
+            )  # (B, n_kv, D, T_q)
+            key_dequant = key_dequant_DT.transpose(2, 3).contiguous()  # (B, n_kv, T_q, D)
+
+            # ThinK: zero-fill pruned dimensions back to full head_dim
+            if getattr(cfg, 'enable_think', False):
+                keep_mask = self.key_keep_mask_cache[layer_idx] if layer_idx < len(self.key_keep_mask_cache) else None
+                if keep_mask is not None and isinstance(keep_mask, torch.Tensor):
+                    b_, n_kv_, T_q, D_kept = key_dequant.shape
+                    D_full = keep_mask.shape[2]
+                    key_full_dim = torch.zeros(
+                        b_, n_kv_, T_q, D_full,
+                        device=key_dequant.device, dtype=key_dequant.dtype,
+                    )
+                    km_expand = keep_mask.unsqueeze(2).expand(-1, -1, T_q, -1)
+                    key_full_dim[km_expand] = key_dequant.reshape(-1)
+                    key_dequant = key_full_dim
+
+            key_for_attn = torch.cat([key_dequant, new_key_full], dim=2) if new_key_full is not None else key_dequant
+        else:
+            key_for_attn = new_key_full  # only residual, no quantized part yet
+
+        if self.value_states_quant_cache[layer_idx] is not None:
+            val_dequant = unpack_and_dequant_vcache(
+                self.value_states_quant_cache[layer_idx],
+                self.value_scale_cache[layer_idx],
+                self.value_mn_cache[layer_idx],
+                cfg.v_group_size[layer_idx],
+                cfg.v_bits[layer_idx],
+            )  # (B, n_kv, T_v, D)
+            val_for_attn = torch.cat([val_dequant, new_val_full], dim=2)
+        else:
+            val_for_attn = new_val_full  # only residual, no quantized part yet
+
+        return key_for_attn, val_for_attn
 
     def lazy_update(self, layer_idx: int):
         # expected shape: (B, nh, M, K)
+        # Stride phase invariants are maintained by _update_stride; skip here.
+        if self._is_stride:
+            return
 
         if self.key_states_full_cache[layer_idx].shape[-2] == self.kivi_config.residual_length:
             assert self.kivi_config.residual_length % self.kivi_config.k_group_size[layer_idx] == 0
@@ -466,6 +625,7 @@ class KIVIFakeCache(DynamicCache):
         super().__init__()
 
         self.is_prefill = True
+        self._is_stride: bool = False
         self.kivi_config = cache_config
 
         self.key_states_quant_trans_cache: List[torch.Tensor] = []
@@ -477,6 +637,10 @@ class KIVIFakeCache(DynamicCache):
 
         # for sageattention
         self.km: List[torch.Tensor] = []
+
+    @property
+    def is_stride(self) -> bool:
+        return self._is_stride
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -528,6 +692,7 @@ class KIVIFakeCache(DynamicCache):
         """
         if layer_idx == 0:
             self.is_prefill = (len(self) <= layer_idx)
+            self._is_stride = (not self.is_prefill) and (key_states.shape[-2] > 1)
             self._seen_tokens += key_states.shape[-2]
 
         # prefill
@@ -543,20 +708,32 @@ class KIVIFakeCache(DynamicCache):
             # for sageattention
             # self.km.append(key_states.mean(dim=2).unsqueeze(2))
             # key_states -= self.km[layer_idx]
-            
+
             self._update_prefill(key_states, value_states, layer_idx, cache_kwargs=cache_kwargs)
 
             keys_to_return = key_states
             values_to_return = value_states
-        # generation
+        # stride: non-prefill multi-token chunk
+        elif self._is_stride:
+            return self._update_stride(key_states, value_states, layer_idx, cache_kwargs=cache_kwargs)
+        # generation: single-token decoding
         else:
             # for sageattention
             # key_states -= self.km[layer_idx]
-            
+
             self._update_generation(key_states, value_states, layer_idx)
 
-            keys_to_return = torch.cat([self.key_states_quant_trans_cache[layer_idx], self.key_states_full_cache[layer_idx]], dim=-2)
-            values_to_return = torch.cat([self.value_states_quant_cache[layer_idx], self.value_states_full_cache[layer_idx]], dim=-2)
+            # Guard against None quant cache (prefill length was < residual_length)
+            if self.key_states_quant_trans_cache[layer_idx] is not None:
+                keys_to_return = torch.cat(
+                    [self.key_states_quant_trans_cache[layer_idx], self.key_states_full_cache[layer_idx]], dim=-2)
+            else:
+                keys_to_return = self.key_states_full_cache[layer_idx]
+            if self.value_states_quant_cache[layer_idx] is not None:
+                values_to_return = torch.cat(
+                    [self.value_states_quant_cache[layer_idx], self.value_states_full_cache[layer_idx]], dim=-2)
+            else:
+                values_to_return = self.value_states_full_cache[layer_idx]
 
         return keys_to_return, values_to_return
 
@@ -620,10 +797,115 @@ class KIVIFakeCache(DynamicCache):
             self.key_states_full_cache[layer_idx] = torch.cat([self.key_states_full_cache[layer_idx], key_states], dim=2)
         else:
             self.key_states_full_cache[layer_idx] = key_states
-        
+
         self.value_states_full_cache[layer_idx] = torch.cat([self.value_states_full_cache[layer_idx], value_states], dim=2)
 
+    def _update_stride(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Handle a multi-token stride chunk (non-prefill).
+
+        Merges the existing full-precision residual with the new stride tokens,
+        re-partitions into fake-quantized and residual according to the residual_length
+        invariant, and returns the full accumulated K/V for standard attention.
+        """
+        cfg = self.kivi_config
+        residual_length = cfg.residual_length
+
+        # ── KEYS ─────────────────────────────────────────────────────────
+        if self.key_states_full_cache[layer_idx] is not None:
+            combined_key = torch.cat([self.key_states_full_cache[layer_idx], key_states], dim=2)
+        else:
+            combined_key = key_states
+
+        key_len = combined_key.shape[2]
+        rem = key_len % residual_length
+        if rem == 0:
+            key_to_quant = combined_key
+            new_key_full = None
+        elif key_len < residual_length:
+            key_to_quant = None
+            new_key_full = combined_key
+        else:
+            key_to_quant = combined_key[:, :, :-rem, :].contiguous()
+            new_key_full = combined_key[:, :, -rem:, :].contiguous()
+
+        if key_to_quant is not None:
+            assert key_to_quant.shape[2] % cfg.k_group_size[layer_idx] == 0, (
+                f"Stride key tokens ({key_to_quant.shape[2]}) must be divisible by "
+                f"k_group_size ({cfg.k_group_size[layer_idx]}). Adjust stride accordingly."
+            )
+            keep_mask = None
+            if getattr(cfg, 'enable_think', False) and layer_idx < len(self.key_keep_mask_cache):
+                keep_mask = self.key_keep_mask_cache[layer_idx]
+            key_to_quant_m = key_to_quant
+            if keep_mask is not None and isinstance(keep_mask, torch.Tensor):
+                key_to_quant_m = key_to_quant * keep_mask.unsqueeze(2).to(key_to_quant.dtype)
+            key_quant_new = fake_quant(
+                key_to_quant_m, cfg.k_group_size[layer_idx], cfg.k_bits[layer_idx], cfg.k_quant_scheme
+            )
+            if keep_mask is not None and isinstance(keep_mask, torch.Tensor):
+                key_quant_new = key_quant_new * keep_mask.unsqueeze(2).to(key_quant_new.dtype)
+            if self.key_states_quant_trans_cache[layer_idx] is not None:
+                self.key_states_quant_trans_cache[layer_idx] = torch.cat(
+                    [self.key_states_quant_trans_cache[layer_idx], key_quant_new], dim=2)
+            else:
+                self.key_states_quant_trans_cache[layer_idx] = key_quant_new
+
+        self.key_states_full_cache[layer_idx] = new_key_full
+
+        # ── VALUES ───────────────────────────────────────────────────────
+        combined_val = torch.cat([self.value_states_full_cache[layer_idx], value_states], dim=2)
+        val_len = combined_val.shape[2]
+        if val_len <= residual_length:
+            val_to_quant = None
+            new_val_full = combined_val
+        else:
+            val_to_quant = combined_val[:, :, :-residual_length, :].contiguous()
+            new_val_full = combined_val[:, :, -residual_length:, :].contiguous()
+
+        if val_to_quant is not None:
+            assert val_to_quant.shape[2] % cfg.v_group_size[layer_idx] == 0, (
+                f"Stride value tokens ({val_to_quant.shape[2]}) must be divisible by "
+                f"v_group_size ({cfg.v_group_size[layer_idx]}). Adjust stride accordingly."
+            )
+            val_quant_new = fake_quant(
+                val_to_quant, cfg.v_group_size[layer_idx], cfg.v_bits[layer_idx], cfg.v_quant_scheme
+            )
+            if self.value_states_quant_cache[layer_idx] is not None:
+                self.value_states_quant_cache[layer_idx] = torch.cat(
+                    [self.value_states_quant_cache[layer_idx], val_quant_new], dim=2)
+            else:
+                self.value_states_quant_cache[layer_idx] = val_quant_new
+
+        self.value_states_full_cache[layer_idx] = new_val_full
+
+        # ── Return full K/V for standard attention (no dequant needed for FakeCache) ─
+        if self.key_states_quant_trans_cache[layer_idx] is not None:
+            if new_key_full is not None:
+                keys_to_return = torch.cat(
+                    [self.key_states_quant_trans_cache[layer_idx], new_key_full], dim=2)
+            else:
+                keys_to_return = self.key_states_quant_trans_cache[layer_idx]
+        else:
+            keys_to_return = new_key_full
+
+        if self.value_states_quant_cache[layer_idx] is not None:
+            values_to_return = torch.cat(
+                [self.value_states_quant_cache[layer_idx], new_val_full], dim=2)
+        else:
+            values_to_return = new_val_full
+
+        return keys_to_return, values_to_return
+
     def lazy_update(self, layer_idx: int):
+        # Stride phase invariants are maintained by _update_stride; skip here.
+        if self._is_stride:
+            return
         if self.key_states_full_cache[layer_idx].shape[-2] == self.kivi_config.residual_length:
             assert self.kivi_config.residual_length % self.kivi_config.k_group_size[layer_idx] == 0
             key_to_pack = self.key_states_full_cache[layer_idx]

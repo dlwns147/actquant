@@ -523,8 +523,14 @@ class AuxiliarySingleLevelProblem(Problem):
             # f[i, 1] = info[self.ss.sec_obj]
             for j in range(len(self.comp_obj)):
                 f[i, 1 + j] = info[self.comp_obj[j]]
-                g[i, 2 * j] = 1 - info[self.comp_obj[j]] / self.comp_obj_min[j]
-                g[i, 2 * j + 1] = info[self.comp_obj[j]] / self.comp_obj_max[j] - 1
+                if self.comp_obj_min[j] != 0:
+                    g[i, 2 * j] = 1 - info[self.comp_obj[j]] / self.comp_obj_min[j]
+                else:
+                    g[i, 2 * j] = 0.0
+                if self.comp_obj_max[j] != 0:
+                    g[i, 2 * j + 1] = info[self.comp_obj[j]] / self.comp_obj_max[j] - 1
+                else:
+                    g[i, 2 * j + 1] = 0.0
 
             # g[i, 0] = 1 - info[self.ss.sec_obj] / self.ss.sec_obj_range[0]
             # g[i, 1] = info[self.ss.sec_obj] / self.ss.sec_obj_range[1] - 1

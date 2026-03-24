@@ -69,26 +69,14 @@ RESIDUAL_LENGTH=128
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
-# PRUNING_RATIO=1.0
-# PRUNING_RATIO=0.76
-# PRUNING_RATIO=0.7
-# PRUNING_RATIO=0.69
-# PRUNING_RATIO=0.66
-
-# K_PRUNING_RATIO=0.3
-# V_PRUNING_RATIO=0
-
-# K_PRUNING_RATIO=0
-# V_PRUNING_RATIO=0
-# K_PRUNING_RATIO=0.3
-# V_PRUNING_RATIO=0.3
-# K_PRUNING_RATIO=0.4
-# V_PRUNING_RATIO=0.4
-K_PRUNING_RATIO=0.5
-V_PRUNING_RATIO=0.5
-
-# PRUNING_RATIO=0.4
-# PRUNING_RATIO=0.5
+# K pruning dim: integer # of head_dim channels to prune (head_dim=128 for Llama-3)
+# 0=0%, 16=12.5%, 32=25%, 48=37.5%, 64=50%
+K_PRUNING_DIM=0
+# K_PRUNING_DIM=16
+# K_PRUNING_DIM=32
+# K_PRUNING_DIM=48
+# K_PRUNING_DIM=64
+V_PRUNING_DIM=0
 
 COMP_OBJ="bits"
 COMP_OBJ_TEXT=bits
@@ -103,18 +91,22 @@ TASKS="coqa truthfulqa"
 # TASKS="gsm8k_cot"
 
 N=1
-DATASETS="wikitext2 c4"
-# DATASETS="gov_report"
+# DATASETS="wikitext2 c4"
+DATASETS="gov_report"
 METRIC="ppl"
 LOSS_FUNC="cross_entropy"
 
 
 # DATASETS="gov_report"
-# DATASETS="minilongbench"
+# # # DATASETS="minilongbench"
 # METRIC="loss"
 # LOSS_FUNC="cross_entropy"
-# LOSS_FUNC="jsd"
-STRIDE=256
+# # # LOSS_FUNC="jsd"
+
+STRIDE=0
+# STRIDE=256
+# STRIDE=512
+# STRIDE=1024
 LAST_TOKENS=1024
 # LAST_TOKENS=512
 # LAST_TOKENS=256
@@ -208,8 +200,8 @@ ARGS="
 --v_group_size ${KV_GROUP_SIZE} \
 --k_quant_scheme ${K_QUANT_SCHEME} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
---k_pruning_ratio ${K_PRUNING_RATIO} \
---v_pruning_ratio ${V_PRUNING_RATIO} \
+--k_pruning_dim ${K_PRUNING_DIM} \
+--v_pruning_dim ${V_PRUNING_DIM} \
 -n ${N} \
 --save ${SAVE} \
 --clip_asym \
@@ -220,17 +212,19 @@ ARGS="
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
 --seed ${SEED} \
---ruler \
---ruler_task ${RULER_TASK} \
---ruler_yaml_path ${RULER_YAML_PATH} \
---ruler_result_path ${RULER_RESULT_PATH} \
---ruler_batch_size ${RULER_BATCH_SIZE} \
---ruler_sample ${RULER_SAMPLE} \
---ruler_length ${RULER_LENGTH} \
---ruler_task ${RULER_TASK} \
+--datasets ${DATASETS}
 "
+
+# --stride ${STRIDE} \
+# --ruler \
+# --ruler_task ${RULER_TASK} \
+# --ruler_yaml_path ${RULER_YAML_PATH} \
+# --ruler_result_path ${RULER_RESULT_PATH} \
+# --ruler_batch_size ${RULER_BATCH_SIZE} \
+# --ruler_sample ${RULER_SAMPLE} \
+# --ruler_length ${RULER_LENGTH} \
+# --ruler_task ${RULER_TASK} \
 # --packing \
-# --datasets ${DATASETS} \
 # --zeroshot \
 # --tasks ${TASKS} \
 # --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
@@ -239,7 +233,6 @@ ARGS="
 
 
 # --last_tokens ${LAST_TOKENS}
-# --stride ${STRIDE} \
 #
 # --long_eval \
 
@@ -250,6 +243,12 @@ if [ ${USE_KEY_TOKEN} == 'True' ]; then
     --alpha ${ALPHA} \
     --beta ${BETA} \
     --key_token_path ${KEY_TOKEN_PATH}"
+fi
+
+if [ ${STRIDE} -gt 0 ]; then
+    ARGS+=" --stride ${STRIDE} "
+else
+    ARGS+=" --quant_kv_output "
 fi
 
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} awqgptq.py ${ARGS}

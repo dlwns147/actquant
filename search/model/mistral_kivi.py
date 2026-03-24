@@ -54,7 +54,7 @@ def replace_attention_forward(self):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        key_states, value_states = quant_kv_output(self, key_states, value_states, attention_mask)
+        key_states, value_states = quant_kv_output(self, key_states, value_states, attention_mask, query_states=query_states)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache

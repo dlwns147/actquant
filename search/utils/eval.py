@@ -61,31 +61,40 @@ def load_and_eval_ppl(model, model_name='', device=torch.device("cuda:0"), datas
     return ppl_test 
 
 @torch.no_grad()
-def eval_ppl(model, accelerator, loader, seqlen=2048):
-    # # Get input IDs
-    # testenc = testenc.input_ids
-
-    # # Calculate number of samples
-    # n_sample = testenc.numel() // seqlen
-
+def eval_ppl(model, accelerator, loader, seqlen=2048, stride=0):
     # List to store negative log likelihoods
     nlls = []
-    # print(f"n_sample {n_sample}")
-    
-    # Loop through each batch
-    # for inputs in tqdm(loader, desc='Eval PPL'):
-    for inputs, attention_mask, labels in tqdm(loader, desc='Eval PPL'):
 
-        # Forward pass through the model
-        # outputs = model(inputs)
-        outputs = model(inputs, attention_mask=attention_mask)
-        lm_logits = outputs.logits
+    # Loop through each batch
+    for inputs, attention_mask, labels in tqdm(loader, desc='Eval PPL'):
+        total_seq_len = inputs.shape[1]
+
+        # Forward pass: stride-based with use_cache=True, or single pass
+        if stride is not None and stride > 0:
+            chunked_logits = []
+            past_key_values = None
+            for start in range(0, total_seq_len, stride):
+                end = min(start + stride, total_seq_len)
+                chunk_input = inputs[:, start:end]
+                chunk_attn = attention_mask[:, :end] if attention_mask is not None else None
+                chunk_outputs = model(
+                    chunk_input,
+                    attention_mask=chunk_attn,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+                chunked_logits.append(chunk_outputs.logits)
+                past_key_values = chunk_outputs.past_key_values
+            lm_logits = torch.cat(chunked_logits, dim=1)
+        else:
+            outputs = model(inputs, attention_mask=attention_mask)
+            lm_logits = outputs.logits
 
         # Shift logits and labels for next token prediction
         shift_logits = lm_logits[:, :-1, :].contiguous()
         shift_logits = shift_logits.reshape(-1, shift_logits.size(-1))
         shift_labels = inputs[:, 1:].reshape(-1)
-        
+
         # Compute loss
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(shift_logits, shift_labels)
@@ -182,10 +191,10 @@ def get_logits(model, loader, key_token_list=None, last_tokens=None, ignore_inde
 
 
 @torch.no_grad()
-def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=None, last_tokens=None, ignore_index=-100):
+def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, ignore_index=-100):
     """
     Evaluate loss on a model using a data loader.
-    
+
     Parameters:
         model: The model to evaluate
         accelerator: Accelerator object for distributed training
@@ -196,9 +205,12 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
         key_token_list: Pre-computed key token list (format: [batch_idx][seq_idx] -> list of token indices)
                        If provided, only key tokens are used for loss calculation.
                        If None, all tokens (except ignore_index) are used.
+        stride: If > 0, splits each sequence into chunks of this size and performs multiple
+                forward passes with use_cache=True, computing loss only on new tokens per chunk.
+                If 0 (default), performs a single forward pass over the full sequence.
         ignore_index: Index to ignore in loss calculation
         k: Top-k parameter (for topk loss, not used in cross_entropy/jsd)
-    
+
     Returns:
         Average loss value
     """
@@ -206,18 +218,40 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
         assert dense_logits_list is not None, "dense_logits_list must be provided for jsd"
     if key_token_list is not None:
         assert len(loader) == len(key_token_list)
-  
+
     # List to store losses and sequence lengths
     losses = []
     seqlens = []
-    
+
     # Loop through each batch
     for batch_idx, (inputs, attention_mask, labels) in enumerate(loader):
         batch_size = inputs.shape[0]
-        
-        # Forward pass
-        outputs = model(inputs, attention_mask=attention_mask)
-        lm_logits = outputs.logits
+        total_seq_len = inputs.shape[1]
+
+        # Forward pass: stride-based with use_cache=True, or single pass
+        if stride is not None and stride > 0:
+            # Split the sequence into stride-sized chunks and forward incrementally.
+            # Each chunk only passes new tokens; past KV cache provides context.
+            # Equivalent to a single full forward pass but memory-efficient for long sequences.
+            chunked_logits = []
+            past_key_values = None
+            for start in range(0, total_seq_len, stride):
+                end = min(start + stride, total_seq_len)
+                chunk_input = inputs[:, start:end]
+                # attention_mask must cover all tokens seen so far (past + current)
+                chunk_attn = attention_mask[:, :end] if attention_mask is not None else None
+                chunk_outputs = model(
+                    chunk_input,
+                    attention_mask=chunk_attn,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+                chunked_logits.append(chunk_outputs.logits)
+                past_key_values = chunk_outputs.past_key_values
+            lm_logits = torch.cat(chunked_logits, dim=1)
+        else:
+            outputs = model(inputs, attention_mask=attention_mask)
+            lm_logits = outputs.logits
 
         # Shift logits and labels for next token prediction
         shift_logits = lm_logits[:, :-1, :].contiguous()
@@ -285,7 +319,7 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=None, last_tokens=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
     """
     Evaluate metric on a model using a data loader.
     
@@ -303,7 +337,7 @@ def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_ent
         loss_func: 'cross_entropy' or 'jsd' (for 'loss' metric)
         dense_logits_list: List of dense logits for JSD calculation (required for 'jsd')
         key_token_list: Pre-computed key token list (optional, for 'loss' metric)
-        stride: Stride for stride-aware loss calculation
+        stride: Chunk size for stride-aware evaluation (0 = single forward pass, default)
         last_tokens: If set, loss is computed only on the last N tokens per sequence (for 'loss' metric)
         tokenizer: Tokenizer (required for 'gsm8k')
         limit: Limit number of samples (for 'gsm8k')
@@ -317,7 +351,7 @@ def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_ent
         Metric value
     """
     if metric == 'ppl':
-        return eval_ppl(model, accelerator, loader, seqlen=seqlen)
+        return eval_ppl(model, accelerator, loader, seqlen=seqlen, stride=stride)
     elif metric == 'loss':
         return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list, stride=stride, last_tokens=last_tokens)
     elif 'gsm8k' in metric:

@@ -114,7 +114,7 @@ def test_bgemv_outer_correct_mha():
 		qweight = qweight.transpose(1, 2).contiguous()
 		scale = scale.transpose(1, 2).contiguous()
 		mn = mn.transpose(1, 2).contiguous()
-		output = kivi_gemv.gemv_forward_cuda_outer_dim(inp, qweight, scale, mn, BIT, GS, nh, False)
+		output = kivi_gemv.gemv_forward_cuda_outer_dim(inp, qweight, scale, mn, BIT, GS, nh, nh)
 		deq_w = dequant_weight_outer(weight.transpose(1, 2), 
 							   scale.transpose(1, 2), 
 							   mn.transpose(1, 2), GS)
@@ -151,7 +151,7 @@ def test_bgemv_outer_correct_mqa():
 		qweight = qweight.transpose(1, 2).contiguous()
 		scale = scale.transpose(1, 2).contiguous()
 		mn = mn.transpose(1, 2).contiguous()
-		output = kivi_gemv.gemv_forward_cuda_outer_dim(inp, qweight, scale, mn, BIT, GS, nh, True)
+		output = kivi_gemv.gemv_forward_cuda_outer_dim(inp, qweight, scale, mn, BIT, GS, nh, 1)
 		deq_w = dequant_weight_outer(weight.transpose(1, 2), 
 							   scale.transpose(1, 2), 
 							   mn.transpose(1, 2), GS)

@@ -110,8 +110,8 @@ def main(args):
         data_batch_size=args.data_batch_size,
         device_map=device_map,
         bits=bits,
-        k_pruning_ratio=args.k_pruning_ratio,
-        v_pruning_ratio=args.v_pruning_ratio,
+        k_pruning_dim=args.k_pruning_dim,
+        v_pruning_dim=args.v_pruning_dim,
         dtype=dtype,
         group_size=group_size,
         packing=args.packing,
@@ -128,20 +128,23 @@ def main(args):
         last_tokens=args.last_tokens
     )
 
-    # New canonical arch schema:
-    # arch = {'q': {'w': [], 'k': [], 'v': []}, 'p': {'k': [], 'v': []}}
-    # - q.w: per-layer dict of linear_group -> bits
-    # - q.k/q.v: per-layer [bits, group_size]
-    # - p.k/p.v: per-layer pruning ratios
-    arch = {'q': {'w': [], 'k': [], 'v': []}, 'p': {'k': [], 'v': []}}
-    for _ in range(config['n_block']):
-        arch['q']['w'].append({linear: args.w_bits for linear in config['linear']})
+    # Canonical arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
+    n_block = config['n_block']
+    arch = {
+        'q': {
+            'w': {linear: [args.w_bits] * n_block for linear in config['linear']},
+            'k': [],
+            'v': [],
+        },
+        'p': {'k': [], 'v': []},
+    }
+    for _ in range(n_block):
         if args.k_bits is not None:
             arch['q']['k'].append([args.k_bits, args.k_group_size])
         if args.v_bits is not None:
             arch['q']['v'].append([args.v_bits, args.v_group_size])
-        arch['p']['k'].append(args.k_pruning_ratio)
-        arch['p']['v'].append(args.v_pruning_ratio)
+        arch['p']['k'].append(args.k_pruning_dim)
+        arch['p']['v'].append(args.v_pruning_dim)
     accelerator.print(arch)
     
     model = evaluator.sample(arch)
@@ -384,10 +387,10 @@ if __name__ == '__main__':
                         help='')
     # parser.add_argument('--use_flash', action='store_true', help='')
 
-    parser.add_argument('--k_pruning_ratio', type=float, default=0.0,
-                        help='Key pruning ratio for ThinK (0.0 disables pruning)')
-    parser.add_argument('--v_pruning_ratio', type=float, default=0.0,
-                        help='Value pruning ratio for ThinK (reserved; not applied yet)')
+    parser.add_argument('--k_pruning_dim', type=int, default=0,
+                        help='Key pruning dim for ThinK (# of head_dim channels to prune; 0 disables pruning)')
+    parser.add_argument('--v_pruning_dim', type=int, default=0,
+                        help='Value pruning dim for ThinK (# of head_dim channels to prune; 0 disables pruning)')
     parser.add_argument('--packing', action='store_true', help='')
 
     parser.add_argument('--clip_asym', action='store_true', help='')

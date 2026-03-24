@@ -3,7 +3,7 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache
+from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache, _think_key_pruner_query_driven
 from quant.kivi_utils.matmul import cuda_bmm_fA_qB_outer
 from quant.kivi_utils.new_pack import fake_quant, unpack_and_dequant_kcache, unpack_and_dequant_vcache
 from transformers.models.llama.modeling_llama import eager_attention_forward
@@ -40,11 +40,22 @@ def get_past_key_values(module):
     past_key_values = KIVIDynamicCache(kivi_config) if kivi_config.packing else KIVIFakeCache(kivi_config)
     return past_key_values
 
-def quant_kv_output(module, key_states, value_states, attention_mask):
+def quant_kv_output(module, key_states, value_states, attention_mask, query_states=None):
+    kivi_config = module.config.kivi_config
+
     if hasattr(module.config, 'quant_kv_output') and module.config.quant_kv_output:
-        kivi_config = module.config.kivi_config
         key_states = fake_quant(key_states, kivi_config.k_group_size[module.layer_idx], kivi_config.k_bits[module.layer_idx], kivi_config.k_quant_scheme, attention_mask=attention_mask)
         value_states = fake_quant(value_states, kivi_config.v_group_size[module.layer_idx], kivi_config.v_bits[module.layer_idx], kivi_config.v_quant_scheme, attention_mask=attention_mask)
+
+    if query_states is not None and getattr(kivi_config, 'enable_think', False):
+        k_pruning_dim = kivi_config.k_pruning_dim[module.layer_idx]
+        v_pruning_dim = kivi_config.v_pruning_dim[module.layer_idx]
+        if k_pruning_dim > 0:
+            _, keep_mask = _think_key_pruner_query_driven(key_states, query_states, k_pruning_dim)
+            key_states = key_states * keep_mask.unsqueeze(2)
+        if v_pruning_dim > 0:
+            _, keep_mask = _think_key_pruner_query_driven(value_states, query_states, v_pruning_dim)
+            value_states = value_states * keep_mask.unsqueeze(2)
 
     return key_states, value_states
     
@@ -174,9 +185,13 @@ def forward_for_kivi_gemv(
 
 def attention_forward(module, past_key_value):
     is_prefill = past_key_value is not None and past_key_value.is_prefill
+    is_stride = past_key_value is not None and getattr(past_key_value, 'is_stride', False)
 
     if is_prefill or past_key_value is None:
         # prefill stage or no cache
+        attention_interface = ALL_ATTENTION_FUNCTIONS[module.config._attn_implementation]
+    elif is_stride:
+        # stride phase: Q has multiple tokens; GEMV is single-query only, use standard attention
         attention_interface = ALL_ATTENTION_FUNCTIONS[module.config._attn_implementation]
     elif past_key_value is not None and module.config.kivi_config.packing:
         # generation stage and real quantization
@@ -197,5 +212,8 @@ def attention_forward(module, past_key_value):
 
 def lazy_update(module, is_prefill, past_key_value):
     if not is_prefill and past_key_value is not None and not module.config.kivi_config.packing:
+        # Stride phase: _update_stride already maintained cache invariants; skip lazy_update.
+        if getattr(past_key_value, 'is_stride', False):
+            return
         # import code; code.interact('kiti_utils.py line 167', local=dict(globals(), **locals()))
         past_key_value.lazy_update(module.layer_idx)

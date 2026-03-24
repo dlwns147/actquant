@@ -97,15 +97,18 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 COMP_OBJ=(memory)
 SEED=0
 
+COMP_OBJ_VAL=(6300000000)
+N_TOKEN=16384
+
 # COMP_OBJ_VAL=(5862072320)
 # # COMP_OBJ_VAL=(5666250752)
-COMP_OBJ_VAL=(5649473536) # LLama 3.1 8B
-# # # COMP_OBJ_VAL=(5006434304) # LLama 3.1 8B
-# # # COMP_OBJ_VAL=(4989657088) # LLama 3.1 8B
-# # # COMP_OBJ_VAL=(4793835520) # LLama 3.1 8B
-# # # COMP_OBJ_VAL=(4777058304) # LLama 3.1 8B
-# # COMP_OBJ_VAL=(4134019072) # LLama 3.1 8B
-N_TOKEN=1024
+# COMP_OBJ_VAL=(5649473536) # LLama 3.1 8B
+# # # # COMP_OBJ_VAL=(5006434304) # LLama 3.1 8B
+# # # # COMP_OBJ_VAL=(4989657088) # LLama 3.1 8B
+# # # # COMP_OBJ_VAL=(4793835520) # LLama 3.1 8B
+# # # # COMP_OBJ_VAL=(4777058304) # LLama 3.1 8B
+# # # COMP_OBJ_VAL=(4134019072) # LLama 3.1 8B
+# N_TOKEN=1024
 
 # COMP_OBJ=(kvbits memory)
 # COMP_OBJ_VAL=(2.25 8264884224)
@@ -133,7 +136,8 @@ N_TOKEN=1024
 # N_TOKEN=1048576
 
 # COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
-COMP_OBJ_THRESHOLD_LIST=(0.005 $(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
+COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
+# COMP_OBJ_THRESHOLD_LIST=(0.005 $(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
 
 # PREFER="metric#0.0 ${TARGET_COMP_OBJ}#${TARGET_COMP_OBJ_VAL}"
 
@@ -166,28 +170,22 @@ MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
-# DATASETS="wikitext2 c4"
-# DATASETS_TEXT="wikitext2_c4"
-# # DATASETS="gov_report"
-# # DATASETS_TEXT="gov_report"
-# METRIC="ppl"
-# LOSS_FUNC="cross_entropy"
-
-# DATASETS="wikitext2"
-# DATASETS_TEXT="wikitext2"
-DATASETS="gov_report"
-DATASETS_TEXT="gov_report"
-# DATASETS="minilongbench"
-# DATASETS_TEXT="minilongbench"
-METRIC="loss"
-# LOSS_FUNC="jsd"
+DATASETS="wikitext2 c4"
+DATASETS_TEXT="wikitext2_c4"
+# DATASETS="gov_report"
+# DATASETS_TEXT="gov_report"
+METRIC="ppl"
 LOSS_FUNC="cross_entropy"
-# STRIDE=128
-# STRIDE=256
-STRIDE=1024
-# LAST_TOKENS=1024
-# LAST_TOKENS=512
-LAST_TOKENS=128
+
+# # DATASETS="wikitext2"
+# # DATASETS_TEXT="wikitext2"
+# DATASETS="gov_report"
+# DATASETS_TEXT="gov_report"
+# # DATASETS="minilongbench"
+# # DATASETS_TEXT="minilongbench"
+# METRIC="loss"
+# # LOSS_FUNC="jsd"
+# LOSS_FUNC="cross_entropy"
 
 
 # N_SAMPLE=4
@@ -195,14 +193,23 @@ N_SAMPLE=8
 # N_SAMPLE=16
 # N_SAMPLE=32
 # N_SAMPLE=64
-# SEQLEN=2048
-# MIN_SEQLEN=2048
-SEQLEN=8192
-MIN_SEQLEN=8192
+SEQLEN=2048
+MIN_SEQLEN=2048
+# SEQLEN=8192
+# MIN_SEQLEN=8192
 # SEQLEN=16384
 # MIN_SEQLEN=16384
 DATA_BATCH_SIZE=1
 # MIN_SEQLEN=0
+
+
+STRIDE=128
+# STRIDE=256
+# STRIDE=1024
+# LAST_TOKENS=1024
+# LAST_TOKENS=512
+LAST_TOKENS=128
+
 
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
 # TASKS="coqa gsm8k truthfulqa"
@@ -210,11 +217,6 @@ TASKS="coqa truthfulqa gsm8k"
 
 LM_EVAL_BATCH_SIZE=32
 
-# KV_SCALE=1
-# KV_SCALE=0.95
-KV_SCALE=0.9
-# KV_SCALE=0.85
-# KV_SCALE=0.8
 
 # TRUNC_LEN=512
 TRUNC_LEN=256
@@ -226,8 +228,13 @@ BETA=-2
 
 # EXPR_FOLDER=save/search/quant
 
-W_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_200.stats
-KV_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_100.stats
+# W_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_200.stats
+# KV_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_100.stats
+# KVDIM_EXPR=save/search/think/..._kvdim_.../iter_N.stats
+
+# W_EXPR=
+KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240659_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_200_n_iter_50_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
+KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240700_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv24bits_w128kv3264128x2gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
 
 # W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_200.stats
 # KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
@@ -256,6 +263,14 @@ N=1
 # N=10
 
 RANDOM_SAMPLE=1000
+
+W_SCALE=1
+KV_SCALE=1
+# KV_SCALE=0.95
+# KV_SCALE=0.9
+# KV_SCALE=0.85
+# KV_SCALE=0.8
+KVDIM_SCALE=1
 
 if [ ${USE_KEY_TOKEN} == 'True' ]; then
     SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
@@ -289,27 +304,27 @@ ARGS="--gpu_id ${DEVICES} \
 --n_token ${N_TOKEN} \
 --expr_front \
 --debug \
---w_expr ${W_EXPR} \
---kv_expr ${KV_EXPR} \
 --metric ${METRIC} \
 --loss_func ${LOSS_FUNC} \
 --seed ${SEED} \
 -n ${N}
 --save ${SAVE} \
 --quant_model_paths ${QMODEL_PATHS} \
+--w_scale ${W_SCALE} \
 --kv_scale ${KV_SCALE} \
---ruler \
---ruler_task ${RULER_TASK} \
---ruler_yaml_path ${RULER_YAML_PATH} \
---ruler_result_path ${RULER_RESULT_PATH} \
---ruler_batch_size ${RULER_BATCH_SIZE} \
---ruler_sample ${RULER_SAMPLE} \
---ruler_length ${RULER_LENGTH}
-"
-# --datasets ${DATASETS} \
-# --seqlen ${SEQLEN} \
-# --min_seqlen ${MIN_SEQLEN} \
-# --data_batch_size ${DATA_BATCH_SIZE} \
+--kvdim_scale ${KVDIM_SCALE} \
+--datasets ${DATASETS} \
+--seqlen ${SEQLEN} \
+--min_seqlen ${MIN_SEQLEN} \
+--data_batch_size ${DATA_BATCH_SIZE}"
+# --ruler \
+# --ruler_task ${RULER_TASK} \
+# --ruler_yaml_path ${RULER_YAML_PATH} \
+# --ruler_result_path ${RULER_RESULT_PATH} \
+# --ruler_batch_size ${RULER_BATCH_SIZE} \
+# --ruler_sample ${RULER_SAMPLE} \
+# --ruler_length ${RULER_LENGTH}
+
 # --stride ${STRIDE}
 # --last_tokens ${LAST_TOKENS}
 
@@ -336,15 +351,6 @@ ARGS="--gpu_id ${DEVICES} \
 # --longbench_config ${LONGBENCH_CONFIG} \
 
 
-if [ ${USE_KEY_TOKEN} == 'True' ]; then
-    ARGS+=" --use_key_token \
-    --trunc_len ${TRUNC_LEN} \
-    --sliding_window ${SLIDING_WINDOW} \
-    --alpha ${ALPHA} \
-    --beta ${BETA} \
-    --key_token_path ${KEY_TOKEN_PATH}"
-fi
-
 for g in "${K_GROUP_SIZE[@]}"
 do
     ARGS+=" --k_group_size ${g} "
@@ -354,6 +360,37 @@ for g in "${V_GROUP_SIZE[@]}"
 do
     ARGS+="--v_group_size ${g} "
 done
+
+if [ ${USE_KEY_TOKEN} == 'True' ]; then
+    ARGS+=" --use_key_token \
+    --trunc_len ${TRUNC_LEN} \
+    --sliding_window ${SLIDING_WINDOW} \
+    --alpha ${ALPHA} \
+    --beta ${BETA} \
+    --key_token_path ${KEY_TOKEN_PATH} "
+fi
+
+if [ ${STRIDE} -gt 0 ]; then
+    ARGS+=" --stride ${STRIDE} "
+else
+    ARGS+=" --quant_kv_output "
+fi
+
+if [ ${W_METHOD} == "hqq" ]; then
+    ARGS+=" --quant_model_paths ${QMODEL_PATHS} "
+fi
+
+if [ -n "${W_EXPR}" ]; then
+    ARGS+=" --w_expr ${W_EXPR}"
+fi
+
+if [ -n "${KV_EXPR}" ]; then
+    ARGS+=" --kv_expr ${KV_EXPR}"
+fi
+
+if [ -n "${KVDIM_EXPR}" ]; then
+    ARGS+=" --kvdim_expr ${KVDIM_EXPR}"
+fi
 
 # -n ${N} \
 N_PROC=1

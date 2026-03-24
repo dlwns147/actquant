@@ -622,7 +622,7 @@ torch::Tensor gemv_forward_cuda_outer_dim(
       );     
       }
     else if (bit == 8){
-      // note: in this case, pack factor == 16
+      // note: in this case, pack factor == 4
       bgemv8_kernel_outer_dim<<<num_blocks, num_threads>>>(
         // pointers
         in_feats, kernel, zeros, scaling_factors, out_feats,

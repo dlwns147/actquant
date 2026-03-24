@@ -15,8 +15,8 @@ def replace_kv_cache(model,
                     residual_length=128,
                     packing=False,
                     quant_kv_output=False,
-                    k_pruning_ratio=0.0,
-                    v_pruning_ratio=0.0):
+                    k_pruning_dim=0,
+                    v_pruning_dim=0):
     
     methods = method if isinstance(method, list) else [method]
     if 'hqq' in methods:
@@ -47,8 +47,8 @@ def replace_kv_cache(model,
         # ThinK options (stored in config for cache/attention path)
         model.config.kv_method = methods
         model.config.kivi_config.enable_think = ('think' in methods)
-        model.config.kivi_config.k_pruning_ratio = [k_pruning_ratio] * n_block
-        model.config.kivi_config.v_pruning_ratio = [v_pruning_ratio] * n_block
+        model.config.kivi_config.k_pruning_dim = [k_pruning_dim] * n_block
+        model.config.kivi_config.v_pruning_dim = [v_pruning_dim] * n_block
 
         if isinstance(model, Qwen2ForCausalLM):
             from .qwen2_kivi import convert_model_kivi

@@ -123,7 +123,7 @@ class GPTQ(BASE):
                     #     args.wbits, perchannel=True, sym=args.sym, mse=False
                     # )
                     gptq[name].quantizer.configure(
-                        round(self.arch['w'][name][i]), perchannel=True, sym=sym, mse=False
+                        round(self.arch[name][i]), perchannel=True, sym=sym, mse=False
                     )
 
                 def add_batch(name):

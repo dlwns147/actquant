@@ -1,6 +1,7 @@
 import os
 import json
 import argparse
+import itertools
 import torch
 import numpy as np
 from pymoo.decomposition.asf import ASF
@@ -96,96 +97,96 @@ def main(args):
     assert n_comp_obj == n_comp_obj_min and n_comp_obj_min == n_comp_obj_max
 
     group_size = {'w': args.w_group_size, 'k': args.k_group_size, 'v': args.v_group_size}
-    archive_list = []
-    subnets_list = []
-    metric_list = []
-    F_list = []
-    
-    # for expr, comp_obj in zip(args.expr, args.expr_comp_obj):
-    for expr, comp_obj in zip([args.w_expr, args.kv_expr], ['wbits', 'kvbits']):
-        with open(expr, 'r') as f:
-            result_json = json.load(f)
-            archive = result_json['archive'] + result_json['candidates']
-            archive_list.append(archive)
+    # Build default arch from args for components not covered by any expr
+    n_block = config['n_block']
+    w_linears = config['linear']
+    default_w_bits = max(args.w_bits) if args.w_bits else 16
+    default_k_bits = max(args.k_bits) if args.k_bits else 4
+    default_v_bits = max(args.v_bits) if args.v_bits else 4
+    k_gs = args.k_group_size if isinstance(args.k_group_size, int) else min(args.k_group_size)
+    v_gs = args.v_group_size if isinstance(args.v_group_size, int) else min(args.v_group_size)
+    default_arch = {
+        'q': {
+            'w': {linear: [default_w_bits] * n_block for linear in w_linears},
+            'k': [[default_k_bits, k_gs]] * n_block,
+            'v': [[default_v_bits, v_gs]] * n_block,
+        },
+        'p': {
+            'k': [0] * n_block,
+            'v': [0] * n_block,
+        }
+    }
 
-        subnets, metric = [v[0] for v in archive], [v[1] for v in archive]
-        # subnets_list.append(subnets)
-        # metric_list.append(metric)
-        # prev_metric_list.append(metric)
-        comp_obj = [get_net_info(n, config, group_size)[comp_obj] for n in subnets]
-        
-        sort_idx = np.argsort(metric)
-        F = np.column_stack((metric, comp_obj))[sort_idx]
-        subnets = np.array(subnets)[sort_idx]
+    # Load and optionally Pareto-filter each provided expr archive
+    def load_expr(expr_path, comp_obj_key):
+        with open(expr_path, 'r') as f:
+            result_json = json.load(f)
+        archive = result_json['archive'] + result_json['candidates']
+        subnets_arr = np.array([v[0] for v in archive])
+        metric_vals = [v[1] for v in archive]
+        comp_vals = [get_net_info(n, config, group_size)[comp_obj_key] for n in subnets_arr]
+        sort_idx = np.argsort(metric_vals)
+        F = np.column_stack((metric_vals, comp_vals))[sort_idx]
+        subnets_arr = subnets_arr[sort_idx]
         if args.expr_front:
             front = NonDominatedSorting().do(F, only_non_dominated_front=True)
             F = F[front]
-            subnets = subnets[front]
-        
-        F_list.append(F)
-        subnets_list.append(subnets)
-    
+            subnets_arr = subnets_arr[front]
+        return subnets_arr, F
+
+    expr_map = {}
+    if args.w_expr:
+        expr_map['w'] = load_expr(args.w_expr, 'wbits')
+    if args.kv_expr:
+        expr_map['kv'] = load_expr(args.kv_expr, 'kvbits')
+    if args.kvdim_expr:
+        expr_map['kvdim'] = load_expr(args.kvdim_expr, 'kvdim')
+    assert len(expr_map) >= 2, "At least 2 of --w_expr, --kv_expr, --kvdim_expr must be provided"
+
+    expr_keys = list(expr_map.keys())
+    scales = {'w': args.w_scale, 'kv': args.kv_scale, 'kvdim': args.kvdim_scale}
+
+    # Build all combinations and compute combined metric
+    # F layout: [new_metric, comp_metric_0, ..., comp_metric_N, *comp_obj]
     metric = []
     subnets = []
-    # F = [new_metric, w_metric, kv_metric, *args.comp_obj]
-    # ln2 = math.log(2)
-    if args.random_sample_path:
-        with open(args.random_sample_path, 'r') as f:
-            reader = list(csv.reader(f))
-            jsd_actual = np.array(reader[-4], dtype=float)
-            jsd_w = np.array(reader[-2], dtype=float)
-            jsd_kv = np.array(reader[-1], dtype=float)
-        lsq_res = lsq(jsd_w=jsd_w, jsd_kv=jsd_kv, jsd_actual=jsd_actual, add_intercept=True)
-        new_jsd = lsq_res["alpha"] * jsd_w + lsq_res["beta"] * jsd_kv + lsq_res["gamma"]
-        
-        rho, _ = stats.spearmanr(new_jsd, jsd_actual)
-        tau, _ = stats.kendalltau(new_jsd, jsd_actual)
-        print(f'alpha: {lsq_res["alpha"]}, beta: {lsq_res["beta"]}, gamma: {lsq_res["gamma"]}')
-        print(f'rho: {rho}, tau: {tau}')
-        
-    # if args.random_sample_path and len(args.grid_search):
-    #     with open(args.random_sample_path, 'r') as f:
-    #         reader = list(csv.reader(f))
-    #         jsd_actual = np.array(reader[-4], dtype=float)
-    #         jsd_w = np.array(reader[-2], dtype=float)
-    #         jsd_kv = np.array(reader[-1], dtype=float)
-            
-    #     max_tau = 0
-    #     max_kv_scale = 0
-    #     for kv_scale in args.grid_search:
-    #         new_jsd = jsd_w + kv_scale * jsd_kv
-    #         rho, _ = stats.spearmanr(new_jsd, jsd_actual)
-    #         tau, _ = stats.kendalltau(new_jsd, jsd_actual)
-    #         print(f'kv_scale: {kv_scale}, rho: {rho}, tau: {tau}')
-    #         if tau > max_tau:
-    #             max_tau = tau
-    #             max_kv_scale = kv_scale
-    #     print(f'max_kv_scale: {max_kv_scale}, max_tau: {max_tau}')
-    #     exit()
+    expr_iters = [list(zip(sv, fv)) for sv, fv in expr_map.values()]
 
-    
-    for f_w, subnet_w in zip(F_list[0], subnets_list[0]):
-        for f_kv, subnet_kv in zip(F_list[1], subnets_list[1]):
-            arch = dict()
-            arch['w'] = subnet_w['w']
-            arch['k'] = subnet_kv['k']
-            arch['v'] = subnet_kv['v']
+    for combo in itertools.product(*expr_iters):
+        arch = {
+            'q': {
+                'w': default_arch['q']['w'],
+                'k': default_arch['q']['k'],
+                'v': default_arch['q']['v'],
+            },
+            'p': {
+                'k': default_arch['p']['k'],
+                'v': default_arch['p']['v'],
+            }
+        }
+        component_metrics = []
+        for key, (subnet, f_row) in zip(expr_keys, combo):
+            if key == 'w':
+                arch['q']['w'] = subnet['q']['w']
+            elif key == 'kv':
+                arch['q']['k'] = subnet['q']['k']
+                arch['q']['v'] = subnet['q']['v']
+            elif key == 'kvdim':
+                arch['p']['k'] = subnet['p']['k']
+                arch['p']['v'] = subnet['p']['v']
+            component_metrics.append(f_row[0])
 
-            if args.random_sample_path:
-                new_metric = lsq_res["alpha"] * f_w[0] + lsq_res["beta"] * f_kv[0] + lsq_res["gamma"]
-            # new_metric = f_w[0] + f_kv[0] - (f_w[0] * f_kv[0] / ln2)
-            elif not args.sqrt:
-                new_metric = f_w[0] + args.kv_scale * f_kv[0]
-            else:
-                new_metric = math.sqrt(f_w[0]) + args.kv_scale * math.sqrt(f_kv[0])
-            metric.append([new_metric, f_w[0], f_kv[0]])
-            subnets.append(arch)
+        if args.sqrt:
+            new_metric = sum(scales[k] * math.sqrt(f_row[0]) for k, (_, f_row) in zip(expr_keys, combo))
+        else:
+            new_metric = sum(scales[k] * f_row[0] for k, (_, f_row) in zip(expr_keys, combo))
+
+        metric.append([new_metric] + component_metrics)
+        subnets.append(arch)
+
     metric = np.array(metric)
-    comp_obj = [[get_net_info(a, config, group_size, n_token=args.n_token)[comp_obj] for comp_obj in args.comp_obj] for a in subnets] 
+    comp_obj = [[get_net_info(a, config, group_size, n_token=args.n_token)[comp_obj] for comp_obj in args.comp_obj] for a in subnets]
     sort_idx = np.argsort(metric[:, 0])
-    # F = np.column_stack(([m[0] for m in metric], [m[1] for m in metric], [m[2] for m in metric], comp_obj))[sort_idx, :]
-    # F = np.column_stack((*[[m[:, i] for m in metric] for i in range(len(metric))], *[comp_obj[obj] for obj in args.comp_obj]))[sort_idx]
-    
     F = np.column_stack((metric, comp_obj))[sort_idx]
     subnets = np.array(subnets)[sort_idx]
     
@@ -202,6 +203,11 @@ def main(args):
             flag = np.logical_and(flag, np.logical_and(F[:, -n_comp_obj + i] >= args.comp_obj_min[i], F[:, -n_comp_obj + i] <= args.comp_obj_max[i]))
         range_idx = np.argwhere(flag).flatten()
         print(f'range_idx : {len(range_idx)}')
+        if len(range_idx) == 0:
+            mem_col = F[:, -n_comp_obj]
+            print(f'[debug] memory range in search results: min={mem_col.min():.1f}, max={mem_col.max():.1f}')
+            print(f'[debug] comp_obj_min={args.comp_obj_min}, comp_obj_max={args.comp_obj_max}')
+            print(f'[debug] unique memory values (sample): {np.unique(mem_col)[:10].tolist()}')
                 
         pf = F[range_idx]
         ps = subnets[range_idx]
@@ -287,7 +293,7 @@ def main(args):
         key_token_path=args.key_token_path
     )
     
-    comp_save_list = [list() for _ in get_net_info({}, None, group_size=-1, n_token=0).keys()]
+    comp_save_list = [list() for _ in get_net_info({}, config, group_size=-1, n_token=0).keys()]
     metric_save_list = [list() for _ in range((len(args.datasets) + 3))] 
     for idx in tqdm(I):
         arch = ps[idx]
@@ -653,6 +659,8 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--kv_expr', type=str, default='',
                         help='')
+    parser.add_argument('--kvdim_expr', type=str, default='',
+                        help='')
     parser.add_argument('--expr_front', action='store_true', help='')
     # parser.add_argument('--expr_comp_obj', type=str, nargs='+', default=[''],
     #                     help='')
@@ -709,8 +717,12 @@ if __name__ == '__main__':
     parser.add_argument('--grid_search', type=float, nargs='+', default=[])
     
     parser.add_argument('--sqrt', action='store_true', help='')
-    parser.add_argument('--kv_scale', type=float, default=1.,
-                        help='')
+    parser.add_argument('--w_scale', type=float, default=1.0,
+                        help='scale weight for w metric in combined metric')
+    parser.add_argument('--kv_scale', type=float, default=1.0,
+                        help='scale weight for kv metric in combined metric')
+    parser.add_argument('--kvdim_scale', type=float, default=1.0,
+                        help='scale weight for kvdim metric in combined metric')
 
     parser.add_argument('--use_key_token', action='store_true',
                         help='Only use key tokens for loss calculation (Long PPL/JSD)')

@@ -258,7 +258,6 @@ ARGS="--gpu_id ${DEVICES} \
 --residual_length ${RESIDUAL_LENGTH} \
 --k_quant_scheme ${K_QUANT_SCHEME} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
---quant_kv_output \
 --sensitivity_result_path ${SENSITIVITY_RESULT_PATH} \
 --predictor ${PREDICTOR} \
 --save ${SAVE} \
@@ -289,6 +288,11 @@ if [ ${USE_KEY_TOKEN} == 'True' ]; then
     --key_token_path ${KEY_TOKEN_PATH}"
 fi
 
+if [ ${STRIDE} -gt 0 ]; then
+    ARGS+=" --stride ${STRIDE} "
+else
+    ARGS+=" --quant_kv_output "
+fi
 
 for g in "${KV_GROUP_SIZE[@]}"
 do
@@ -303,6 +307,7 @@ done
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} search.py \
 ${ARGS}
 
+# --quant_kv_output \
 # # LM_EVAL_BATCH_SIZE=4
 # # LM_EVAL_BATCH_SIZE=16
 # LM_EVAL_BATCH_SIZE=32

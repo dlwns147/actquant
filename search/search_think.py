@@ -19,7 +19,7 @@ from pymoo.operators.crossover.binx import BinomialCrossover
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.operators.mutation.pm import PolynomialMutation
 
-from search_space.llama_think import LlamaGroupSizeSearchSpaceThink
+from search_space.llama_think import LlamaThinKSearchSpace
 from predictor.factory import get_predictor
 from utils.func import get_net_info, init_accelerator, set_seed, get_correlation
 from utils.ga import MySampling, BinaryCrossover, MyMutation, IntPolynomialMutation, MyTwoPointCrossover, MyUniformCrossover, IntegerFromFloatMutation, IntMutation
@@ -80,9 +80,10 @@ class SearchThink:
         v_group_size = kwargs.pop('v_group_size', [[128]])
         self.group_size = {'w': w_group_size, 'k': k_group_size, 'v': v_group_size}
 
-        # Pruning ratio options: 25%, 50%, 75%, 100% retention rate
-        pruning_ratio_options = kwargs.pop('pruning_ratio_options', [0.25, 0.5, 0.75, 1.0])
-        self.pruning_ratio_options = pruning_ratio_options
+        # Pruning dim options: 0 = no pruning, head_dim//2 = prune 50%
+        # K and V grids are configured independently.
+        self.k_pruning_dim = kwargs.pop('k_pruning_dim', None)
+        self.v_pruning_dim = kwargs.pop('v_pruning_dim', None)
 
         self.residual_length = kwargs.pop('residual_length', 128)
         self.verbosity = kwargs.pop('verbosity', 'FATAL')
@@ -98,6 +99,7 @@ class SearchThink:
         if 'memory' in self.comp_obj:
             assert self.n_token > 0, "n_token should be bigger than 0 when using memory objective."
             
+        self.stride = kwargs.pop('stride', 0)
         self.use_key_token = kwargs.pop('use_key_token', False)
         self.trunc_len = kwargs.pop('trunc_len', 512)
         self.sliding_window = kwargs.pop('sliding_window', 128)
@@ -168,9 +170,8 @@ class SearchThink:
             alpha=self.alpha,
             beta=self.beta,
             key_token_path=self.key_token_path,
-            pruning_ratio_options=self.pruning_ratio_options
         )
-        self.search_space = LlamaGroupSizeSearchSpaceThink(
+        self.search_space = LlamaThinKSearchSpace(
             bits=self.bits,
             group_size=self.group_size,
             pass_module=self.pass_module,
@@ -181,7 +182,8 @@ class SearchThink:
             n_token=self.n_token,
             outlier_bits=outlier_bits,
             only_outlier_bits=kwargs.pop('only_outlier_bits', False),
-            pruning_ratio_options=self.pruning_ratio_options,
+            k_pruning_dim=self.k_pruning_dim,
+            v_pruning_dim=self.v_pruning_dim,
         )
         self.ga_pop_size = kwargs.pop('ga_pop_size', 40)
         self.subset_pop_size = kwargs.pop('subset_pop_size', 100)
@@ -334,7 +336,7 @@ class SearchThink:
     def _evaluate(self, archs, accelerator):
         metric_list, complexity_list = [], []
         for arch in tqdm(archs, desc='Eval Arch'):
-            metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func)
+            metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func, stride=self.stride)
             metric_list.append(min(self.max_value, np.nan_to_num(list(metric.values())[0], nan=self.max_value)))
             complexity_list.append([complexity[obj] for obj in self.comp_obj])
 
@@ -348,15 +350,16 @@ class SearchThink:
         if self.predictor == 'rbf':
             n_block = self.config['n_block']
             n_linear = self.config['n_linear']
-            lb = np.zeros((n_linear + 3, n_block))  # +3 for k, v, and pruning_ratio
-            ub = np.ones((n_linear + 3, n_block))
-            
+            lb = np.zeros((n_linear + 4, n_block))  # +4 for k, v, k_prune, v_prune
+            ub = np.ones((n_linear + 4, n_block))
+
             for linear_idx, linear in enumerate(self.config['linear']):
-                ub[linear_idx] = len(getattr(self.search_space, f"{linear.split('.')[-1]}_option")) - 1            
-            ub[n_linear] = len(self.search_space.k_option) - 1
+                ub[linear_idx] = len(getattr(self.search_space, f"{linear.split('.')[-1]}_option")) - 1
+            ub[n_linear]     = len(self.search_space.k_option) - 1
             ub[n_linear + 1] = len(self.search_space.v_option) - 1
-            ub[n_linear + 2] = len(self.search_space.pruning_ratio_option) - 1  # pruning_ratio
-            
+            ub[n_linear + 2] = len(self.search_space.k_pruning_dim_option) - 1
+            ub[n_linear + 3] = len(self.search_space.v_pruning_dim_option) - 1
+
             lb = np.delete(lb.flatten(), self.search_space.pass_idx_list, axis=-1)
             ub = np.delete(ub.flatten(), self.search_space.pass_idx_list, axis=-1)
 
@@ -433,7 +436,7 @@ class AuxiliarySingleLevelProblemThink(Problem):
     def __init__(self, search_space, predictor, config, comp_obj, comp_obj_max, comp_obj_min, group_size, n_token):
         n_block, n_linear = search_space.n_block, search_space.n_linear
         n_comp_obj = len(search_space.comp_obj)
-        super().__init__(n_var=n_block * (n_linear + 3), n_obj=n_comp_obj + 1, n_constr=2 * n_comp_obj, type_var=int)  # +3 for k, v, pruning_ratio
+        super().__init__(n_var=n_block * (n_linear + 4), n_obj=n_comp_obj + 1, n_constr=2 * n_comp_obj, type_var=int)  # +4 for k, v, k_prune, v_prune
 
         self.ss = search_space
         self.predictor = predictor
@@ -443,24 +446,25 @@ class AuxiliarySingleLevelProblemThink(Problem):
         self.config = config
         self.group_size = group_size
         self.n_token = n_token
-        self.xl = np.zeros((n_linear + 3, n_block))
-        self.xu = np.ones((n_linear + 3, n_block))
-        
+        self.xl = np.zeros((n_linear + 4, n_block))
+        self.xu = np.ones((n_linear + 4, n_block))
+
         for linear_idx, linear in enumerate(config['linear']):
             self.xu[linear_idx] = len(getattr(search_space, f"{linear.split('.')[-1]}_option")) - 1
-        self.xu[n_linear] = len(search_space.k_option) - 1
+        self.xu[n_linear]     = len(search_space.k_option) - 1
         self.xu[n_linear + 1] = len(search_space.v_option) - 1
-        self.xu[n_linear + 2] = len(search_space.pruning_ratio_option) - 1  # pruning_ratio
-        
+        self.xu[n_linear + 2] = len(search_space.k_pruning_dim_option) - 1
+        self.xu[n_linear + 3] = len(search_space.v_pruning_dim_option) - 1
+
         for pass_w_linear in search_space.pass_module['w']:
             blk, linear = pass_w_linear.split('.', 1)
-            linear_idx =  config['linear'].index(linear)
+            linear_idx = config['linear'].index(linear)
             self.xl[linear_idx, int(blk)] = len(getattr(search_space, f"{linear.split('.')[-1]}_option")) - 1
         for pass_k_layer in search_space.pass_module['k']:
             self.xl[n_linear, pass_k_layer] = len(search_space.k_option) - 1
         for pass_v_layer in search_space.pass_module['v']:
             self.xl[n_linear + 1, pass_v_layer] = len(search_space.v_option) - 1
-        # pruning_ratio doesn't have pass_module, so no need to set xl
+        # k_prune / v_prune have no pass_module
 
         self.xl = self.xl.flatten()
         self.xu = self.xu.flatten()
@@ -477,8 +481,14 @@ class AuxiliarySingleLevelProblemThink(Problem):
             f[i, 0] = metric
             for j in range(len(self.comp_obj)):
                 f[i, 1 + j] = info[self.comp_obj[j]]
-                g[i, 2 * j] = 1 - info[self.comp_obj[j]] / self.comp_obj_min[j]
-                g[i, 2 * j + 1] = info[self.comp_obj[j]] / self.comp_obj_max[j] - 1
+                if self.comp_obj_min[j] != 0:
+                    g[i, 2 * j] = 1 - info[self.comp_obj[j]] / self.comp_obj_min[j]
+                else:
+                    g[i, 2 * j] = 0.0
+                if self.comp_obj_max[j] != 0:
+                    g[i, 2 * j + 1] = info[self.comp_obj[j]] / self.comp_obj_max[j] - 1
+                else:
+                    g[i, 2 * j + 1] = 0.0
 
         out["F"] = f
         out["G"] = g
@@ -541,7 +551,7 @@ if __name__ == '__main__':
     
     parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
                         help='')
-    parser.add_argument('--kv_method', type=str, default='kivi', choices=['hqq', 'kivi'],
+    parser.add_argument('--kv_method', type=str, nargs='+', default=['kivi'], choices=['fp16', 'hqq', 'kivi', 'think'],
                         help='')
     
     parser.add_argument('--w_bits', type=int, nargs='+', default=[], 
@@ -567,15 +577,21 @@ if __name__ == '__main__':
     parser.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
     
-    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'memory'], 
+    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'kbits', 'vbits', 'memory', 'kvdim', 'kdim', 'vdim'],
                         help='complexity objectives to optimize simultaneously')
     parser.add_argument('--comp_obj_min', type=float, nargs='+', default=[2, 2], 
                         help='')
     parser.add_argument('--comp_obj_max', type=float, nargs='+', default=[4, 4], 
                         help='')
     
-    parser.add_argument('--pruning_ratio_options', type=float, nargs='+', default=[0.25, 0.5, 0.75, 1.0],
-                        help='Pruning ratio options (retention rate): 25%%, 50%%, 75%%, 100%%')
+    parser.add_argument('--k_pruning_dim', type=int, nargs='+', default=None,
+                        help='K pruning dim options (integer # of head_dim channels to prune), '
+                             'e.g. --k_pruning_dim 0 13 26 38 51 64 for head_dim=128. '
+                             'Default: derived from head_dim in config.')
+    parser.add_argument('--v_pruning_dim', type=int, nargs='+', default=None,
+                        help='V pruning dim options (integer # of head_dim channels to prune), '
+                             'e.g. --v_pruning_dim 0 13 26 38 51 64 for head_dim=128. '
+                             'Default: derived from head_dim in config.')
     
     parser.add_argument('--dataset', type=str, default='wikitext2',
                         help='dataset name')
@@ -638,6 +654,8 @@ if __name__ == '__main__':
                         help='target sequence length for memory calculation')
 
     
+    parser.add_argument('--stride', type=int, default=0,
+                        help='chunk size for stride-aware eval with use_cache=True (0 = single forward pass)')
     parser.add_argument('--use_key_token', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
     parser.add_argument('--trunc_len', type=int, default=512, 
                         help='truncation length for long PPL/JSD calculation')
