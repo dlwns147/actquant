@@ -23,6 +23,9 @@ CONFIG=config/llama.json
 # USE_KEY_TOKEN=True
 USE_KEY_TOKEN=False
 
+ONLY_RULER=False
+# ONLY_RULER=True
+
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
 
@@ -212,29 +215,28 @@ ARGS="
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
 --seed ${SEED} \
---datasets ${DATASETS}
-"
+--ruler \
+--ruler_task ${RULER_TASK} \
+--ruler_yaml_path ${RULER_YAML_PATH} \
+--ruler_result_path ${RULER_RESULT_PATH} \
+--ruler_batch_size ${RULER_BATCH_SIZE} \
+--ruler_sample ${RULER_SAMPLE} \
+--ruler_length ${RULER_LENGTH} \
+--ruler_task ${RULER_TASK}"
 
-# --stride ${STRIDE} \
-# --ruler \
-# --ruler_task ${RULER_TASK} \
-# --ruler_yaml_path ${RULER_YAML_PATH} \
-# --ruler_result_path ${RULER_RESULT_PATH} \
-# --ruler_batch_size ${RULER_BATCH_SIZE} \
-# --ruler_sample ${RULER_SAMPLE} \
-# --ruler_length ${RULER_LENGTH} \
-# --ruler_task ${RULER_TASK} \
 # --packing \
-# --zeroshot \
-# --tasks ${TASKS} \
-# --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
-# --longbench \
-# --longbench_result_path ${LONGBENCH_RESULT_PATH} \
-
-
 # --last_tokens ${LAST_TOKENS}
-#
 # --long_eval \
+
+if [ ${ONLY_RULER} == 'False' ]; then
+    ARGS+=" --datasets ${DATASETS} \
+    --zeroshot \
+    --tasks ${TASKS} \
+    --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
+    --longbench \
+    --longbench_result_path ${LONGBENCH_RESULT_PATH} \
+    --longbench_config ${LONGBENCH_CONFIG}"
+fi
 
 if [ ${USE_KEY_TOKEN} == 'True' ]; then
     ARGS+=" --use_key_token \

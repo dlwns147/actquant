@@ -18,19 +18,13 @@ CONFIG=config/llama.json
 # CONFIG=config/mistral.json
 
 
+COMP_OBJ=wbits
 # COMP_OBJ=kvdim
-COMP_OBJ=kvbits
+# COMP_OBJ=kvbits
 # COMP_OBJ=memory
 
-# Pruning dim options: integer # of head_dim channels to prune (K and V configured independently)
-# For head_dim=128: 0=0%, 16=12.5%, 32=25%, 48=37.5%, 64=50%
-K_PRUNING_DIM="0 16 32 48 64"
-# V_PRUNING_DIM="0 16 32 48 64"
-V_PRUNING_DIM="0"
-# K_PRUNING_DIM="0 8 16 24 32 40 48 56 64"
-# V_PRUNING_DIM="0 8 16 24 32 40 48 56 64"
-K_PRUNING_DIM_TEXT=$(echo ${K_PRUNING_DIM} | sed 's/ /_/g')
-V_PRUNING_DIM_TEXT=$(echo ${V_PRUNING_DIM} | sed 's/ /_/g')
+# USE_KEY_TOKEN=True
+USE_KEY_TOKEN=False
 
 # N_TOKEN=1024
 N_TOKEN=16384
@@ -53,24 +47,28 @@ V_QUANT_SCHEME=token
 RESIDUAL_LENGTH=128
 # RESIDUAL_LENGTH=0
 
-
-if [ ${COMP_OBJ} == 'kvdim' ]; then
-    KV_METHOD="think"
-    KV_METHOD_TEXT="think"
-    W_BITS="4"
-    W_BITS_TEXT="4"
+if [ ${COMP_OBJ} == 'wbits' ]; then
+    W_BITS="2 3 4"
+    W_BITS_TEXT="234"
     W_GROUP_SIZE=128
 
     KV_BITS="4"
     KV_BITS_TEXT="4"
     KV_GROUP_SIZE=("128")
     KV_GROUP_SIZE_TEXT=128
+    
+    K_PRUNING_DIM="0"
+    # V_PRUNING_DIM="0 16 32 48 64"
+    V_PRUNING_DIM="0"
+    K_PRUNING_DIM_TEXT=$(echo ${K_PRUNING_DIM} | sed 's/ /_/g')
+    V_PRUNING_DIM_TEXT=$(echo ${V_PRUNING_DIM} | sed 's/ /_/g')
 
-    COMP_OBJ_TEXT=kvdim
-    COMP_OBJ_MIN=0      # remained_dim >= 64  (prune <= 50% of head_dim=128)
-    COMP_OBJ_MIN_TEXT=0
-    COMP_OBJ_MAX=128     # remained_dim <= 128 (no pruning)
-    COMP_OBJ_MAX_TEXT=128
+    COMP_OBJ_TEXT=wbits
+    COMP_OBJ_MIN=${W_BITS:0:1}
+    COMP_OBJ_MIN_TEXT=${W_BITS:0:1}
+    COMP_OBJ_MAX=5
+    COMP_OBJ_MAX_TEXT=5
+    N_TOKEN=0
 
     N_DOE=400
     ITER=200
@@ -86,15 +84,52 @@ elif [ ${COMP_OBJ} == 'kvbits' ]; then
     KV_GROUP_SIZE=("32 64 128" "32 64 128")
     KV_GROUP_SIZE_TEXT=3264128x2
 
+    K_PRUNING_DIM="0"
+    # V_PRUNING_DIM="0 16 32 48 64"
+    V_PRUNING_DIM="0"
+    K_PRUNING_DIM_TEXT=$(echo ${K_PRUNING_DIM} | sed 's/ /_/g')
+    V_PRUNING_DIM_TEXT=$(echo ${V_PRUNING_DIM} | sed 's/ /_/g')
+
     COMP_OBJ_TEXT=kvbits
     COMP_OBJ_MIN=1
     COMP_OBJ_MIN_TEXT=1
     COMP_OBJ_MAX=5
     COMP_OBJ_MAX_TEXT=5
+    N_TOKEN=0
 
     N_DOE=400
-    ITER=200
-    N_ITER=50
+    ITER=150
+    N_ITER=30
+
+elif [ ${COMP_OBJ} == 'kvdim' ]; then
+    KV_METHOD="think"
+    KV_METHOD_TEXT="think"
+    W_BITS="4"
+    W_BITS_TEXT="4"
+    W_GROUP_SIZE=128
+
+    KV_BITS="4"
+    KV_BITS_TEXT="4"
+    KV_GROUP_SIZE=("128")
+    KV_GROUP_SIZE_TEXT=128
+    
+    K_PRUNING_DIM="0 16 32 48 64"
+    # V_PRUNING_DIM="0 16 32 48 64"
+    V_PRUNING_DIM="0"
+    K_PRUNING_DIM_TEXT=$(echo ${K_PRUNING_DIM} | sed 's/ /_/g')
+    V_PRUNING_DIM_TEXT=$(echo ${V_PRUNING_DIM} | sed 's/ /_/g')
+
+    COMP_OBJ_TEXT=kvdim
+    COMP_OBJ_MIN=0      # remained_dim >= 64  (prune <= 50% of head_dim=128)
+    COMP_OBJ_MIN_TEXT=0
+    COMP_OBJ_MAX=128     # remained_dim <= 128 (no pruning)
+    COMP_OBJ_MAX_TEXT=128
+    N_TOKEN=0
+
+    N_DOE=200
+    ITER=150
+    N_ITER=30
+
 
 elif [ ${COMP_OBJ} == 'memory' ]; then
     W_BITS="2 3 4"
@@ -105,6 +140,12 @@ elif [ ${COMP_OBJ} == 'memory' ]; then
     KV_BITS_TEXT="24"
     KV_GROUP_SIZE=("32 64 128" "32 64 128")
     KV_GROUP_SIZE_TEXT=3264128x2
+    
+    K_PRUNING_DIM="0 16 32 48 64"
+    # V_PRUNING_DIM="0 16 32 48 64"
+    V_PRUNING_DIM="0"
+    K_PRUNING_DIM_TEXT=$(echo ${K_PRUNING_DIM} | sed 's/ /_/g')
+    V_PRUNING_DIM_TEXT=$(echo ${V_PRUNING_DIM} | sed 's/ /_/g')
 
     COMP_OBJ_TEXT=memory
     COMP_OBJ_MIN=1
@@ -207,6 +248,16 @@ ARGS="--gpu_id ${DEVICES} \
 --dataset ${DATASET} \
 --save_iter ${SAVE_ITER}"
 
+# --sensitivity_result_path ${SENSITIVITY_RESULT_PATH} \
+if [ ${USE_KEY_TOKEN} == 'True' ]; then
+    ARGS+=" --use_key_token \
+    --trunc_len ${TRUNC_LEN} \
+    --sliding_window ${SLIDING_WINDOW} \
+    --alpha ${ALPHA} \
+    --beta ${BETA} \
+    --key_token_path ${KEY_TOKEN_PATH}"
+fi
+
 for g in "${KV_GROUP_SIZE[@]}"
 do
     ARGS+=" --k_group_size ${g} "
@@ -225,8 +276,6 @@ fi
 
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} search_think.py \
 ${ARGS}
-
-# --sensitivity_result_path ${SENSITIVITY_RESULT_PATH} \
 
 # --stride ${STRIDE}
 # --quant_kv_output \

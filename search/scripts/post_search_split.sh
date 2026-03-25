@@ -97,7 +97,9 @@ OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.p
 COMP_OBJ=(memory)
 SEED=0
 
-COMP_OBJ_VAL=(6300000000)
+# COMP_OBJ_VAL=(6300000000)
+# COMP_OBJ_VAL=(6069690368)
+COMP_OBJ_VAL=(153453)
 N_TOKEN=16384
 
 # COMP_OBJ_VAL=(5862072320)
@@ -233,8 +235,8 @@ BETA=-2
 # KVDIM_EXPR=save/search/think/..._kvdim_.../iter_N.stats
 
 # W_EXPR=
-KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240659_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_200_n_iter_50_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
-KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240700_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv24bits_w128kv3264128x2gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
+KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240700_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv24bits_w128kv3264128x2gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
+KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240659_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_200_n_iter_50_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
 
 # W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_200.stats
 # KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
