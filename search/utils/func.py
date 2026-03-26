@@ -157,6 +157,7 @@ def get_net_info(arch, config, group_size, n_token=0, residual_length=0):
     net_info['vdim']  = float(np.mean([head_dim - d for d in p_arch['v']])) if 'v' in p_arch else float(head_dim)
     kv_dims = [head_dim - d for d in p_arch.get('k', [])] + [head_dim - d for d in p_arch.get('v', [])]
     net_info['kvdim'] = float(np.mean(kv_dims)) if kv_dims else float(head_dim)
+    net_info['n_token'] = n_token
     return net_info
 
 def getsubattr(obj, attr):
