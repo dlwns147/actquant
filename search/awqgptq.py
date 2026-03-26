@@ -148,6 +148,9 @@ def main(args):
     accelerator.print(arch)
     
     model = evaluator.sample(arch)
+    complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
+    print(f'complexity: {list(complexity.keys())}')
+    print(f'complexity: {list(complexity.values())}')
 
     if args.datasets:
         if args.stride is not None:
@@ -167,11 +170,9 @@ def main(args):
             model.config.use_cache = False
 
         metric_start = time()
-        metric, complexity = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride)
+        metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride)[0]
         metric_time = time() - metric_start
         print(f'[0] {args.metric}: {[p for p in metric.values()]}, metric: {list(metric.values())}, prev_metric: [0]')
-        print(f'complexity: {list(complexity.keys())}')
-        print(f'complexity: {list(complexity.values())}')
         print(f'Metric Time: {metric_time:.2f}s')
         # accelerator.print(arch)
         # print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}')

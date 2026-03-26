@@ -53,7 +53,8 @@ RESIDUAL_LENGTH=128
 
 # N_TOKEN_LIST=(1024 131072 1048576)
 # N_TOKEN_LIST=(16384 32768 65536 131072)
-N_TOKEN_LIST=(16384)
+# N_TOKEN_LIST=(16384)
+N_TOKEN_LIST=(32768 65536 131072)
 
 # W_BITS_LIST=(3 4)
 W_BITS_LIST=(4)
@@ -66,13 +67,13 @@ KV_GROUP_SIZE=128
 # KV_BITS_LIST=(4 3 2)
 # KV_GROUP_SIZE=128
 
-KV_DIM_LIST=(0 64)
+KV_DIM_LIST=(64 0)
 
-for W_BITS in ${W_BITS_LIST[@]}
+for N_TOKEN in ${N_TOKEN_LIST[@]}
 do
-    for KV_BITS in ${KV_BITS_LIST[@]}
+    for W_BITS in ${W_BITS_LIST[@]}
     do
-        for N_TOKEN in ${N_TOKEN_LIST[@]}
+        for KV_BITS in ${KV_BITS_LIST[@]}
         do
             for KV_DIM in ${KV_DIM_LIST[@]}
             do
@@ -88,9 +89,10 @@ do
                     --k_group_size ${KV_GROUP_SIZE} \
                     --v_group_size ${KV_GROUP_SIZE} \
                     --n_token ${N_TOKEN} \
-                    --k_dim ${KV_DIM} \
+                    --k_dim ${KV_DIM}
                     # --v_dim ${KV_DIM}
             done
         done
     done
+    echo "-------------------------------- ${N_TOKEN} tokens --------------------------------"
 done

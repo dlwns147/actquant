@@ -26,6 +26,7 @@ USE_KEY_TOKEN=False
 ONLY_RULER=False
 # ONLY_RULER=True
 
+
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
 
@@ -151,6 +152,7 @@ RULER_TASK="niah_single_3"
 RULER_YAML_PATH=utils/ruler_utils
 # RULER_LENGTH=4096
 RULER_LENGTH=16384
+N_TOKEN=16384
 # RULER_LENGTH=65536
 # RULER_LENGTH=128000
 # RULER_LENGTH=131072
@@ -215,6 +217,7 @@ ARGS="
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
 --seed ${SEED} \
+--n_token ${N_TOKEN} \
 --ruler \
 --ruler_task ${RULER_TASK} \
 --ruler_yaml_path ${RULER_YAML_PATH} \

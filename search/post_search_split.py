@@ -308,7 +308,10 @@ def main(args):
         #     # for idx in 
         #     # accelerator.print(f'Selected arch[{idx}] {comp_obj}: {pf_list[i][idx_list[i], 1:].tolist()}, metric: {pf_list[i][idx_list[i], 0].tolist()}')   
         #     accelerator.print(f'Selected arch[{idx}] {comp_obj}: {pf_list[i][idx, 1:].tolist()}, metric: {pf_list[i][idx_list[i], 0].tolist()}')            
-            
+        
+        complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
+        print(f'complexity: {list(complexity.keys())}')
+        print(f'complexity: {list(complexity.values())}')
         if args.datasets:
             if args.stride is not None:
                 if 'kivi' in args.kv_method:
@@ -331,12 +334,9 @@ def main(args):
             # model.config.use_cache = True if args.stride is not None else False
 
             metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride)[0] if args.datasets else 0
-            complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
             # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
             # print(f'[{idx}] complexity: {complexity}, {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
             print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
-            print(f'complexity: {list(complexity.keys())}')
-            print(f'complexity: {list(complexity.values())}')
             if args.random_sample is not None and args.save and args.results_csv_file:
                 for c_i, c in enumerate(complexity.values()):
                     comp_save_list[c_i].append(c)
