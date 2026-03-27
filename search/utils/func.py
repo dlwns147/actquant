@@ -32,7 +32,7 @@ def get_correlation(prediction, target):
     return rmse, rho, tau
 
 
-def compute_bits(arch, config, group_size, target='w'):
+def compute_bits(arch, config, group_size, target='w', include_pruning=True):
     # arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
     memory_usage = 0
     if target == 'w':
@@ -63,11 +63,14 @@ def compute_bits(arch, config, group_size, target='w'):
         kv_list = arch['q'][target]
         prune_list = arch.get('p', {}).get(target, [0] * len(kv_list))
         head_dim = int(config['head_dim'])
-        effective_bits = []
+        bits_list = []
         for (bits, gs), prune_dim in zip(kv_list, prune_list):
             scale_overhead = (32 / gs) if gs != 0 else 0
-            effective_bits.append((bits + scale_overhead) * (1 - prune_dim / head_dim))
-        return np.mean(effective_bits).item()
+            b = bits + scale_overhead
+            if include_pruning:
+                b *= (1 - prune_dim / head_dim)
+            bits_list.append(b)
+        return np.mean(bits_list).item()
 
     elif target == 'kv':
         k_list = arch['q']['k']
@@ -76,11 +79,14 @@ def compute_bits(arch, config, group_size, target='w'):
         k_prune_list = p_arch.get('k', [0] * len(k_list))
         v_prune_list = p_arch.get('v', [0] * len(v_list))
         head_dim = int(config['head_dim'])
-        effective_bits = []
+        bits_list = []
         for (bits, gs), prune_dim in zip(k_list + v_list, k_prune_list + v_prune_list):
             scale_overhead = (32 / gs) if gs != 0 else 0
-            effective_bits.append((bits + scale_overhead) * (1 - prune_dim / head_dim))
-        return np.mean(effective_bits).item()
+            b = bits + scale_overhead
+            if include_pruning:
+                b *= (1 - prune_dim / head_dim)
+            bits_list.append(b)
+        return np.mean(bits_list).item()
 
     else:
         raise NotImplementedError
@@ -147,16 +153,19 @@ def get_net_info(arch, config, group_size, n_token=0, residual_length=0):
     q_arch = arch.get('q', {})
     p_arch = arch.get('p', {})
     net_info = {}
-    net_info['wbits']  = compute_bits(arch=arch, config=config, group_size=group_size, target='w')  if 'w' in q_arch else 0
-    net_info['kbits']  = compute_bits(arch=arch, config=config, group_size=group_size, target='k')  if 'k' in q_arch else 0
-    net_info['vbits']  = compute_bits(arch=arch, config=config, group_size=group_size, target='v')  if 'v' in q_arch else 0
-    net_info['kvbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='kv') if 'k' in q_arch and 'v' in q_arch else 0
-    net_info['memory'] = compute_memory(arch=arch, config=config, group_size=group_size, n_token=n_token, residual_length=residual_length) if 'w' in q_arch and 'k' in q_arch and 'v' in q_arch else 0
+    net_info['wbits']      = compute_bits(arch=arch, config=config, group_size=group_size, target='w')  if 'w' in q_arch else 0
+    net_info['kvbits']     = compute_bits(arch=arch, config=config, group_size=group_size, target='kv', include_pruning=False) if 'k' in q_arch and 'v' in q_arch else 0
+    net_info['kbits']      = compute_bits(arch=arch, config=config, group_size=group_size, target='k',  include_pruning=False) if 'k' in q_arch else 0
+    net_info['vbits']      = compute_bits(arch=arch, config=config, group_size=group_size, target='v',  include_pruning=False) if 'v' in q_arch else 0
     head_dim = int(config['head_dim'])
-    net_info['kdim']  = float(np.mean([head_dim - d for d in p_arch['k']])) if 'k' in p_arch else float(head_dim)
-    net_info['vdim']  = float(np.mean([head_dim - d for d in p_arch['v']])) if 'v' in p_arch else float(head_dim)
     kv_dims = [head_dim - d for d in p_arch.get('k', [])] + [head_dim - d for d in p_arch.get('v', [])]
     net_info['kvdim'] = float(np.mean(kv_dims)) if kv_dims else float(head_dim)
+    net_info['kdim']  = float(np.mean([head_dim - d for d in p_arch['k']])) if 'k' in p_arch else float(head_dim)
+    net_info['vdim']  = float(np.mean([head_dim - d for d in p_arch['v']])) if 'v' in p_arch else float(head_dim)
+    net_info['eff_kvbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='kv', include_pruning=True)  if 'k' in q_arch and 'v' in q_arch else 0
+    net_info['eff_kbits']  = compute_bits(arch=arch, config=config, group_size=group_size, target='k',  include_pruning=True)  if 'k' in q_arch else 0
+    net_info['eff_vbits']  = compute_bits(arch=arch, config=config, group_size=group_size, target='v',  include_pruning=True)  if 'v' in q_arch else 0
+    net_info['memory']     = compute_memory(arch=arch, config=config, group_size=group_size, n_token=n_token, residual_length=residual_length) if 'w' in q_arch and 'k' in q_arch and 'v' in q_arch else 0
     net_info['n_token'] = n_token
     return net_info
 

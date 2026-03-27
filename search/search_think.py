@@ -577,7 +577,7 @@ if __name__ == '__main__':
     parser.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
     
-    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'kbits', 'vbits', 'memory', 'kvdim', 'kdim', 'vdim'],
+    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'kbits', 'vbits', 'memory', 'kvdim', 'kdim', 'vdim', 'eff_kvbits', 'eff_kbits', 'eff_vbits'],
                         help='complexity objectives to optimize simultaneously')
     parser.add_argument('--comp_obj_min', type=float, nargs='+', default=[2, 2], 
                         help='')
