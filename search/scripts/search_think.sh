@@ -131,6 +131,30 @@ elif [ ${COMP_OBJ} == 'kvdim' ]; then
     ITER=150
     N_ITER=30
 
+elif [ ${COMP_OBJ} == 'eff_kvbits' ]; then
+    W_BITS="4"
+    W_BITS_TEXT="4"
+    W_GROUP_SIZE=128
+
+    KV_BITS="2 3 4"
+    KV_BITS_TEXT="234"
+    KV_GROUP_SIZE=("32 64 128" "32 64 128" "32 64 128")
+    KV_GROUP_SIZE_TEXT=3264128x3
+
+    K_PRUNING_DIM="0 16 32 48 64"
+    V_PRUNING_DIM="0"
+    K_PRUNING_DIM_TEXT=$(echo ${K_PRUNING_DIM} | sed 's/ /_/g')
+    V_PRUNING_DIM_TEXT=$(echo ${V_PRUNING_DIM} | sed 's/ /_/g')
+
+    COMP_OBJ_TEXT=eff_kvbits
+    COMP_OBJ_MIN=0.1
+    COMP_OBJ_MIN_TEXT=0.1
+    COMP_OBJ_MAX=5
+    COMP_OBJ_MAX_TEXT=5
+
+    N_DOE=600
+    ITER=200
+    N_ITER=50
 
 elif [ ${COMP_OBJ} == 'memory' ]; then
     W_BITS="2 3 4"
@@ -158,30 +182,6 @@ elif [ ${COMP_OBJ} == 'memory' ]; then
     ITER=200
     N_ITER=50
 
-elif [ ${COMP_OBJ} == 'eff_kvbits' ]; then
-    W_BITS="4"
-    W_BITS_TEXT="4"
-    W_GROUP_SIZE=128
-
-    KV_BITS="2 3 4"
-    KV_BITS_TEXT="234"
-    KV_GROUP_SIZE=("32 64 128" "32 64 128" "32 64 128")
-    KV_GROUP_SIZE_TEXT=3264128x3
-
-    K_PRUNING_DIM="0 16 32 48 64"
-    V_PRUNING_DIM="0"
-    K_PRUNING_DIM_TEXT=$(echo ${K_PRUNING_DIM} | sed 's/ /_/g')
-    V_PRUNING_DIM_TEXT=$(echo ${V_PRUNING_DIM} | sed 's/ /_/g')
-
-    COMP_OBJ_TEXT=eff_kvbits
-    COMP_OBJ_MIN=0.1
-    COMP_OBJ_MIN_TEXT=0.1
-    COMP_OBJ_MAX=5
-    COMP_OBJ_MAX_TEXT=5
-
-    N_DOE=600
-    ITER=200
-    N_ITER=50
 fi
 
 QMODEL_PATHS_LIST=()

@@ -80,7 +80,6 @@ QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 
 N_OUTLIER=32
 OUTLIER_PATH=/NAS/SJ/nsgaquant/outlier/${MODEL_NAME}/w16_r${N_OUTLIER}/outlier.pth
-SEED=0
 
 # COMP_OBJ=(wbits kvbits)
 # COMP_OBJ_TEXT="wkv"
@@ -90,18 +89,17 @@ SEED=0
 # COMP_OBJ_THRESHOLD_LIST=(0.005 0.005)
 # N_TOKEN=1024
 
-COMP_OBJ=(kvbits kvdim)
-COMP_OBJ_VAL=(3.25 96)
-COMP_OBJ_THRESHOLD_LIST=(0.005 0.1)
-N_TOKEN=0
+# COMP_OBJ=(kvbits)
+# COMP_OBJ_VAL=(3.0)
+# COMP_OBJ_THRESHOLD_LIST=(0.005)
+# N_TOKEN=1024
 
-# COMP_OBJ=(memory)
-
+COMP_OBJ=(memory)
+SEED=0
 
 # COMP_OBJ_VAL=(6300000000)
-# COMP_OBJ_VAL=(6069690368)
-# COMP_OBJ_VAL=(153453)
-# N_TOKEN=16384
+COMP_OBJ_VAL=(6069690368)
+N_TOKEN=16384
 
 # COMP_OBJ_VAL=(5862072320)
 # # COMP_OBJ_VAL=(5666250752)
@@ -139,7 +137,7 @@ N_TOKEN=0
 # N_TOKEN=1048576
 
 # COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
-# COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
+COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
 # COMP_OBJ_THRESHOLD_LIST=(0.005 $(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
 
 # PREFER="metric#0.0 ${TARGET_COMP_OBJ}#${TARGET_COMP_OBJ_VAL}"
@@ -316,24 +314,43 @@ ARGS="--gpu_id ${DEVICES} \
 --w_scale ${W_SCALE} \
 --kv_scale ${KV_SCALE} \
 --kvdim_scale ${KVDIM_SCALE} \
---ruler \
---ruler_task ${RULER_TASK} \
---ruler_yaml_path ${RULER_YAML_PATH} \
---ruler_result_path ${RULER_RESULT_PATH} \
---ruler_batch_size ${RULER_BATCH_SIZE} \
---ruler_sample ${RULER_SAMPLE} \
---ruler_length ${RULER_LENGTH} \
---ruler_task ${RULER_TASK} \
 --datasets ${DATASETS} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
---data_batch_size ${DATA_BATCH_SIZE} \
---zeroshot \
---tasks ${TASKS} \
---lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
---longbench \
---longbench_result_path ${LONGBENCH_RESULT_PATH} \
---longbench_config ${LONGBENCH_CONFIG}"
+--data_batch_size ${DATA_BATCH_SIZE}"
+# --ruler \
+# --ruler_task ${RULER_TASK} \
+# --ruler_yaml_path ${RULER_YAML_PATH} \
+# --ruler_result_path ${RULER_RESULT_PATH} \
+# --ruler_batch_size ${RULER_BATCH_SIZE} \
+# --ruler_sample ${RULER_SAMPLE} \
+# --ruler_length ${RULER_LENGTH}
+
+# --stride ${STRIDE}
+# --last_tokens ${LAST_TOKENS}
+
+
+
+# --random_sample ${RANDOM_SAMPLE} \
+
+#  \
+# --random_sample_path ${RANDOM_SAMPLE_PATH} \
+# --grid_search ${GRID_SEARCH}
+
+# --prefer ${PREFER} \
+# --sqrt \
+# --use_key_token \
+# --trunc_len ${TRUNC_LEN} \
+# --sliding_window ${SLIDING_WINDOW} \
+# --alpha ${ALPHA} \
+# --beta ${BETA}
+# --zeroshot \
+# --tasks ${TASKS} \
+# --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
+# --longbench \
+# --longbench_result_path ${LONGBENCH_RESULT_PATH} \
+# --longbench_config ${LONGBENCH_CONFIG} \
+
 
 for g in "${K_GROUP_SIZE[@]}"
 do
@@ -380,37 +397,3 @@ fi
 N_PROC=1
 # N_PROC=2
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} post_search_split.py ${ARGS}
-
-# --ruler \
-# --ruler_task ${RULER_TASK} \
-# --ruler_yaml_path ${RULER_YAML_PATH} \
-# --ruler_result_path ${RULER_RESULT_PATH} \
-# --ruler_batch_size ${RULER_BATCH_SIZE} \
-# --ruler_sample ${RULER_SAMPLE} \
-# --ruler_length ${RULER_LENGTH}
-
-# --stride ${STRIDE}
-# --last_tokens ${LAST_TOKENS}
-
-
-
-# --random_sample ${RANDOM_SAMPLE} \
-
-#  \
-# --random_sample_path ${RANDOM_SAMPLE_PATH} \
-# --grid_search ${GRID_SEARCH}
-
-# --prefer ${PREFER} \
-# --sqrt \
-# --use_key_token \
-# --trunc_len ${TRUNC_LEN} \
-# --sliding_window ${SLIDING_WINDOW} \
-# --alpha ${ALPHA} \
-# --beta ${BETA}
-# --zeroshot \
-# --tasks ${TASKS} \
-# --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
-# --longbench \
-# --longbench_result_path ${LONGBENCH_RESULT_PATH} \
-# --longbench_config ${LONGBENCH_CONFIG} \
-

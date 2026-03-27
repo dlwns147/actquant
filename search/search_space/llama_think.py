@@ -303,13 +303,15 @@ class LlamaThinKSearchSpace(LlamaGroupSizeSearchSpace):
             np.argwhere((np.array(_x) == np.array(self.k_option)).all(axis=1))[0, 0]
             for layer_idx, _x in enumerate(q_arch['k'])
             if layer_idx not in self.pass_module['k']
-        ]) if 'kvbits' in self.comp_obj or 'kbits' in self.comp_obj or 'memory' in self.comp_obj else []
+        ]) if 'kvbits' in self.comp_obj or 'kbits' in self.comp_obj or 'memory' in self.comp_obj \
+            or 'eff_kvbits' in self.comp_obj or 'eff_kbits' in self.comp_obj else []
 
         v_encode = np.array([
             np.argwhere((np.array(_x) == np.array(self.v_option)).all(axis=1))[0, 0]
             for layer_idx, _x in enumerate(q_arch['v'])
             if layer_idx not in self.pass_module['v']
-        ]) if 'kvbits' in self.comp_obj or 'vbits' in self.comp_obj or 'memory' in self.comp_obj else []
+        ]) if 'kvbits' in self.comp_obj or 'vbits' in self.comp_obj or 'memory' in self.comp_obj \
+            or 'eff_kvbits' in self.comp_obj or 'eff_vbits' in self.comp_obj else []
 
         k_dim_encode = np.array([
             self.k_pruning_dim_option.index(int(d)) for d in p_arch['k']
