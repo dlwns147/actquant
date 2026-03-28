@@ -234,8 +234,9 @@ BETA=-2
 # KVDIM_EXPR=save/search/think/..._kvdim_.../iter_N.stats
 
 # W_EXPR=
-KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240700_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv24bits_w128kv3264128x2gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
-KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240659_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_200_n_iter_50_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
+# KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240700_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv24bits_w128kv3264128x2gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
+# KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240659_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_200_n_iter_50_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
+EFF_KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603270923_Llama-3.1-8B-Instruct_eff_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0.1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_10.stats
 
 # W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_200.stats
 # KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
@@ -272,6 +273,7 @@ KV_SCALE=1
 # KV_SCALE=0.85
 # KV_SCALE=0.8
 KVDIM_SCALE=1
+EFF_KVDIM_SCALE=1
 
 if [ ${USE_KEY_TOKEN} == 'True' ]; then
     SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
@@ -314,6 +316,7 @@ ARGS="--gpu_id ${DEVICES} \
 --w_scale ${W_SCALE} \
 --kv_scale ${KV_SCALE} \
 --kvdim_scale ${KVDIM_SCALE} \
+--eff_kv_scale ${EFF_KVDIM_SCALE} \
 --datasets ${DATASETS} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
@@ -391,6 +394,10 @@ fi
 
 if [ -n "${KVDIM_EXPR}" ]; then
     ARGS+=" --kvdim_expr ${KVDIM_EXPR}"
+fi
+
+if [ -n "${EFF_KVDIM_EXPR}" ]; then
+    ARGS+=" --eff_kv_expr ${EFF_KVDIM_EXPR}"
 fi
 
 # -n ${N} \

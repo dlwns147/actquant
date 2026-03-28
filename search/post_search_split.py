@@ -141,10 +141,12 @@ def main(args):
         expr_map['kv'] = load_expr(args.kv_expr, 'kvbits')
     if args.kvdim_expr:
         expr_map['kvdim'] = load_expr(args.kvdim_expr, 'kvdim')
-    assert len(expr_map) >= 2, "At least 2 of --w_expr, --kv_expr, --kvdim_expr must be provided"
+    if args.eff_kv_expr:
+        expr_map['eff_kv'] = load_expr(args.eff_kv_expr, 'eff_kvbits')
+    assert len(expr_map) >= 1, "At least 1 of --w_expr, --kv_expr, --kvdim_expr, --eff_kv_expr must be provided"
 
     expr_keys = list(expr_map.keys())
-    scales = {'w': args.w_scale, 'kv': args.kv_scale, 'kvdim': args.kvdim_scale}
+    scales = {'w': args.w_scale, 'kv': args.kv_scale, 'kvdim': args.kvdim_scale, 'eff_kv': args.eff_kv_scale}
 
     # Build all combinations and compute combined metric
     # F layout: [new_metric, comp_metric_0, ..., comp_metric_N, *comp_obj]
@@ -172,6 +174,11 @@ def main(args):
                 arch['q']['k'] = subnet['q']['k']
                 arch['q']['v'] = subnet['q']['v']
             elif key == 'kvdim':
+                arch['p']['k'] = subnet['p']['k']
+                arch['p']['v'] = subnet['p']['v']
+            elif key == 'eff_kv':
+                arch['q']['k'] = subnet['q']['k']
+                arch['q']['v'] = subnet['q']['v']
                 arch['p']['k'] = subnet['p']['k']
                 arch['p']['v'] = subnet['p']['v']
             component_metrics.append(f_row[0])
@@ -661,6 +668,8 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--kvdim_expr', type=str, default='',
                         help='')
+    parser.add_argument('--eff_kv_expr', type=str, default='',
+                        help='path to eff_kvbits (joint KV bits+dim) search stats file')
     parser.add_argument('--expr_front', action='store_true', help='')
     # parser.add_argument('--expr_comp_obj', type=str, nargs='+', default=[''],
     #                     help='')
@@ -723,6 +732,8 @@ if __name__ == '__main__':
                         help='scale weight for kv metric in combined metric')
     parser.add_argument('--kvdim_scale', type=float, default=1.0,
                         help='scale weight for kvdim metric in combined metric')
+    parser.add_argument('--eff_kv_scale', type=float, default=1.0,
+                        help='scale weight for eff_kv metric in combined metric')
 
     parser.add_argument('--use_key_token', action='store_true',
                         help='Only use key tokens for loss calculation (Long PPL/JSD)')
