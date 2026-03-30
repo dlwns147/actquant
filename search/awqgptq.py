@@ -20,6 +20,7 @@ from utils.longbench import pred_longbench, eval_longbench
 from utils.data import get_tokenizer
 from utils.ruler import eval_ruler
 from utils.longeval import eval_longeval_lines
+from utils.minilongbench import pred_minilongbench, eval_minilongbench
 import warnings
 from time import time
 warnings.simplefilter("ignore")
@@ -293,6 +294,36 @@ def main(args):
         print(f'RULER Time: {ruler_time:.2f}s')
 
 
+    if args.minilongbench:
+        clean_up()
+        if 'kivi' in args.kv_method:
+            model.config.kivi_config.residual_length = args.residual_length
+        elif 'hqq' in args.kv_method:
+            model.generation_config.cache_config = args.residual_length
+        model.config.quant_kv_output = False
+        model.config.use_cache = True
+
+        from time import time as _time
+        mlb_start = _time()
+        pred_minilongbench(
+            model,
+            tokenizer=get_tokenizer(model_id),
+            save_path=args.minilongbench_result_path,
+            longbench_config=args.longbench_config,
+            data_dir=args.minilongbench_data_dir if args.minilongbench_data_dir else None,
+        )
+        eval_minilongbench(args.minilongbench_result_path)
+        mlb_time = _time() - mlb_start
+        print(f'MiniLongBench Time: {mlb_time:.2f}s')
+
+        sentences = []
+        for k, v in vars(args).items():
+            sentences.append(f"{k}: {v}\n")
+        sentences.append(f'MiniLongBench Time: {mlb_time:.2f}s\n')
+        with open(os.path.join(args.minilongbench_result_path, "pred", "result.txt"), 'w') as f:
+            for sentence in sentences:
+                f.write(sentence)
+
     if args.longeval:
         clean_up()
         if 'kivi' in args.kv_method:
@@ -510,6 +541,13 @@ if __name__ == '__main__':
                         help='')
 
     
+    # MiniLongBench arguments
+    parser.add_argument('--minilongbench', action='store_true', help='Run MiniLongBench evaluation')
+    parser.add_argument('--minilongbench_result_path', type=str, default='',
+                        help='Directory to save MiniLongBench results')
+    parser.add_argument('--minilongbench_data_dir', type=str, default='',
+                        help='Path to MiniLongBench data directory (default: utils/minilongbench_data/data)')
+
     # LongEval arguments
     parser.add_argument('--longeval', action='store_true', help='Enable LongEval lines task evaluation')
     parser.add_argument('--longeval_test_dir', type=str, default='',

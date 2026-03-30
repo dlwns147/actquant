@@ -23,8 +23,8 @@ CONFIG=config/llama.json
 # USE_KEY_TOKEN=True
 USE_KEY_TOKEN=False
 
-ONLY_RULER=False
-# ONLY_RULER=True
+# ONLY_RULER=False
+ONLY_RULER=True
 
 
 # W_METHOD="hqq layer_prune"
@@ -146,6 +146,8 @@ SAVE=save/result/${TODAY}_test
 LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONGBENCH_CONFIG=utils/longbench_config
 
+MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_k${K_BITS}bits_v${V_BITS}bits_r${RESIDUAL_LENGTH}
+
 # RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
 RULER_TASK="niah_single_3"
 # RULER_TASK="niah_single_1"
@@ -236,10 +238,13 @@ if [ ${ONLY_RULER} == 'False' ]; then
     --zeroshot \
     --tasks ${TASKS} \
     --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE} \
-    --longbench \
-    --longbench_result_path ${LONGBENCH_RESULT_PATH} \
-    --longbench_config ${LONGBENCH_CONFIG}"
+    --longbench_config ${LONGBENCH_CONFIG} \
+    --minilongbench \
+    --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}"
 fi
+
+    # --longbench \
+    # --longbench_result_path ${LONGBENCH_RESULT_PATH} \
 
 if [ ${USE_KEY_TOKEN} == 'True' ]; then
     ARGS+=" --use_key_token \
