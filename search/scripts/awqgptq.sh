@@ -145,7 +145,6 @@ SAVE=save/result/${TODAY}_test
 
 LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONGBENCH_CONFIG=utils/longbench_config
-
 MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_k${K_BITS}bits_v${V_BITS}bits_r${RESIDUAL_LENGTH}
 
 # RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"

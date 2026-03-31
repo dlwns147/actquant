@@ -116,7 +116,7 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset
     return preds
 
 
-def pred_minilongbench(model, tokenizer, save_path, longbench_config, data_dir=None):
+def pred_minilongbench(model, tokenizer, save_path, longbench_config, data_dir=None, model_name=None):
     if data_dir is None:
         data_dir = MINILONGBENCH_DATA_DIR
 
@@ -124,7 +124,18 @@ def pred_minilongbench(model, tokenizer, save_path, longbench_config, data_dir=N
     dataset2prompt = json.load(open(os.path.join(longbench_config, "dataset2prompt.json"), "r"))
     dataset2maxlen = json.load(open(os.path.join(longbench_config, "dataset2maxlen.json"), "r"))
 
-    model_name = model.config._name_or_path.split('/')[-1]
+    if model_name is None:
+        name_or_path = model.config._name_or_path
+        if name_or_path.endswith('.json'):
+            name_or_path = os.path.dirname(name_or_path)
+        model_name = name_or_path.rstrip('/').split('/')[-1]
+    if model_name not in model2maxlen:
+        # try to find a matching key by prefix
+        matched = next((k for k in model2maxlen if model_name.startswith(k) or k in model_name), None)
+        if matched:
+            model_name = matched
+        else:
+            raise KeyError(f"model_name '{model_name}' not found in model2maxlen. Available keys: {list(model2maxlen.keys())}")
     max_length = model2maxlen[model_name]
     device = model.device
 

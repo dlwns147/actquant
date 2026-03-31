@@ -24,6 +24,7 @@ from utils.longbench import pred_longbench, eval_longbench
 from utils.data import get_tokenizer
 from utils.ruler import eval_ruler
 from utils.longeval import eval_longeval_lines, generate_lines_testcases
+from utils.minilongbench import pred_minilongbench, eval_minilongbench
 import warnings
 warnings.simplefilter("ignore")
 
@@ -309,16 +310,17 @@ def main(args):
         # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
         # print(f'complexity: {complexity}')
         # print(f'arch: {arch}')
+        
+        complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
+        print(f'complexity: {list(complexity.keys())}')
+        print(f'complexity: {list(complexity.values())}')
         model = evaluator.sample(arch)
         
         # for i, comp_obj in enumerate(args.comp_obj):
         #     # for idx in 
         #     # accelerator.print(f'Selected arch[{idx}] {comp_obj}: {pf_list[i][idx_list[i], 1:].tolist()}, metric: {pf_list[i][idx_list[i], 0].tolist()}')   
         #     accelerator.print(f'Selected arch[{idx}] {comp_obj}: {pf_list[i][idx, 1:].tolist()}, metric: {pf_list[i][idx_list[i], 0].tolist()}')            
-        
-        complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
-        print(f'complexity: {list(complexity.keys())}')
-        print(f'complexity: {list(complexity.values())}')
+
         if args.datasets:
             if args.stride is not None:
                 if 'kivi' in args.kv_method:
@@ -446,6 +448,36 @@ def main(args):
             sentences.append("\n")
 
             with open(os.path.join(args.longbench_result_path, "pred_e" if args.longbench_e else "pred", 'result.txt'), 'w') as f:
+                for sentence in sentences:
+                    f.write(sentence)
+
+        if args.minilongbench:
+            clean_up()
+            if 'kivi' in args.kv_method:
+                model.config.kivi_config.residual_length = args.residual_length
+            elif 'hqq' in args.kv_method:
+                model.generation_config.cache_config = args.residual_length
+            model.config.quant_kv_output = False
+            model.config.use_cache = True
+
+            mlb_start = time()
+            pred_minilongbench(
+                model,
+                tokenizer=get_tokenizer(model_id),
+                save_path=args.minilongbench_result_path,
+                longbench_config=args.longbench_config,
+                data_dir=args.minilongbench_data_dir if args.minilongbench_data_dir else None,
+                model_name=args.model_name,
+            )
+            eval_minilongbench(args.minilongbench_result_path)
+            mlb_time = time() - mlb_start
+            print(f'MiniLongBench Time: {mlb_time:.2f}s')
+
+            sentences = []
+            for k, v in vars(args).items():
+                sentences.append(f"{k}: {v}\n")
+            sentences.append(f'MiniLongBench Time: {mlb_time:.2f}s\n')
+            with open(os.path.join(args.minilongbench_result_path, "pred", "result.txt"), 'w') as f:
                 for sentence in sentences:
                     f.write(sentence)
 
@@ -747,6 +779,13 @@ if __name__ == '__main__':
                         help='Long context likelihood (LCL) threshold for long PPL/JSD calculation')
     parser.add_argument('--key_token_path', type=str, default='',
                         help='')
+
+    # MiniLongBench arguments
+    parser.add_argument('--minilongbench', action='store_true', help='Run MiniLongBench evaluation')
+    parser.add_argument('--minilongbench_result_path', type=str, default='',
+                        help='Directory to save MiniLongBench results')
+    parser.add_argument('--minilongbench_data_dir', type=str, default='',
+                        help='Path to MiniLongBench data directory (default: utils/minilongbench_data/data)')
 
     parser.add_argument('--ruler', action='store_true', help='')
     parser.add_argument("--ruler_task", type=str, default=None, help="Task name", nargs="+",

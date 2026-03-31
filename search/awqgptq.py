@@ -148,10 +148,10 @@ def main(args):
         arch['p']['v'].append(args.v_pruning_dim)
     accelerator.print(arch)
     
-    model = evaluator.sample(arch)
     complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
     print(f'complexity: {list(complexity.keys())}')
     print(f'complexity: {list(complexity.values())}')
+    model = evaluator.sample(arch)
 
     if args.datasets:
         if args.stride is not None:
@@ -311,6 +311,7 @@ def main(args):
             save_path=args.minilongbench_result_path,
             longbench_config=args.longbench_config,
             data_dir=args.minilongbench_data_dir if args.minilongbench_data_dir else None,
+            model_name=args.model_name,
         )
         eval_minilongbench(args.minilongbench_result_path)
         mlb_time = _time() - mlb_start

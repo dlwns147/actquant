@@ -244,6 +244,7 @@ EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603270923_Llama-3.1-8B-In
 LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONGBENCH_CONFIG=utils/longbench_config
 LONGBENCH_TASK=""
+MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}
 
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
@@ -317,10 +318,14 @@ ARGS="--gpu_id ${DEVICES} \
 --kv_scale ${KV_SCALE} \
 --kvdim_scale ${KVDIM_SCALE} \
 --eff_kv_scale ${EFF_KVDIM_SCALE} \
---datasets ${DATASETS} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
---data_batch_size ${DATA_BATCH_SIZE}"
+--data_batch_size ${DATA_BATCH_SIZE} \
+--longbench_config ${LONGBENCH_CONFIG} \
+--minilongbench \
+--minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}"
+
+# --datasets ${DATASETS} \
 # --ruler \
 # --ruler_task ${RULER_TASK} \
 # --ruler_yaml_path ${RULER_YAML_PATH} \
@@ -353,7 +358,8 @@ ARGS="--gpu_id ${DEVICES} \
 # --longbench \
 # --longbench_result_path ${LONGBENCH_RESULT_PATH} \
 # --longbench_config ${LONGBENCH_CONFIG} \
-
+# --minilongbench \
+# --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}
 
 for g in "${K_GROUP_SIZE[@]}"
 do
