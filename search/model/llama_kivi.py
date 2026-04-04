@@ -35,7 +35,7 @@ from transformers.processing_utils import Unpack
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.cache_utils import Cache, DynamicCache
 
-from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache, _think_key_pruner_query_driven
+from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache, _think_key_pruner_query_driven, _think_value_pruner_attention_driven
 from model.kivi_utils import (
     is_prefill,
     get_past_key_values,
@@ -73,27 +73,39 @@ def replace_attention_forward(self):
         # - Prefill: use full Q and full K for attention (do NOT mask in forward).
         # - Only compute keep_mask and pass to cache; cache applies mask when storing so decode sees masked K.
         keep_mask_for_cache = None  # for KIVIFakeCache prefill store + lazy_update (packing=False)
+        v_keep_mask_for_cache = None
         kivi_config = getattr(self.config, "kivi_config", None)
         if (
             kivi_config is not None
             and getattr(kivi_config, "enable_think", False)
             and not getattr(kivi_config, "packing", False)
         ):
-            try:
-                pruning_dim = int(kivi_config.k_pruning_dim[self.layer_idx])
-            except Exception:
-                pruning_dim = 0
             residual_length = getattr(kivi_config, "residual_length", 0) or 0
-            if pruning_dim > 0 and residual_length >= 0:
-                bsz, n_kv, seqlen, dim = key_states.shape
-                old_len = max(0, seqlen - residual_length) if residual_length > 0 else seqlen
-                if old_len > 0:
-                    key_old = key_states[:, :, :old_len, :]
+            bsz, n_kv, seqlen, dim = key_states.shape
+            old_len = max(0, seqlen - residual_length) if residual_length > 0 else seqlen
+            if old_len > 0:
+                key_old = key_states[:, :, :old_len, :]
+                try:
+                    pruning_dim = int(kivi_config.k_pruning_dim[self.layer_idx])
+                except Exception:
+                    pruning_dim = 0
+                if pruning_dim > 0:
                     with torch.no_grad():
                         _, keep_mask = _think_key_pruner_query_driven(
                             key_old, query_states, pruning_dim=pruning_dim
                         )
                     keep_mask_for_cache = keep_mask  # cache applies this when storing (prefill + lazy_update)
+                try:
+                    v_pruning_dim = int(kivi_config.v_pruning_dim[self.layer_idx])
+                except Exception:
+                    v_pruning_dim = 0
+                if v_pruning_dim > 0:
+                    value_old = value_states[:, :, :old_len, :]
+                    with torch.no_grad():
+                        _, v_keep_mask = _think_value_pruner_attention_driven(
+                            value_old, query_states, key_old, pruning_dim=v_pruning_dim
+                        )
+                    v_keep_mask_for_cache = v_keep_mask
 
         key_states, value_states = quant_kv_output(self, key_states, value_states, attention_mask, query_states=query_states)
 
@@ -105,6 +117,8 @@ def replace_attention_forward(self):
                 cache_kwargs["query_states"] = query_states
                 if keep_mask_for_cache is not None:
                     cache_kwargs["key_keep_mask"] = keep_mask_for_cache
+                if v_keep_mask_for_cache is not None:
+                    cache_kwargs["value_keep_mask"] = v_keep_mask_for_cache
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         is_prefill, attention_interface = attention_forward(self, past_key_value)

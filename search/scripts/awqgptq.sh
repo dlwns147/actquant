@@ -219,14 +219,17 @@ ARGS="
 --data_batch_size ${DATA_BATCH_SIZE} \
 --seed ${SEED} \
 --n_token ${N_TOKEN} \
---ruler \
---ruler_task ${RULER_TASK} \
---ruler_yaml_path ${RULER_YAML_PATH} \
---ruler_result_path ${RULER_RESULT_PATH} \
---ruler_batch_size ${RULER_BATCH_SIZE} \
---ruler_sample ${RULER_SAMPLE} \
---ruler_length ${RULER_LENGTH} \
---ruler_task ${RULER_TASK}"
+--longbench_config ${LONGBENCH_CONFIG} \
+--minilongbench \
+--minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}"
+# --ruler \
+# --ruler_task ${RULER_TASK} \
+# --ruler_yaml_path ${RULER_YAML_PATH} \
+# --ruler_result_path ${RULER_RESULT_PATH} \
+# --ruler_batch_size ${RULER_BATCH_SIZE} \
+# --ruler_sample ${RULER_SAMPLE} \
+# --ruler_length ${RULER_LENGTH} \
+# --ruler_task ${RULER_TASK}"
 
 # --packing \
 # --last_tokens ${LAST_TOKENS}

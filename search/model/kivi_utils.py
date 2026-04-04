@@ -3,7 +3,7 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache, _think_key_pruner_query_driven
+from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache, _think_key_pruner_query_driven, _think_value_pruner_attention_driven
 from quant.kivi_utils.matmul import cuda_bmm_fA_qB_outer
 from quant.kivi_utils.new_pack import fake_quant, unpack_and_dequant_kcache, unpack_and_dequant_vcache
 from transformers.models.llama.modeling_llama import eager_attention_forward
@@ -54,7 +54,7 @@ def quant_kv_output(module, key_states, value_states, attention_mask, query_stat
             _, keep_mask = _think_key_pruner_query_driven(key_states, query_states, k_pruning_dim)
             key_states = key_states * keep_mask.unsqueeze(2)
         if v_pruning_dim > 0:
-            _, keep_mask = _think_key_pruner_query_driven(value_states, query_states, v_pruning_dim)
+            _, keep_mask = _think_value_pruner_attention_driven(value_states, query_states, key_states, v_pruning_dim)
             value_states = value_states * keep_mask.unsqueeze(2)
 
     return key_states, value_states
@@ -168,13 +168,19 @@ def forward_for_kivi_gemv(
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
 
     value_full_length = value_states_full.shape[-2]
+    value_keep_mask = getattr(past_key_value, "value_keep_mask_cache", [None])[module.layer_idx] if hasattr(past_key_value, "value_keep_mask_cache") else None
     if value_states_quant is None:
         attn_output = torch.matmul(attn_weights, repeat_kv(value_states_full, module.num_key_value_groups))
     else:
-        attn_output = cuda_bmm_fA_qB_outer(kivi_config.v_group_size[module.layer_idx], attn_weights[:, :, :, :-value_full_length], value_states_quant, 
+        attn_output = cuda_bmm_fA_qB_outer(kivi_config.v_group_size[module.layer_idx], attn_weights[:, :, :, :-value_full_length], value_states_quant,
                                         value_scale, value_mn, kivi_config.v_bits[module.layer_idx])
-        # attn_output = triton_bmm_fA_qB_outer(module.v_group_size, attn_weights[:, :, :, :-value_full_length], value_states_quant, 
-        #                                 value_scale, value_mn, module.v_bits)
+        # ThinK: zero-fill pruned V dims back to full head_dim before adding full-precision output
+        if value_keep_mask is not None and isinstance(value_keep_mask, torch.Tensor):
+            D_full = value_keep_mask.shape[2]
+            mask_h = _repeat_kv_bool_mask(value_keep_mask, module.num_key_value_groups)  # (B, n_h, D)
+            attn_out_full = torch.zeros(bsz, nh, t, D_full, device=attn_output.device, dtype=attn_output.dtype)
+            attn_out_full[mask_h.unsqueeze(2).expand(-1, -1, t, -1)] = attn_output.reshape(-1)
+            attn_output = attn_out_full
         attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], repeat_kv(value_states_full, module.num_key_value_groups))
 
     attn_output = attn_output.transpose(1, 2).contiguous()

@@ -19,9 +19,9 @@ CONFIG=config/llama.json
 
 
 # COMP_OBJ=wbits
-# COMP_OBJ=kvdim
 # COMP_OBJ=kvbits
-COMP_OBJ=eff_kvbits
+COMP_OBJ=kvdim
+# COMP_OBJ=eff_kvbits
 # COMP_OBJ=memory
 
 # USE_KEY_TOKEN=True
@@ -115,8 +115,8 @@ elif [ ${COMP_OBJ} == 'kvdim' ]; then
     KV_GROUP_SIZE_TEXT=128
     
     K_PRUNING_DIM="0 16 32 48 64"
-    # V_PRUNING_DIM="0 16 32 48 64"
-    V_PRUNING_DIM="0"
+    V_PRUNING_DIM="0 16 32 48 64"
+    # V_PRUNING_DIM="0"
     K_PRUNING_DIM_TEXT=$(echo ${K_PRUNING_DIM} | sed 's/ /_/g')
     V_PRUNING_DIM_TEXT=$(echo ${V_PRUNING_DIM} | sed 's/ /_/g')
 
@@ -205,6 +205,21 @@ N_SAMPLE=32
 SEQLEN=2048
 DATA_BATCH_SIZE=1
 MIN_SEQLEN=0
+
+# DATASET=gov_report
+# # N_SAMPLE=4
+# N_SAMPLE=8
+# # N_SAMPLE=16
+# # N_SAMPLE=32
+# # N_SAMPLE=64
+# # SEQLEN=2048
+# # MIN_SEQLEN=2048
+# SEQLEN=8192
+# MIN_SEQLEN=8192
+# # SEQLEN=16384
+# # MIN_SEQLEN=16384
+# DATA_BATCH_SIZE=1
+# # MIN_SEQLEN=0
 
 # STRIDE=0
 # STRIDE=128

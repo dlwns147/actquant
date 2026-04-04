@@ -79,7 +79,7 @@ def unpack_and_dequant_vcache(v_code: torch.FloatTensor,
 	num_groups = shape[-1] // group_size
 	data = data.view(shape[:-1] + (num_groups, group_size,))
 	data = data.to(torch.float16)
-	data = data * scale + mn 
+	data = data * scale.unsqueeze(-1) + mn.unsqueeze(-1)
 	return data.view(shape)
 
 

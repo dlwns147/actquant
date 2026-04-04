@@ -98,7 +98,10 @@ COMP_OBJ=(memory)
 SEED=0
 
 # COMP_OBJ_VAL=(6300000000)
-COMP_OBJ_VAL=(6069690368)
+# COMP_OBJ_VAL=(6069690368)
+# COMP_OBJ_VAL=(6145187840)
+# COMP_OBJ_VAL=(6197616640)
+COMP_OBJ_VAL=(6271016960)
 N_TOKEN=16384
 
 # COMP_OBJ_VAL=(5862072320)
@@ -189,6 +192,22 @@ LOSS_FUNC="cross_entropy"
 # LOSS_FUNC="cross_entropy"
 
 
+DATASET=gov_report
+# N_SAMPLE=4
+N_SAMPLE=8
+# N_SAMPLE=16
+# N_SAMPLE=32
+# N_SAMPLE=64
+# SEQLEN=2048
+# MIN_SEQLEN=2048
+SEQLEN=8192
+MIN_SEQLEN=8192
+# SEQLEN=16384
+DATA_BATCH_SIZE=1
+# MIN_SEQLEN=0
+# MIN_SEQLEN=16384
+
+
 # N_SAMPLE=4
 N_SAMPLE=8
 # N_SAMPLE=16
@@ -233,10 +252,15 @@ BETA=-2
 # KV_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_100.stats
 # KVDIM_EXPR=save/search/think/..._kvdim_.../iter_N.stats
 
+# W_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_200.stats
+KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603271708_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x3gs0kdim0vdim_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
+KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
+# EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603280405_Llama-3.1-8B-Instruct_eff_kvbits_w4kv234_hqq_kivi_i200n50_w128kv3264128x3_k0_16_32_48_64v0_r128_chto_0.1-5_jsd_wik_128s2048l16384t_rbf_s512/iter_200.stats
+
 # W_EXPR=
 # KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240700_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv24bits_w128kv3264128x2gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
 # KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240659_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_200_n_iter_50_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
-EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603270923_Llama-3.1-8B-Instruct_eff_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0.1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_10.stats
+# EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603270923_Llama-3.1-8B-Instruct_eff_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0.1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_10.stats
 
 # W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_200.stats
 # KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats

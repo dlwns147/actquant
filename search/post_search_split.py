@@ -314,6 +314,7 @@ def main(args):
         complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
         print(f'complexity: {list(complexity.keys())}')
         print(f'complexity: {list(complexity.values())}')
+        accelerator.print(f'arch: {arch}')
         model = evaluator.sample(arch)
         
         # for i, comp_obj in enumerate(args.comp_obj):
