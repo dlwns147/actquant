@@ -46,16 +46,20 @@ def quant_kv_output(module, key_states, value_states, attention_mask, query_stat
     if hasattr(module.config, 'quant_kv_output') and module.config.quant_kv_output:
         key_states = fake_quant(key_states, kivi_config.k_group_size[module.layer_idx], kivi_config.k_bits[module.layer_idx], kivi_config.k_quant_scheme, attention_mask=attention_mask)
         value_states = fake_quant(value_states, kivi_config.v_group_size[module.layer_idx], kivi_config.v_bits[module.layer_idx], kivi_config.v_quant_scheme, attention_mask=attention_mask)
-
-    if query_states is not None and getattr(kivi_config, 'enable_think', False):
-        k_pruning_dim = kivi_config.k_pruning_dim[module.layer_idx]
-        v_pruning_dim = kivi_config.v_pruning_dim[module.layer_idx]
-        if k_pruning_dim > 0:
-            _, keep_mask = _think_key_pruner_query_driven(key_states, query_states, k_pruning_dim)
-            key_states = key_states * keep_mask.unsqueeze(2)
-        if v_pruning_dim > 0:
-            _, keep_mask = _think_value_pruner_attention_driven(value_states, query_states, key_states, v_pruning_dim)
-            value_states = value_states * keep_mask.unsqueeze(2)
+        # ThinK: apply pruning masking only in the no-cache (quant_kv_output=True) path.
+        # When use_cache=True (quant_kv_output=False), the cache mechanism handles pruning
+        # via v_keep_mask_for_cache computed in the attention forward ThinK block.
+        # Applying it here again would (a) duplicate the expensive attention computation and
+        # (b) cause double/inconsistent masking in the stored cache.
+        if query_states is not None and getattr(kivi_config, 'enable_think', False):
+            k_pruning_dim = kivi_config.k_pruning_dim[module.layer_idx]
+            v_pruning_dim = kivi_config.v_pruning_dim[module.layer_idx]
+            if k_pruning_dim > 0:
+                _, keep_mask = _think_key_pruner_query_driven(key_states, query_states, k_pruning_dim)
+                key_states = key_states * keep_mask.unsqueeze(2)
+            if v_pruning_dim > 0:
+                _, keep_mask = _think_value_pruner_attention_driven(value_states, query_states, key_states, v_pruning_dim)
+                value_states = value_states * keep_mask.unsqueeze(2)
 
     return key_states, value_states
     

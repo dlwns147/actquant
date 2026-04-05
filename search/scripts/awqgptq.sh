@@ -75,12 +75,13 @@ V_QUANT_SCHEME=token
 
 # K pruning dim: integer # of head_dim channels to prune (head_dim=128 for Llama-3)
 # 0=0%, 16=12.5%, 32=25%, 48=37.5%, 64=50%
-K_PRUNING_DIM=0
+# K_PRUNING_DIM=0
 # K_PRUNING_DIM=16
-# K_PRUNING_DIM=32
+K_PRUNING_DIM=32
 # K_PRUNING_DIM=48
 # K_PRUNING_DIM=64
-V_PRUNING_DIM=0
+# V_PRUNING_DIM=0
+V_PRUNING_DIM=32
 
 COMP_OBJ="bits"
 COMP_OBJ_TEXT=bits
@@ -219,21 +220,22 @@ ARGS="
 --data_batch_size ${DATA_BATCH_SIZE} \
 --seed ${SEED} \
 --n_token ${N_TOKEN} \
---longbench_config ${LONGBENCH_CONFIG} \
---minilongbench \
---minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}"
-# --ruler \
-# --ruler_task ${RULER_TASK} \
-# --ruler_yaml_path ${RULER_YAML_PATH} \
-# --ruler_result_path ${RULER_RESULT_PATH} \
-# --ruler_batch_size ${RULER_BATCH_SIZE} \
-# --ruler_sample ${RULER_SAMPLE} \
-# --ruler_length ${RULER_LENGTH} \
-# --ruler_task ${RULER_TASK}"
+--ruler \
+--ruler_task ${RULER_TASK} \
+--ruler_yaml_path ${RULER_YAML_PATH} \
+--ruler_result_path ${RULER_RESULT_PATH} \
+--ruler_batch_size ${RULER_BATCH_SIZE} \
+--ruler_sample ${RULER_SAMPLE} \
+--ruler_length ${RULER_LENGTH} \
+--ruler_task ${RULER_TASK}"
 
 # --packing \
 # --last_tokens ${LAST_TOKENS}
 # --long_eval \
+
+# --longbench_config ${LONGBENCH_CONFIG} \
+# --minilongbench \
+# --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}"
 
 if [ ${ONLY_RULER} == 'False' ]; then
     ARGS+=" --datasets ${DATASETS} \

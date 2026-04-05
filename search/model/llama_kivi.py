@@ -76,7 +76,8 @@ def replace_attention_forward(self):
         v_keep_mask_for_cache = None
         kivi_config = getattr(self.config, "kivi_config", None)
         if (
-            kivi_config is not None
+            past_key_value is not None  # skip when use_cache=False: masks would be unused and waste compute
+            and kivi_config is not None
             and getattr(kivi_config, "enable_think", False)
             and not getattr(kivi_config, "packing", False)
         ):
