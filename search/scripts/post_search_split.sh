@@ -174,38 +174,38 @@ MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
-DATASETS="wikitext2 c4"
-DATASETS_TEXT="wikitext2_c4"
-# DATASETS="gov_report"
-# DATASETS_TEXT="gov_report"
-METRIC="ppl"
-LOSS_FUNC="cross_entropy"
+# DATASETS="wikitext2 c4"
+# DATASETS_TEXT="wikitext2_c4"
+# # DATASETS="gov_report"
+# # DATASETS_TEXT="gov_report"
+# METRIC="ppl"
+# LOSS_FUNC="cross_entropy"
 
-# # DATASETS="wikitext2"
-# # DATASETS_TEXT="wikitext2"
+DATASETS="wikitext2"
+DATASETS_TEXT="wikitext2"
 # DATASETS="gov_report"
 # DATASETS_TEXT="gov_report"
-# # DATASETS="minilongbench"
-# # DATASETS_TEXT="minilongbench"
-# METRIC="loss"
-# # LOSS_FUNC="jsd"
+# DATASETS="minilongbench"
+# DATASETS_TEXT="minilongbench"
+METRIC="loss"
+LOSS_FUNC="jsd"
 # LOSS_FUNC="cross_entropy"
 
 
-DATASET=gov_report
-# N_SAMPLE=4
-N_SAMPLE=8
-# N_SAMPLE=16
-# N_SAMPLE=32
-# N_SAMPLE=64
-# SEQLEN=2048
-# MIN_SEQLEN=2048
-SEQLEN=8192
-MIN_SEQLEN=8192
-# SEQLEN=16384
-DATA_BATCH_SIZE=1
-# MIN_SEQLEN=0
-# MIN_SEQLEN=16384
+# DATASET=gov_report
+# # N_SAMPLE=4
+# N_SAMPLE=8
+# # N_SAMPLE=16
+# # N_SAMPLE=32
+# # N_SAMPLE=64
+# # SEQLEN=2048
+# # MIN_SEQLEN=2048
+# SEQLEN=8192
+# MIN_SEQLEN=8192
+# # SEQLEN=16384
+# DATA_BATCH_SIZE=1
+# # MIN_SEQLEN=0
+# # MIN_SEQLEN=16384
 
 
 # N_SAMPLE=4
@@ -289,7 +289,6 @@ RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_ME
 N=1
 # N=10
 
-RANDOM_SAMPLE=1000
 
 W_SCALE=1
 KV_SCALE=1
@@ -306,11 +305,19 @@ else
     SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale
 fi
 
+
+# RANDOM_SAMPLE=1000
+RANDOM_SAMPLE=200
+
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_sqrt_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 
-RANDOM_SAMPLE_PATH=/NAS/SJ/actquant/search/save/result/2509071826_Llama-3.1-8B-Instruct_random_sample_hqq_kivi_1000_sample_seed_wikitext2/results.csv
-GRID_SEARCH="1 0.1 0.01 0.001 0.0001"
+# RANDOM_SAMPLE_PATH=/NAS/SJ/actquant/search/save/result/2509071826_Llama-3.1-8B-Instruct_random_sample_hqq_kivi_1000_sample_seed_wikitext2/results.csv
+# GRID_SEARCH="1 0.1 0.01 0.001 0.0001"
+
+# --comp_obj ${COMP_OBJ} \
+# --comp_obj_min ${MIN_COMP_OBJ} \
+# --comp_obj_max ${MAX_COMP_OBJ} \
 
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
@@ -319,9 +326,6 @@ ARGS="--gpu_id ${DEVICES} \
 --kv_method ${KV_METHOD} \
 --config ${CONFIG} \
 --dtype ${DTYPE} \
---comp_obj ${COMP_OBJ} \
---comp_obj_min ${MIN_COMP_OBJ} \
---comp_obj_max ${MAX_COMP_OBJ} \
 --w_bits ${W_BITS} \
 --k_bits ${K_BITS} \
 --v_bits ${V_BITS} \
@@ -345,11 +349,13 @@ ARGS="--gpu_id ${DEVICES} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
---longbench_config ${LONGBENCH_CONFIG} \
---minilongbench \
---minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}"
+--datasets ${DATASETS} \
+--random_sample ${RANDOM_SAMPLE}"
+# --longbench_config ${LONGBENCH_CONFIG} \
+# --minilongbench \
+# --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}"
 
-# --datasets ${DATASETS} \
+
 # --ruler \
 # --ruler_task ${RULER_TASK} \
 # --ruler_yaml_path ${RULER_YAML_PATH} \
@@ -362,8 +368,6 @@ ARGS="--gpu_id ${DEVICES} \
 # --last_tokens ${LAST_TOKENS}
 
 
-
-# --random_sample ${RANDOM_SAMPLE} \
 
 #  \
 # --random_sample_path ${RANDOM_SAMPLE_PATH} \

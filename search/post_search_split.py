@@ -637,7 +637,7 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--dtype', type=str, default='auto', choices=['float16', 'float', 'fp16', 'bfloat16', 'bfloat', 'bf16', 'auto'],
                         help='')
-    parser.add_argument('--comp_obj', type=str, nargs='+', default=['bits'], 
+    parser.add_argument('--comp_obj', type=str, nargs='+', default=[], 
                         help='second objective to optimize simultaneously')
     parser.add_argument('--comp_obj_min', type=float, nargs='+', default=[],
                         help='')
