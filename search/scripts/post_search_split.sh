@@ -252,7 +252,7 @@ BETA=-2
 # KV_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_100.stats
 # KVDIM_EXPR=save/search/think/..._kvdim_.../iter_N.stats
 
-# W_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_200.stats
+W_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_200.stats
 KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603271708_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x3gs0kdim0vdim_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
 KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
 # EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603280405_Llama-3.1-8B-Instruct_eff_kvbits_w4kv234_hqq_kivi_i200n50_w128kv3264128x3_k0_16_32_48_64v0_r128_chto_0.1-5_jsd_wik_128s2048l16384t_rbf_s512/iter_200.stats
@@ -305,6 +305,22 @@ else
     SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_${KV_SCALE}_kv_scale
 fi
 
+
+if [ -n "${W_EXPR}" ]; then
+    SAVE+="_w_expr"
+fi
+
+if [ -n "${KV_EXPR}" ]; then
+    SAVE+="_kv_expr"
+fi
+
+if [ -n "${KVDIM_EXPR}" ]; then
+    SAVE+="_kv_dim"
+fi
+
+if [ -n "${EFF_KV_EXPR}" ]; then
+    SAVE+="_eff_kv_expr"
+fi
 
 # RANDOM_SAMPLE=1000
 RANDOM_SAMPLE=200

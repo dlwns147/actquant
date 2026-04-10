@@ -302,7 +302,8 @@ def main(args):
     )
     
     comp_save_list = [list() for _ in get_net_info({}, config, group_size=-1, n_token=0).keys()]
-    metric_save_list = [list() for _ in range((len(args.datasets) + 3))] 
+    n_pf_metric_cols = F.shape[1] - n_comp_obj  # new_metric + one component metric per expr key
+    metric_save_list = [list() for _ in range(len(args.datasets) + n_pf_metric_cols)]
     for idx in tqdm(I):
         arch = ps[idx]
             
