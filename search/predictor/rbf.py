@@ -1,4 +1,4 @@
-from pySOT.surrogate import RBFInterpolant, CubicKernel, TPSKernel, LinearTail, ConstantTail
+from pySOT.surrogate import RBFInterpolant, CubicKernel, TPSKernel, LinearKernel, LinearTail, ConstantTail
 
 
 class RBF:
@@ -17,6 +17,8 @@ class RBF:
             kernel = CubicKernel
         elif self.kernel == 'tps':
             kernel = TPSKernel
+        elif self.kernel == 'linear':
+            kernel = LinearKernel
         else:
             raise NotImplementedError("unknown RBF kernel")
 

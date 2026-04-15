@@ -18,7 +18,7 @@ import csv
 import math
 import scipy.stats as stats
 from matplotlib import pyplot as plt
-from utils.func import init_accelerator, get_net_info, clean_up, process_dtype, set_seed
+from utils.func import init_accelerator, get_net_info, clean_up, process_dtype, set_seed, compute_weight_memory, compute_kv_memory
 from utils.eval import measure_latency, eval_zeroshot
 from utils.longbench import pred_longbench, eval_longbench
 from utils.data import get_tokenizer
@@ -149,112 +149,270 @@ def main(args):
     expr_keys = list(expr_map.keys())
     scales = {'w': args.w_scale, 'kv': args.kv_scale, 'kvdim': args.kvdim_scale, 'eff_kv': args.eff_kv_scale}
 
-    # Build all combinations and compute combined metric
+    # Build all combinations and compute combined metric.
     # F layout: [new_metric, comp_metric_0, ..., comp_metric_N, *comp_obj]
-    metric = []
-    subnets = []
-    expr_iters = [list(zip(sv, fv)) for sv, fv in expr_map.values()]
+    #
+    # Optimization: when the Cartesian product is large (e.g. W×KV×KVDIM can reach
+    # tens of millions), avoid materializing it.  Use numpy broadcasting to compute
+    # metrics/memory, then build arch dicts only for the final selected candidates.
+    #
+    # This is valid because:
+    #   combined_metric = Σ scale[k] * metric[k]  → fully per-expr decomposable
+    #   memory          = weight_mem(w) + kv_mem(kv, kvdim)  → W and KV parts separable
 
-    for combo in itertools.product(*expr_iters):
-        arch = {
-            'q': {
-                'w': default_arch['q']['w'],
-                'k': default_arch['q']['k'],
-                'v': default_arch['q']['v'],
-            },
-            'p': {
-                'k': default_arch['p']['k'],
-                'v': default_arch['p']['v'],
-            }
-        }
-        component_metrics = []
-        for key, (subnet, f_row) in zip(expr_keys, combo):
-            if key == 'w':
-                arch['q']['w'] = subnet['q']['w']
-            elif key == 'kv':
-                arch['q']['k'] = subnet['q']['k']
-                arch['q']['v'] = subnet['q']['v']
-            elif key == 'kvdim':
-                arch['p']['k'] = subnet['p']['k']
-                arch['p']['v'] = subnet['p']['v']
-            elif key == 'eff_kv':
-                arch['q']['k'] = subnet['q']['k']
-                arch['q']['v'] = subnet['q']['v']
-                arch['p']['k'] = subnet['p']['k']
-                arch['p']['v'] = subnet['p']['v']
-            component_metrics.append(f_row[0])
+    expr_subnets_list = [sv for sv, fv in expr_map.values()]
+    expr_F_list       = [fv for sv, fv in expr_map.values()]
+    n_exprs  = len(expr_keys)
+    n_sizes  = [len(sv) for sv in expr_subnets_list]
+    total_combos = 1
+    for s in n_sizes:
+        total_combos *= s
 
-        if args.sqrt:
-            new_metric = sum(scales[k] * math.sqrt(f_row[0]) for k, (_, f_row) in zip(expr_keys, combo))
+    USE_BROADCASTING = total_combos > 50_000
+    print(f"[combo] total combinations: {total_combos:,} — {'broadcasting' if USE_BROADCASTING else 'direct loop'}")
+
+    if USE_BROADCASTING:
+        # ---- Step 1: combined metric via broadcasting, shape = n_sizes ----
+        combined_metric = np.zeros(n_sizes)
+        for i, (key, fv) in enumerate(zip(expr_keys, expr_F_list)):
+            m_arr = fv[:, 0]
+            shape = [1] * n_exprs
+            shape[i] = len(m_arr)
+            if args.sqrt:
+                combined_metric += scales[key] * np.sqrt(m_arr.reshape(shape))
+            else:
+                combined_metric += scales[key] * m_arr.reshape(shape)
+
+        # ---- Step 2: comp_obj via broadcasting (memory decomposition) ----
+        all_memory_comp = all(c == 'memory' for c in args.comp_obj)
+        if all_memory_comp:
+            w_idx   = expr_keys.index('w')      if 'w'      in expr_keys else None
+            kv_idx  = expr_keys.index('kv')     if 'kv'     in expr_keys else None
+            kvd_idx = expr_keys.index('kvdim')  if 'kvdim'  in expr_keys else None
+            ekv_idx = expr_keys.index('eff_kv') if 'eff_kv' in expr_keys else None
+
+            # Weight memory per W-arch
+            if w_idx is not None:
+                w_mem_arr = np.array([compute_weight_memory(sv['q']['w'], config, group_size)
+                                      for sv in expr_subnets_list[w_idx]])
+            else:
+                w_mem_arr = np.array([compute_weight_memory(default_arch['q']['w'], config, group_size)])
+
+            # KV cache memory for every combination of non-W exprs
+            kv_axes = [(i, key) for i, key in enumerate(expr_keys) if key != 'w']
+            kv_axis_sizes = [n_sizes[i] for i, _ in kv_axes]
+            kv_mem_arr = np.zeros(kv_axis_sizes if kv_axis_sizes else [1])
+            for idx_tuple in (np.ndindex(*kv_axis_sizes) if kv_axis_sizes else [()]):
+                q_k = list(default_arch['q']['k'])
+                q_v = list(default_arch['q']['v'])
+                p_k = list(default_arch['p']['k'])
+                p_v = list(default_arch['p']['v'])
+                for ax, (orig_i, key) in enumerate(kv_axes):
+                    sv = expr_subnets_list[orig_i][idx_tuple[ax]]
+                    if key == 'kv':
+                        q_k = sv['q']['k']; q_v = sv['q']['v']
+                    elif key == 'kvdim':
+                        p_k = sv['p']['k']; p_v = sv['p']['v']
+                    elif key == 'eff_kv':
+                        q_k = sv['q']['k']; q_v = sv['q']['v']
+                        p_k = sv['p']['k']; p_v = sv['p']['v']
+                kv_mem_arr[idx_tuple] = compute_kv_memory(
+                    {'k': q_k, 'v': q_v}, {'k': p_k, 'v': p_v}, config, args.n_token
+                )
+
+            # Broadcast: total_mem[...] = w_mem[w_axis] + kv_mem[other_axes]
+            if w_idx is not None:
+                w_shape = [1] * n_exprs
+                w_shape[w_idx] = n_sizes[w_idx]
+                kv_shape = [1] * n_exprs
+                for ax, (orig_i, _) in enumerate(kv_axes):
+                    kv_shape[orig_i] = kv_axis_sizes[ax]
+                total_mem_arr = w_mem_arr.reshape(w_shape) + kv_mem_arr.reshape(kv_shape)
+            else:
+                kv_shape = [1] * n_exprs
+                for ax, (orig_i, _) in enumerate(kv_axes):
+                    kv_shape[orig_i] = kv_axis_sizes[ax]
+                total_mem_arr = kv_mem_arr.reshape(kv_shape) + w_mem_arr[0]
+
+            comp_obj_arr = total_mem_arr  # shape: n_sizes
         else:
-            new_metric = sum(scales[k] * f_row[0] for k, (_, f_row) in zip(expr_keys, combo))
+            print("[combo] WARNING: non-memory comp_obj; falling back to full product (may be slow)")
+            USE_BROADCASTING = False
 
-        metric.append([new_metric] + component_metrics)
-        subnets.append(arch)
-
-    metric = np.array(metric)
-    comp_obj = [[get_net_info(a, config, group_size, n_token=args.n_token)[comp_obj] for comp_obj in args.comp_obj] for a in subnets]
-    sort_idx = np.argsort(metric[:, 0])
-    F = np.column_stack((metric, comp_obj))[sort_idx]
-    subnets = np.array(subnets)[sort_idx]
-    
-            
-    # wbits = [get_net_info(a, config, group_size, n_token=args.n_token)['wbits'] for a in subnets] 
-    # kvbits = [get_net_info(a, config, group_size, n_token=args.n_token)['kvbits'] for a in subnets] 
-    # print(f'wbits: {wbits}')
-    # print(f'kvbits: {kvbits}')
-
-    # pf_list, ps_list, pm_list, ppm_list = [], [], [], []
-    if n_comp_obj_min > 0:
-        flag = np.ones(len(F), dtype=bool)
-        for i in range(n_comp_obj):
-            flag = np.logical_and(flag, np.logical_and(F[:, -n_comp_obj + i] >= args.comp_obj_min[i], F[:, -n_comp_obj + i] <= args.comp_obj_max[i]))
-        range_idx = np.argwhere(flag).flatten()
-        print(f'range_idx : {len(range_idx)}')
-        if len(range_idx) == 0:
-            mem_col = F[:, -n_comp_obj]
-            print(f'[debug] memory range in search results: min={mem_col.min():.1f}, max={mem_col.max():.1f}')
-            print(f'[debug] comp_obj_min={args.comp_obj_min}, comp_obj_max={args.comp_obj_max}')
-            print(f'[debug] unique memory values (sample): {np.unique(mem_col)[:10].tolist()}')
-                
-        pf = F[range_idx]
-        ps = subnets[range_idx]
-        # wbits = [get_net_info(a, config, group_size, n_token=args.n_token)['wbits'] for a in ps] 
-        # kvbits = [get_net_info(a, config, group_size, n_token=args.n_token)['kvbits'] for a in ps] 
-        # print(f'wbits: {wbits}')
-        # print(f'kvbits: {kvbits}')
-
-    # elif args.only_front:
-    #     for i, comp_obj in enumerate(args.comp_obj):
-    #         front = NonDominatedSorting().do(F[i], only_non_dominated_front=True)
-    #         pf = F[front]
-    #         ps = subnets[front]
-
+    if not USE_BROADCASTING:
+        # Original O(N^K) product loop (fallback for small products or non-memory comp_obj)
+        metric_list = []
+        subnets_list = []
+        expr_iters = [list(zip(sv, fv)) for sv, fv in expr_map.values()]
+        for combo in itertools.product(*expr_iters):
+            arch = {
+                'q': {'w': default_arch['q']['w'], 'k': default_arch['q']['k'], 'v': default_arch['q']['v']},
+                'p': {'k': default_arch['p']['k'], 'v': default_arch['p']['v']},
+            }
+            component_metrics = []
+            for key, (subnet, f_row) in zip(expr_keys, combo):
+                if key == 'w':
+                    arch['q']['w'] = subnet['q']['w']
+                elif key == 'kv':
+                    arch['q']['k'] = subnet['q']['k']; arch['q']['v'] = subnet['q']['v']
+                elif key == 'kvdim':
+                    arch['p']['k'] = subnet['p']['k']; arch['p']['v'] = subnet['p']['v']
+                elif key == 'eff_kv':
+                    arch['q']['k'] = subnet['q']['k']; arch['q']['v'] = subnet['q']['v']
+                    arch['p']['k'] = subnet['p']['k']; arch['p']['v'] = subnet['p']['v']
+                component_metrics.append(f_row[0])
+            if args.sqrt:
+                new_metric = sum(scales[k] * math.sqrt(f_row[0]) for k, (_, f_row) in zip(expr_keys, combo))
+            else:
+                new_metric = sum(scales[k] * f_row[0] for k, (_, f_row) in zip(expr_keys, combo))
+            metric_list.append([new_metric] + component_metrics)
+            subnets_list.append(arch)
+        metric_arr = np.array(metric_list)
+        comp_obj_vals = [[get_net_info(a, config, group_size, n_token=args.n_token)[c] for c in args.comp_obj] for a in subnets_list]
+        sort_idx = np.argsort(metric_arr[:, 0])
+        F = np.column_stack((metric_arr, comp_obj_vals))[sort_idx]
+        subnets = np.array(subnets_list)[sort_idx]
     else:
+        # ---- Step 3 (broadcasting path): filter → sample → build arch dicts ----
+        flat_metric  = combined_metric.ravel()
+        flat_comp    = comp_obj_arr.ravel()
+        flat_indices = np.arange(flat_metric.size)
+
+        if n_comp_obj_min > 0:
+            flag = (flat_comp >= args.comp_obj_min[0]) & (flat_comp <= args.comp_obj_max[0])
+            range_flat_idx = flat_indices[flag]
+            print(f'range_idx (broadcasting): {len(range_flat_idx):,}')
+            if len(range_flat_idx) == 0:
+                print(f'[debug] memory range: min={flat_comp.min():.1f}, max={flat_comp.max():.1f}')
+                print(f'[debug] comp_obj_min={args.comp_obj_min}, comp_obj_max={args.comp_obj_max}')
+        else:
+            range_flat_idx = flat_indices
+
+        sort_order     = np.argsort(flat_metric[range_flat_idx])
+        sorted_flat_idx = range_flat_idx[sort_order]
+
+        if args.random_sample is not None and args.random_sample < len(sorted_flat_idx):
+            chosen_flat_idx = np.sort(np.random.choice(sorted_flat_idx, size=args.random_sample, replace=False))
+        else:
+            chosen_flat_idx = sorted_flat_idx[:args.n]
+
+        # Convert flat indices → per-expr index tuples
+        chosen_idx_tuples = np.unravel_index(chosen_flat_idx, n_sizes)
+
+        # Build arch dicts only for the selected candidates
+        subnets_list = []
+        metric_rows  = []
+        for sample_pos in range(len(chosen_flat_idx)):
+            per_expr_idx = [int(chosen_idx_tuples[e][sample_pos]) for e in range(n_exprs)]
+            arch = {
+                'q': {'w': default_arch['q']['w'], 'k': default_arch['q']['k'], 'v': default_arch['q']['v']},
+                'p': {'k': default_arch['p']['k'], 'v': default_arch['p']['v']},
+            }
+            component_metrics = []
+            for e, (key, idx_e) in enumerate(zip(expr_keys, per_expr_idx)):
+                sv = expr_subnets_list[e][idx_e]
+                fv_row = expr_F_list[e][idx_e]
+                if key == 'w':
+                    arch['q']['w'] = sv['q']['w']
+                elif key == 'kv':
+                    arch['q']['k'] = sv['q']['k']; arch['q']['v'] = sv['q']['v']
+                elif key == 'kvdim':
+                    arch['p']['k'] = sv['p']['k']; arch['p']['v'] = sv['p']['v']
+                elif key == 'eff_kv':
+                    arch['q']['k'] = sv['q']['k']; arch['q']['v'] = sv['q']['v']
+                    arch['p']['k'] = sv['p']['k']; arch['p']['v'] = sv['p']['v']
+                component_metrics.append(fv_row[0])
+            new_metric = float(combined_metric[tuple(per_expr_idx)])
+            metric_rows.append([new_metric] + component_metrics)
+            subnets_list.append(arch)
+
+        metric_arr   = np.array(metric_rows)
+        # Compute full net_info only for the selected architectures (O(200) not O(N^K))
+        comp_obj_vals = [[get_net_info(a, config, group_size, n_token=args.n_token)[c] for c in args.comp_obj] for a in subnets_list]
+        sort_idx = np.argsort(metric_arr[:, 0])
+        F = np.column_stack((metric_arr, comp_obj_vals))[sort_idx]
+        subnets = np.array(subnets_list)[sort_idx]
+        # Broadcasting path already handled filtering+sampling; skip duplicate steps below
         pf = F
         ps = subnets
-        
-    if args.high_tradeoff:
+        I = list(range(len(pf)))
+
+    if not USE_BROADCASTING:
+        # pf/ps/I setup for non-broadcasting path
+        if n_comp_obj_min > 0:
+            flag = np.ones(len(F), dtype=bool)
+            for i in range(n_comp_obj):
+                flag = np.logical_and(flag, np.logical_and(F[:, -n_comp_obj + i] >= args.comp_obj_min[i], F[:, -n_comp_obj + i] <= args.comp_obj_max[i]))
+            range_idx = np.argwhere(flag).flatten()
+            print(f'range_idx : {len(range_idx)}')
+            if len(range_idx) == 0:
+                mem_col = F[:, -n_comp_obj]
+                print(f'[debug] memory range in search results: min={mem_col.min():.1f}, max={mem_col.max():.1f}')
+                print(f'[debug] comp_obj_min={args.comp_obj_min}, comp_obj_max={args.comp_obj_max}')
+                print(f'[debug] unique memory values (sample): {np.unique(mem_col)[:10].tolist()}')
+            pf = F[range_idx]
+            ps = subnets[range_idx]
+        else:
+            pf = F
+            ps = subnets
+
+    if not USE_BROADCASTING and args.high_tradeoff:
         I = NonDominatedSorting().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], only_non_dominated_front=True)
 
-    if args.prefer:
-        # preferences
-        preferences = {}
-        # for p in args.prefer.split("+"):
-        for p in args.prefer:
-            k, v = p.split("#")
-            preferences[k] = float(v)
-        weights = np.fromiter(preferences.values(), dtype=float)        
-        # I = ASF().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], weights).argsort()[0]
-        I = ASF().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], weights).argsort()[:args.n].reshape(args.n)
-        
-    else:
-        I = list(range(len(pf)))
-        if args.random_sample is not None and args.random_sample < len(pf):
+    if not USE_BROADCASTING:
+        if args.prefer:
+            preferences = {}
+            for p in args.prefer:
+                k, v = p.split("#")
+                preferences[k] = float(v)
+            weights = np.fromiter(preferences.values(), dtype=float)
+            I = ASF().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], weights).argsort()[:args.n].reshape(args.n)
+        else:
+            I = list(range(len(pf)))
+        if args.quantile_sample:
+            # Parse: "wbits#0.1,0.5,0.9" → {'wbits': [0.1, 0.5, 0.9]}
+            quantile_specs = {}
+            for spec in args.quantile_sample:
+                k, v = spec.split('#')
+                quantile_specs[k] = [float(q) for q in v.split(',')]
+
+            # Compute metric values for all architectures in filtered set (ps)
+            metric_vals = {}
+            for key in quantile_specs:
+                metric_vals[key] = np.array([
+                    get_net_info(a, config, group_size, n_token=args.n_token)[key] for a in ps
+                ])
+
+            # Compute target values at each quantile position
+            target_vals = {}
+            for key, quantiles in quantile_specs.items():
+                target_vals[key] = [np.quantile(metric_vals[key], q) for q in quantiles]
+                print(f'[quantile_sample] {key}: range=[{metric_vals[key].min():.4f}, {metric_vals[key].max():.4f}]')
+                print(f'[quantile_sample] {key}: targets={[f"{t:.4f}" for t in target_vals[key]]}')
+
+            # For each combination of quantile targets, find the nearest architecture (normalized L2)
+            I_set = set()
+            keys = list(quantile_specs.keys())
+            for combo in itertools.product(*[range(len(quantile_specs[k])) for k in keys]):
+                targets = {k: target_vals[k][qi] for k, qi in zip(keys, combo)}
+                dists = np.zeros(len(ps))
+                for k, t in targets.items():
+                    vals = metric_vals[k]
+                    val_range = vals.max() - vals.min()
+                    dists += ((vals - t) / val_range) ** 2 if val_range > 0 else (vals - t) ** 2
+                I_set.add(int(np.argmin(dists)))
+
+            I = sorted(I_set)
+            print(f'[quantile_sample] selected {len(I)} unique architectures out of {len(ps)} candidates')
+            for i in I:
+                info = {k: f'{metric_vals[k][i]:.4f}' for k in quantile_specs}
+                print(f'  arch[{i}]: {info}')
+        elif args.random_sample is not None and args.random_sample < len(pf):
             I = np.random.choice(I, size=args.random_sample, replace=False)
             I.sort()
         else:
             I = I[:args.n]
+    # (broadcasting path already set I = list(range(len(pf))) above)
 
 
     # always add most accurate architectures
@@ -348,7 +506,7 @@ def main(args):
             # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
             # print(f'[{idx}] complexity: {complexity}, {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
             print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
-            if args.random_sample is not None and args.save and args.results_csv_file:
+            if (args.random_sample is not None or args.quantile_sample) and args.save and args.results_csv_file:
                 for c_i, c in enumerate(complexity.values()):
                     comp_save_list[c_i].append(c)
                 for m_i, m in enumerate(metric.values()):
@@ -753,8 +911,11 @@ if __name__ == '__main__':
     parser.add_argument('--pass_key_file', type=str, default='',
                         help='')
     
-    parser.add_argument('--random_sample', type=int, default=None, 
+    parser.add_argument('--random_sample', type=int, default=None,
                         help='')
+    parser.add_argument('--quantile_sample', type=str, nargs='+', default=[],
+                        help='sample architectures at specific quantile positions of complexity metrics. '
+                             'Format: metric#q1,q2,q3  e.g. --quantile_sample wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9')
     parser.add_argument('--random_sample_path', type=str, default='', 
                         help='')
     parser.add_argument('--grid_search', type=float, nargs='+', default=[])

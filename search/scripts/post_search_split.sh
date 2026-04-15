@@ -33,10 +33,10 @@ USE_KEY_TOKEN=False
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
 
-W_METHOD=hqq
-W_METHOD_TEXT=hqq
-# W_METHOD=awq
-# W_METHOD_TEXT=awq
+# W_METHOD=hqq
+# W_METHOD_TEXT=hqq
+W_METHOD=awq
+W_METHOD_TEXT=awq
 # W_METHOD="awq layer_prune"
 # W_METHOD_TEXT=awq_layer_prune
 # W_METHOD=fp16
@@ -325,6 +325,11 @@ fi
 # RANDOM_SAMPLE=1000
 RANDOM_SAMPLE=200
 
+# Quantile-based sampling: sample architectures at specific quantile positions of complexity metrics.
+# Format: metric#q1,q2,q3  (space-separated for multiple metrics → Cartesian product)
+# Example: 3 wbits positions x 3 kvbits positions = up to 9 unique architectures
+QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9"
+
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_sqrt_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 
@@ -367,6 +372,7 @@ ARGS="--gpu_id ${DEVICES} \
 --data_batch_size ${DATA_BATCH_SIZE} \
 --datasets ${DATASETS} \
 --random_sample ${RANDOM_SAMPLE}"
+# --quantile_sample ${QUANTILE_SAMPLE}"
 # --longbench_config ${LONGBENCH_CONFIG} \
 # --minilongbench \
 # --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}"

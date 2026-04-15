@@ -135,6 +135,50 @@ def compute_memory(arch, config, group_size, n_token=0, residual_length=0):
     return weight_memory + cache_memory
 
 
+def compute_weight_memory(w_arch, config, group_size):
+    """Weight-only memory (no KV cache). Used for broadcasting-based filtering."""
+    w_group_size = group_size['w']
+    weight_memory = 0
+    for linear in config['linear']:
+        out_dim, in_dim = map(int, config['linear_shape'][linear])
+        linear_group_size = in_dim if w_group_size == -1 else w_group_size
+        linear_bits = w_arch[linear]
+        if type(linear_bits[0]) == int:
+            for bits in linear_bits:
+                weight_memory += out_dim * in_dim * bits // 8
+                if bits < 16:
+                    weight_memory += (in_dim // linear_group_size) * out_dim * 4
+        elif type(linear_bits[0]) == list and len(linear_bits[0]) == 2:
+            for bits, n_outlier_column in linear_bits:
+                weight_memory += out_dim * in_dim * bits // 8
+                if bits < 16:
+                    weight_memory += (in_dim // linear_group_size) * out_dim * 4
+                weight_memory += out_dim * n_outlier_column * 2
+        else:
+            raise NotImplementedError(type(linear_bits[0]))
+    weight_memory += int(config['vocab_size']) * int(config['hidden_size']) * 4
+    weight_memory += int(config['n_norm']) * int(config['hidden_size']) * 2
+    weight_memory += int(config['max_position_embeddings']) * int(config['head_dim']) * 2
+    return weight_memory
+
+
+def compute_kv_memory(kv_q_arch, p_arch, config, n_token):
+    """KV-cache-only memory. Used for broadcasting-based filtering."""
+    head_dim = int(config['head_dim'])
+    cache_memory = 0
+    for target in ['k', 'v']:
+        kv_dim = int(config['linear_shape'][config[f'{target}_linear']][0])
+        n_kv_heads = kv_dim // head_dim
+        prune_list = p_arch.get(target, [0] * len(kv_q_arch[target]))
+        for (bits, gs), prune_dim in zip(kv_q_arch[target], prune_list):
+            effective_kv_dim = n_kv_heads * (head_dim - prune_dim)
+            layer_mem = effective_kv_dim * bits / 8
+            if bits < 16:
+                layer_mem += (effective_kv_dim / gs) * 4
+            cache_memory += layer_mem * n_token
+    return cache_memory
+
+
 def compute_sparsity(arch):
     return np.concatenate([v for v in arch['layer'].values()]).mean()
 
@@ -150,8 +194,18 @@ def compute_params(arch, config):
 
 def get_net_info(arch, config, group_size, n_token=0, residual_length=0):
     # arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
-    q_arch = arch.get('q', {})
-    p_arch = arch.get('p', {})
+    # Also accepts legacy format: {'w': {linear: [bits,...],...}, 'k': [...], 'v': [...]}
+    if 'q' in arch:
+        q_arch = arch['q']
+        p_arch = arch.get('p', {})
+    elif 'w' in arch or 'k' in arch or 'v' in arch:
+        # Legacy flat format — treat arch itself as q_arch
+        q_arch = arch
+        p_arch = {}
+        arch = {'q': arch}   # rebuild for compute_bits/compute_memory compatibility
+    else:
+        q_arch = arch.get('q', {})
+        p_arch = arch.get('p', {})
     net_info = {}
     net_info['wbits']      = compute_bits(arch=arch, config=config, group_size=group_size, target='w')  if 'w' in q_arch else 0
     net_info['kvbits']     = compute_bits(arch=arch, config=config, group_size=group_size, target='kv', include_pruning=False) if 'k' in q_arch and 'v' in q_arch else 0
