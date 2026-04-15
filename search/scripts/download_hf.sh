@@ -22,12 +22,14 @@ MODEL_PATH=Qwen
 # MODEL_NAME=Qwen2.5-3B-Instruct
 # MODEL_NAME=Qwen2.5-7B-Instruct
 # MODEL_NAME=Qwen2.5-14B-Instruct
-MODEL_NAME=Qwen2.5-72B-Instruct
+# MODEL_NAME=Qwen2.5-72B-Instruct
 # MODEL_NAME=Qwen2.5-7B-Instruct-1M
 
 # MODEL_NAME=Qwen3-4B
 # MODEL_NAME=Qwen3-8B
 # MODEL_NAME=Qwen3-14B
+
+MODEL_NAME=Qwen3.5-9B 
 
 # MODEL_PATH=mistralai
 # MODEL_NAME=Mistral-7B-v0.3

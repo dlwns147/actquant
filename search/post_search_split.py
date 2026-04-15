@@ -15,10 +15,11 @@ from evaluator import LlamaEvaluator
 from tqdm import tqdm
 from time import time
 import csv
-import math
 import scipy.stats as stats
 from matplotlib import pyplot as plt
-from utils.func import init_accelerator, get_net_info, clean_up, process_dtype, set_seed, compute_weight_memory, compute_kv_memory
+from utils.func import (init_accelerator, get_net_info, clean_up, process_dtype, set_seed,
+                        compute_weight_memory, compute_cache_memory_single,
+                        compute_cache_memory_batch, compute_eff_kvbits_batch)
 from utils.eval import measure_latency, eval_zeroshot
 from utils.longbench import pred_longbench, eval_longbench
 from utils.data import get_tokenizer
@@ -149,226 +150,198 @@ def main(args):
     expr_keys = list(expr_map.keys())
     scales = {'w': args.w_scale, 'kv': args.kv_scale, 'kvdim': args.kvdim_scale, 'eff_kv': args.eff_kv_scale}
 
-    # Build all combinations and compute combined metric.
-    # F layout: [new_metric, comp_metric_0, ..., comp_metric_N, *comp_obj]
-    #
-    # Optimization: when the Cartesian product is large (e.g. W×KV×KVDIM can reach
-    # tens of millions), avoid materializing it.  Use numpy broadcasting to compute
-    # metrics/memory, then build arch dicts only for the final selected candidates.
-    #
-    # This is valid because:
-    #   combined_metric = Σ scale[k] * metric[k]  → fully per-expr decomposable
-    #   memory          = weight_mem(w) + kv_mem(kv, kvdim)  → W and KV parts separable
+    # ──────────────────────────────────────────────────────────────────────────
+    # Vectorized combo generation — filter-first approach
+    # Builds comp_obj as ND broadcast arrays, applies range mask before sorting,
+    # then assembles F only for the valid subset (typically << n_total combos).
+    # ──────────────────────────────────────────────────────────────────────────
+    _esm = {k: sv for k, (sv, fv) in expr_map.items()}  # subnet arrays per component
+    _efm = {k: fv for k, (sv, fv) in expr_map.items()}  # F arrays per component
+    nd_shape = tuple(len(_esm[k]) for k in expr_keys)
+    n_dims   = len(nd_shape)
 
-    expr_subnets_list = [sv for sv, fv in expr_map.values()]
-    expr_F_list       = [fv for sv, fv in expr_map.values()]
-    n_exprs  = len(expr_keys)
-    n_sizes  = [len(sv) for sv in expr_subnets_list]
-    total_combos = 1
-    for s in n_sizes:
-        total_combos *= s
+    # Helper: broadcast 1-D array onto axis `ax` of nd_shape (lazy, no copy)
+    def _bcast_1d(arr, ax):
+        shape = [1] * n_dims
+        shape[ax] = len(arr)
+        return np.broadcast_to(arr.reshape(shape), nd_shape)
 
-    USE_BROADCASTING = total_combos > 50_000
-    print(f"[combo] total combinations: {total_combos:,} — {'broadcasting' if USE_BROADCASTING else 'direct loop'}")
+    # Helper: broadcast 2-D array onto axes (ax0, ax1) of nd_shape (lazy, no copy)
+    def _bcast_2d(arr, ax0, ax1):
+        shape = [1] * n_dims
+        shape[ax0] = arr.shape[0]
+        shape[ax1] = arr.shape[1]
+        return np.broadcast_to(arr.reshape(shape), nd_shape)
 
-    if USE_BROADCASTING:
-        # ---- Step 1: combined metric via broadcasting, shape = n_sizes ----
-        combined_metric = np.zeros(n_sizes)
-        for i, (key, fv) in enumerate(zip(expr_keys, expr_F_list)):
-            m_arr = fv[:, 0]
-            shape = [1] * n_exprs
-            shape[i] = len(m_arr)
-            if args.sqrt:
-                combined_metric += scales[key] * np.sqrt(m_arr.reshape(shape))
+    # Step 1: new_metric ND array via outer sum (lazy np.ix_ broadcasting)
+    metric_1d = [_efm[k][:, 0] for k in expr_keys]
+    metric_1d_used = [np.sqrt(m) if args.sqrt else m for m in metric_1d]
+    scale_vals = [scales[k] for k in expr_keys]
+    new_metric_nd = sum(s * a for s, a in zip(scale_vals, np.ix_(*metric_1d_used)))
+
+    # Step 2: Build comp_obj as ND broadcast arrays (shape nd_shape)
+    comp_nd_list = []
+    for obj in args.comp_obj:
+        if obj == 'wbits':
+            ax = expr_keys.index('w')
+            v = np.array([get_net_info(sv, config, group_size)['wbits'] for sv in _esm['w']])
+            comp_nd_list.append(_bcast_1d(v, ax))
+
+        elif obj in ('kvbits', 'kbits', 'vbits'):
+            kv_key = 'eff_kv' if 'eff_kv' in expr_keys else 'kv'
+            ax = expr_keys.index(kv_key)
+            v = np.array([get_net_info(sv, config, group_size)[obj] for sv in _esm[kv_key]])
+            comp_nd_list.append(_bcast_1d(v, ax))
+
+        elif obj in ('kvdim', 'kdim', 'vdim'):
+            kv_key = 'eff_kv' if 'eff_kv' in expr_keys else 'kvdim'
+            ax = expr_keys.index(kv_key)
+            v = np.array([get_net_info(sv, config, group_size)[obj] for sv in _esm[kv_key]])
+            comp_nd_list.append(_bcast_1d(v, ax))
+
+        elif obj in ('eff_kvbits', 'eff_kbits', 'eff_vbits'):
+            t_map = {'eff_kvbits': 'kv', 'eff_kbits': 'k', 'eff_vbits': 'v'}
+            t = t_map[obj]
+            if 'eff_kv' in expr_keys:
+                ax = expr_keys.index('eff_kv')
+                v = np.array([get_net_info(sv, config, group_size)[obj] for sv in _esm['eff_kv']])
+                comp_nd_list.append(_bcast_1d(v, ax))
             else:
-                combined_metric += scales[key] * m_arr.reshape(shape)
+                assert 'kv' in expr_keys and 'kvdim' in expr_keys, \
+                    f"'{obj}' requires eff_kv_expr or both kv_expr and kvdim_expr"
+                vals_2d = compute_eff_kvbits_batch(_esm['kv'], _esm['kvdim'], config, target=t)
+                comp_nd_list.append(_bcast_2d(vals_2d,
+                                              expr_keys.index('kv'), expr_keys.index('kvdim')))
 
-        # ---- Step 2: comp_obj via broadcasting (memory decomposition) ----
-        all_memory_comp = all(c == 'memory' for c in args.comp_obj)
-        if all_memory_comp:
-            w_idx   = expr_keys.index('w')      if 'w'      in expr_keys else None
-            kv_idx  = expr_keys.index('kv')     if 'kv'     in expr_keys else None
-            kvd_idx = expr_keys.index('kvdim')  if 'kvdim'  in expr_keys else None
-            ekv_idx = expr_keys.index('eff_kv') if 'eff_kv' in expr_keys else None
-
-            # Weight memory per W-arch
-            if w_idx is not None:
-                w_mem_arr = np.array([compute_weight_memory(sv['q']['w'], config, group_size)
-                                      for sv in expr_subnets_list[w_idx]])
+        elif obj == 'memory':
+            # Weight memory is separable on the w-axis
+            if 'w' in expr_keys:
+                w_mem = np.array([compute_weight_memory(sv, config, group_size) for sv in _esm['w']])
+                mem_nd = _bcast_1d(w_mem, expr_keys.index('w')).astype(np.float64)
             else:
-                w_mem_arr = np.array([compute_weight_memory(default_arch['q']['w'], config, group_size)])
+                mem_nd = np.full(nd_shape,
+                                 compute_weight_memory(default_arch, config, group_size),
+                                 dtype=np.float64)
+            # KV cache memory (kv + kvdim not fully separable → materialise once)
+            if 'eff_kv' in expr_keys:
+                kv_cache = np.array([compute_cache_memory_single(sv, config, args.n_token)
+                                     for sv in _esm['eff_kv']])
+                mem_nd = mem_nd + _bcast_1d(kv_cache, expr_keys.index('eff_kv'))
+            elif 'kv' in expr_keys and 'kvdim' in expr_keys:
+                kv_2d = compute_cache_memory_batch(_esm['kv'], _esm['kvdim'], config, args.n_token)
+                mem_nd = mem_nd + _bcast_2d(kv_2d,
+                                            expr_keys.index('kv'), expr_keys.index('kvdim'))
+            elif 'kv' in expr_keys:
+                kv_1d = compute_cache_memory_batch(_esm['kv'], None, config, args.n_token)
+                mem_nd = mem_nd + _bcast_1d(kv_1d, expr_keys.index('kv'))
+            elif 'kvdim' in expr_keys:
+                kv_1d = compute_cache_memory_batch([default_arch], _esm['kvdim'],
+                                                   config, args.n_token)[0]
+                mem_nd = mem_nd + _bcast_1d(kv_1d, expr_keys.index('kvdim'))
+            comp_nd_list.append(mem_nd)
 
-            # KV cache memory for every combination of non-W exprs
-            kv_axes = [(i, key) for i, key in enumerate(expr_keys) if key != 'w']
-            kv_axis_sizes = [n_sizes[i] for i, _ in kv_axes]
-            kv_mem_arr = np.zeros(kv_axis_sizes if kv_axis_sizes else [1])
-            for idx_tuple in (np.ndindex(*kv_axis_sizes) if kv_axis_sizes else [()]):
-                q_k = list(default_arch['q']['k'])
-                q_v = list(default_arch['q']['v'])
-                p_k = list(default_arch['p']['k'])
-                p_v = list(default_arch['p']['v'])
-                for ax, (orig_i, key) in enumerate(kv_axes):
-                    sv = expr_subnets_list[orig_i][idx_tuple[ax]]
-                    if key == 'kv':
-                        q_k = sv['q']['k']; q_v = sv['q']['v']
-                    elif key == 'kvdim':
-                        p_k = sv['p']['k']; p_v = sv['p']['v']
-                    elif key == 'eff_kv':
-                        q_k = sv['q']['k']; q_v = sv['q']['v']
-                        p_k = sv['p']['k']; p_v = sv['p']['v']
-                kv_mem_arr[idx_tuple] = compute_kv_memory(
-                    {'k': q_k, 'v': q_v}, {'k': p_k, 'v': p_v}, config, args.n_token
-                )
-
-            # Broadcast: total_mem[...] = w_mem[w_axis] + kv_mem[other_axes]
-            if w_idx is not None:
-                w_shape = [1] * n_exprs
-                w_shape[w_idx] = n_sizes[w_idx]
-                kv_shape = [1] * n_exprs
-                for ax, (orig_i, _) in enumerate(kv_axes):
-                    kv_shape[orig_i] = kv_axis_sizes[ax]
-                total_mem_arr = w_mem_arr.reshape(w_shape) + kv_mem_arr.reshape(kv_shape)
-            else:
-                kv_shape = [1] * n_exprs
-                for ax, (orig_i, _) in enumerate(kv_axes):
-                    kv_shape[orig_i] = kv_axis_sizes[ax]
-                total_mem_arr = kv_mem_arr.reshape(kv_shape) + w_mem_arr[0]
-
-            comp_obj_arr = total_mem_arr  # shape: n_sizes
         else:
-            print("[combo] WARNING: non-memory comp_obj; falling back to full product (may be slow)")
-            USE_BROADCASTING = False
+            raise ValueError(
+                f"comp_obj='{obj}' not supported for vectorized computation. "
+                f"Supported: wbits, kvbits, kbits, vbits, kvdim, kdim, vdim, "
+                f"eff_kvbits, eff_kbits, eff_vbits, memory")
 
-    if not USE_BROADCASTING:
-        # Original O(N^K) product loop (fallback for small products or non-memory comp_obj)
-        metric_list = []
-        subnets_list = []
-        expr_iters = [list(zip(sv, fv)) for sv, fv in expr_map.values()]
-        for combo in itertools.product(*expr_iters):
-            arch = {
-                'q': {'w': default_arch['q']['w'], 'k': default_arch['q']['k'], 'v': default_arch['q']['v']},
-                'p': {'k': default_arch['p']['k'], 'v': default_arch['p']['v']},
-            }
-            component_metrics = []
-            for key, (subnet, f_row) in zip(expr_keys, combo):
-                if key == 'w':
-                    arch['q']['w'] = subnet['q']['w']
-                elif key == 'kv':
-                    arch['q']['k'] = subnet['q']['k']; arch['q']['v'] = subnet['q']['v']
-                elif key == 'kvdim':
-                    arch['p']['k'] = subnet['p']['k']; arch['p']['v'] = subnet['p']['v']
-                elif key == 'eff_kv':
-                    arch['q']['k'] = subnet['q']['k']; arch['q']['v'] = subnet['q']['v']
-                    arch['p']['k'] = subnet['p']['k']; arch['p']['v'] = subnet['p']['v']
-                component_metrics.append(f_row[0])
-            if args.sqrt:
-                new_metric = sum(scales[k] * math.sqrt(f_row[0]) for k, (_, f_row) in zip(expr_keys, combo))
-            else:
-                new_metric = sum(scales[k] * f_row[0] for k, (_, f_row) in zip(expr_keys, combo))
-            metric_list.append([new_metric] + component_metrics)
-            subnets_list.append(arch)
-        metric_arr = np.array(metric_list)
-        comp_obj_vals = [[get_net_info(a, config, group_size, n_token=args.n_token)[c] for c in args.comp_obj] for a in subnets_list]
-        sort_idx = np.argsort(metric_arr[:, 0])
-        F = np.column_stack((metric_arr, comp_obj_vals))[sort_idx]
-        subnets = np.array(subnets_list)[sort_idx]
+    # Step 3: Get valid ND indices — three mutually exclusive paths
+    n_total = int(np.prod(nd_shape))
+
+    if args.random_sample is not None:
+        # Sample from the full combo space (all Pareto combinations), ignoring range filter
+        n_draw = min(args.random_sample, n_total)
+        rng_flat = np.random.choice(n_total, size=n_draw, replace=False)
+        valid_nd_idx = np.stack(np.unravel_index(rng_flat, nd_shape), axis=1)
+        valid_metrics = new_metric_nd[tuple(valid_nd_idx.T)]
+        valid_nd_idx  = valid_nd_idx[np.argsort(valid_metrics)]
+
+    elif n_comp_obj_min > 0:
+        # Filter-first: apply range mask on ND arrays → only N_valid << n_total indices
+        mask = np.ones(nd_shape, dtype=bool)
+        for comp_nd, lo, hi in zip(comp_nd_list, args.comp_obj_min, args.comp_obj_max):
+            mask &= (comp_nd >= lo) & (comp_nd <= hi)
+        valid_nd_idx = np.argwhere(mask)   # (N_valid, n_dims)
+        print(f'range_idx : {len(valid_nd_idx)}')
+        if len(valid_nd_idx) == 0 and comp_nd_list:
+            first_nd = np.asarray(comp_nd_list[0])
+            print(f'[debug] comp_obj[0] range in results: min={first_nd.min():.3f}, max={first_nd.max():.3f}')
+            print(f'[debug] comp_obj_min={args.comp_obj_min}, comp_obj_max={args.comp_obj_max}')
+        valid_metrics = new_metric_nd[tuple(valid_nd_idx.T)]
+        valid_nd_idx  = valid_nd_idx[np.argsort(valid_metrics)]
+
     else:
-        # ---- Step 3 (broadcasting path): filter → sample → build arch dicts ----
-        flat_metric  = combined_metric.ravel()
-        flat_comp    = comp_obj_arr.ravel()
-        flat_indices = np.arange(flat_metric.size)
+        # No filter, no random: unavoidably sort all combos O(n_total)
+        sort_order   = np.argsort(new_metric_nd.ravel())
+        valid_nd_idx = np.stack(np.unravel_index(sort_order, nd_shape), axis=1)
 
-        if n_comp_obj_min > 0:
-            flag = (flat_comp >= args.comp_obj_min[0]) & (flat_comp <= args.comp_obj_max[0])
-            range_flat_idx = flat_indices[flag]
-            print(f'range_idx (broadcasting): {len(range_flat_idx):,}')
-            if len(range_flat_idx) == 0:
-                print(f'[debug] memory range: min={flat_comp.min():.1f}, max={flat_comp.max():.1f}')
-                print(f'[debug] comp_obj_min={args.comp_obj_min}, comp_obj_max={args.comp_obj_max}')
-        else:
-            range_flat_idx = flat_indices
+    # Step 5: Assemble small F for N_valid rows only
+    vt = tuple(valid_nd_idx.T)   # tuple of (N_valid,) index arrays, one per dim
+    new_metric_vals = new_metric_nd[vt]
+    comp_metrics    = np.column_stack([_efm[k][valid_nd_idx[:, i]]
+                                       for i, k in enumerate(expr_keys)])
+    F_parts = [new_metric_vals.reshape(-1, 1), comp_metrics]
+    if comp_nd_list:
+        comp_obj_vals = np.column_stack([np.asarray(nd)[vt] for nd in comp_nd_list])
+        F_parts.append(comp_obj_vals)
+    F = np.column_stack(F_parts)
 
-        sort_order     = np.argsort(flat_metric[range_flat_idx])
-        sorted_flat_idx = range_flat_idx[sort_order]
-
-        if args.random_sample is not None and args.random_sample < len(sorted_flat_idx):
-            chosen_flat_idx = np.sort(np.random.choice(sorted_flat_idx, size=args.random_sample, replace=False))
-        else:
-            chosen_flat_idx = sorted_flat_idx[:args.n]
-
-        # Convert flat indices → per-expr index tuples
-        chosen_idx_tuples = np.unravel_index(chosen_flat_idx, n_sizes)
-
-        # Build arch dicts only for the selected candidates
-        subnets_list = []
-        metric_rows  = []
-        for sample_pos in range(len(chosen_flat_idx)):
-            per_expr_idx = [int(chosen_idx_tuples[e][sample_pos]) for e in range(n_exprs)]
-            arch = {
-                'q': {'w': default_arch['q']['w'], 'k': default_arch['q']['k'], 'v': default_arch['q']['v']},
-                'p': {'k': default_arch['p']['k'], 'v': default_arch['p']['v']},
+    # Step 6: Build merged arch dicts only for final selected rows
+    def _build_merged_arch_nd(nd_idx_row):
+        """nd_idx_row: int array of length n_dims (one entry per expr component)."""
+        arch = {
+            'q': {
+                'w': default_arch['q']['w'],
+                'k': default_arch['q']['k'],
+                'v': default_arch['q']['v'],
+            },
+            'p': {
+                'k': default_arch['p']['k'],
+                'v': default_arch['p']['v'],
             }
-            component_metrics = []
-            for e, (key, idx_e) in enumerate(zip(expr_keys, per_expr_idx)):
-                sv = expr_subnets_list[e][idx_e]
-                fv_row = expr_F_list[e][idx_e]
-                if key == 'w':
-                    arch['q']['w'] = sv['q']['w']
-                elif key == 'kv':
-                    arch['q']['k'] = sv['q']['k']; arch['q']['v'] = sv['q']['v']
-                elif key == 'kvdim':
-                    arch['p']['k'] = sv['p']['k']; arch['p']['v'] = sv['p']['v']
-                elif key == 'eff_kv':
-                    arch['q']['k'] = sv['q']['k']; arch['q']['v'] = sv['q']['v']
-                    arch['p']['k'] = sv['p']['k']; arch['p']['v'] = sv['p']['v']
-                component_metrics.append(fv_row[0])
-            new_metric = float(combined_metric[tuple(per_expr_idx)])
-            metric_rows.append([new_metric] + component_metrics)
-            subnets_list.append(arch)
+        }
+        for dim_i, key in enumerate(expr_keys):
+            sv = _esm[key][nd_idx_row[dim_i]]
+            if key == 'w':
+                arch['q']['w'] = sv['q']['w']
+            elif key == 'kv':
+                arch['q']['k'] = sv['q']['k']
+                arch['q']['v'] = sv['q']['v']
+            elif key == 'kvdim':
+                arch['p']['k'] = sv['p']['k']
+                arch['p']['v'] = sv['p']['v']
+            elif key == 'eff_kv':
+                arch['q']['k'] = sv['q']['k']
+                arch['q']['v'] = sv['q']['v']
+                arch['p']['k'] = sv['p']['k']
+                arch['p']['v'] = sv['p']['v']
+        return arch
 
-        metric_arr   = np.array(metric_rows)
-        # Compute full net_info only for the selected architectures (O(200) not O(N^K))
-        comp_obj_vals = [[get_net_info(a, config, group_size, n_token=args.n_token)[c] for c in args.comp_obj] for a in subnets_list]
-        sort_idx = np.argsort(metric_arr[:, 0])
-        F = np.column_stack((metric_arr, comp_obj_vals))[sort_idx]
-        subnets = np.array(subnets_list)[sort_idx]
-        # Broadcasting path already handled filtering+sampling; skip duplicate steps below
-        pf = F
-        ps = subnets
-        I = list(range(len(pf)))
+    def _build_subnets(row_indices):
+        """row_indices: indices into valid_nd_idx (the filtered+sorted set)."""
+        return np.array([_build_merged_arch_nd(valid_nd_idx[r]) for r in row_indices],
+                        dtype=object)
 
-    if not USE_BROADCASTING:
-        # pf/ps/I setup for non-broadcasting path
-        if n_comp_obj_min > 0:
-            flag = np.ones(len(F), dtype=bool)
-            for i in range(n_comp_obj):
-                flag = np.logical_and(flag, np.logical_and(F[:, -n_comp_obj + i] >= args.comp_obj_min[i], F[:, -n_comp_obj + i] <= args.comp_obj_max[i]))
-            range_idx = np.argwhere(flag).flatten()
-            print(f'range_idx : {len(range_idx)}')
-            if len(range_idx) == 0:
-                mem_col = F[:, -n_comp_obj]
-                print(f'[debug] memory range in search results: min={mem_col.min():.1f}, max={mem_col.max():.1f}')
-                print(f'[debug] comp_obj_min={args.comp_obj_min}, comp_obj_max={args.comp_obj_max}')
-                print(f'[debug] unique memory values (sample): {np.unique(mem_col)[:10].tolist()}')
-            pf = F[range_idx]
-            ps = subnets[range_idx]
-        else:
-            pf = F
-            ps = subnets
-
-    if not USE_BROADCASTING and args.high_tradeoff:
+    pf = F
+    ps = _build_subnets(np.arange(len(F)))
+        
+    if args.high_tradeoff:
         I = NonDominatedSorting().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], only_non_dominated_front=True)
 
-    if not USE_BROADCASTING:
-        if args.prefer:
-            preferences = {}
-            for p in args.prefer:
-                k, v = p.split("#")
-                preferences[k] = float(v)
-            weights = np.fromiter(preferences.values(), dtype=float)
-            I = ASF().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], weights).argsort()[:args.n].reshape(args.n)
-        else:
-            I = list(range(len(pf)))
+    if args.prefer:
+        # preferences
+        preferences = {}
+        # for p in args.prefer.split("+"):
+        for p in args.prefer:
+            k, v = p.split("#")
+            preferences[k] = float(v)
+        weights = np.fromiter(preferences.values(), dtype=float)        
+        # I = ASF().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], weights).argsort()[0]
+        I = ASF().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], weights).argsort()[:args.n].reshape(args.n)
+        
+    else:
+        I = list(range(len(pf)))
         if args.quantile_sample:
             # Parse: "wbits#0.1,0.5,0.9" → {'wbits': [0.1, 0.5, 0.9]}
             quantile_specs = {}
@@ -412,7 +385,6 @@ def main(args):
             I.sort()
         else:
             I = I[:args.n]
-    # (broadcasting path already set I = list(range(len(pf))) above)
 
 
     # always add most accurate architectures

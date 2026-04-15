@@ -67,9 +67,6 @@ class LlamaEvaluator:
         self.device_map = device_map
         self.dtype = dtype
         self.tokenizer = get_tokenizer(model_id)
-        # AWQ calibration results cache: W-arch key → awq_results
-        # Avoids re-running expensive calibration when multiple samples share the same W-arch
-        self._awq_results_cache = {}
         n_block = int(config['n_block'])
         # self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
 
@@ -254,8 +251,7 @@ class LlamaEvaluator:
                                              dtype=self.dtype,
                                              config=self.config,
                                              do_owq='qeft' in self.method['w'],
-                                             owq_path=self.outlier,
-                                             awq_results_cache=self._awq_results_cache if w_method == 'awq' else None)
+                                             owq_path=self.outlier)
             self.model.eval()
             kv_methods = self.method['kv'] if isinstance(self.method.get('kv'), list) else [self.method.get('kv')]
             if any(m in ['hqq', 'kivi', 'think'] for m in kv_methods):

@@ -135,14 +135,15 @@ def compute_memory(arch, config, group_size, n_token=0, residual_length=0):
     return weight_memory + cache_memory
 
 
-def compute_weight_memory(w_arch, config, group_size):
-    """Weight-only memory (no KV cache). Used for broadcasting-based filtering."""
+def compute_weight_memory(arch, config, group_size):
+    """Return weight (non-KV) memory in bytes. Mirrors the weight_memory part of compute_memory."""
     w_group_size = group_size['w']
     weight_memory = 0
     for linear in config['linear']:
         out_dim, in_dim = map(int, config['linear_shape'][linear])
         linear_group_size = in_dim if w_group_size == -1 else w_group_size
-        linear_bits = w_arch[linear]
+        assert in_dim % linear_group_size == 0
+        linear_bits = arch['q']['w'][linear]
         if type(linear_bits[0]) == int:
             for bits in linear_bits:
                 weight_memory += out_dim * in_dim * bits // 8
@@ -162,21 +163,103 @@ def compute_weight_memory(w_arch, config, group_size):
     return weight_memory
 
 
-def compute_kv_memory(kv_q_arch, p_arch, config, n_token):
-    """KV-cache-only memory. Used for broadcasting-based filtering."""
+def compute_cache_memory_single(arch, config, n_token):
+    """Return KV cache memory in bytes for a single arch. Mirrors the cache_memory part of compute_memory."""
     head_dim = int(config['head_dim'])
+    p_arch = arch.get('p', {})
     cache_memory = 0
     for target in ['k', 'v']:
         kv_dim = int(config['linear_shape'][config[f'{target}_linear']][0])
         n_kv_heads = kv_dim // head_dim
-        prune_list = p_arch.get(target, [0] * len(kv_q_arch[target]))
-        for (bits, gs), prune_dim in zip(kv_q_arch[target], prune_list):
+        prune_list = p_arch.get(target, [0] * len(arch['q'][target]))
+        for (bits, gs), prune_dim in zip(arch['q'][target], prune_list):
             effective_kv_dim = n_kv_heads * (head_dim - prune_dim)
             layer_mem = effective_kv_dim * bits / 8
             if bits < 16:
                 layer_mem += (effective_kv_dim / gs) * 4
             cache_memory += layer_mem * n_token
     return cache_memory
+
+
+def compute_cache_memory_batch(kv_subnets, kvdim_subnets, config, n_token):
+    """
+    Vectorized KV cache memory for all (kv_arch, kvdim_arch) pairs.
+
+    kv_subnets    : list of arch dicts with arch['q']['k/v'] holding (bits, gs) per layer.
+    kvdim_subnets : list of arch dicts with arch['p']['k/v'] holding prune_dim per layer.
+                    Pass None to assume zero pruning (no kvdim_expr).
+    config        : model config dict
+    n_token       : number of KV-cache tokens
+
+    Returns np.ndarray
+        shape (N_kv, N_kvdim)  when kvdim_subnets is not None
+        shape (N_kv,)           when kvdim_subnets is None
+    """
+    head_dim = int(config['head_dim'])
+    n_kv_h = {t: int(config['linear_shape'][config[f'{t}_linear']][0]) // head_dim
+              for t in ('k', 'v')}
+
+    bits_k = np.array([[e[0] for e in sv['q']['k']] for sv in kv_subnets], dtype=float)  # (N_kv, L)
+    gs_k   = np.array([[e[1] for e in sv['q']['k']] for sv in kv_subnets], dtype=float)
+    bits_v = np.array([[e[0] for e in sv['q']['v']] for sv in kv_subnets], dtype=float)
+    gs_v   = np.array([[e[1] for e in sv['q']['v']] for sv in kv_subnets], dtype=float)
+
+    if kvdim_subnets is not None:
+        prune_k = np.array([sv['p']['k'] for sv in kvdim_subnets], dtype=float)  # (N_kvdim, L)
+        prune_v = np.array([sv['p']['v'] for sv in kvdim_subnets], dtype=float)
+
+        eff_k = n_kv_h['k'] * (head_dim - prune_k)  # (N_kvdim, L)
+        eff_v = n_kv_h['v'] * (head_dim - prune_v)
+
+        # broadcast to (N_kv, N_kvdim, L)
+        k_mem   = bits_k[:, None, :] * eff_k[None, :, :] / 8.0 * n_token
+        k_scale = np.where(bits_k[:, None, :] < 16,
+                           eff_k[None, :, :] / gs_k[:, None, :] * 4.0 * n_token, 0.0)
+        v_mem   = bits_v[:, None, :] * eff_v[None, :, :] / 8.0 * n_token
+        v_scale = np.where(bits_v[:, None, :] < 16,
+                           eff_v[None, :, :] / gs_v[:, None, :] * 4.0 * n_token, 0.0)
+        return (k_mem + k_scale + v_mem + v_scale).sum(axis=-1)  # (N_kv, N_kvdim)
+
+    else:
+        # zero pruning → effective dim is constant per target
+        eff_k = float(n_kv_h['k'] * head_dim)
+        eff_v = float(n_kv_h['v'] * head_dim)
+
+        k_mem   = bits_k * eff_k / 8.0 * n_token                                    # (N_kv, L)
+        k_scale = np.where(bits_k < 16, eff_k / gs_k * 4.0 * n_token, 0.0)
+        v_mem   = bits_v * eff_v / 8.0 * n_token
+        v_scale = np.where(bits_v < 16, eff_v / gs_v * 4.0 * n_token, 0.0)
+        return (k_mem + k_scale + v_mem + v_scale).sum(axis=-1)  # (N_kv,)
+
+
+def compute_eff_kvbits_batch(kv_subnets, kvdim_subnets, config, target='kv'):
+    """
+    Vectorized effective KV bits for all (kv_arch, kvdim_arch) pairs.
+    Mirrors compute_bits(..., include_pruning=True).
+
+    target : 'kv' → eff_kvbits (mean over k+v layers)
+             'k'  → eff_kbits
+             'v'  → eff_vbits
+
+    Returns np.ndarray shape (N_kv, N_kvdim)
+    """
+    head_dim = float(config['head_dim'])
+    targets = ['k', 'v'] if target == 'kv' else [target]
+    per_target = []
+    for t in targets:
+        bits  = np.array([[e[0] for e in sv['q'][t]] for sv in kv_subnets], dtype=float)  # (N_kv, L)
+        gs    = np.array([[e[1] for e in sv['q'][t]] for sv in kv_subnets], dtype=float)
+        prune = np.array([sv['p'][t] for sv in kvdim_subnets], dtype=float)               # (N_kvdim, L)
+
+        scale       = np.where(gs != 0, 32.0 / gs, 0.0)        # (N_kv, L)
+        bits_scaled = bits + scale
+        eff_factor  = 1.0 - prune / head_dim                    # (N_kvdim, L)
+
+        b = bits_scaled[:, None, :] * eff_factor[None, :, :]   # (N_kv, N_kvdim, L)
+        per_target.append(b)
+
+    # mean over all layers (k+v concatenated), matching compute_bits behaviour
+    return np.concatenate(per_target, axis=-1).mean(axis=-1)    # (N_kv, N_kvdim)
 
 
 def compute_sparsity(arch):

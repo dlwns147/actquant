@@ -33,26 +33,17 @@ class AWQ(BASE):
             print("Clipping symmetrically")
 
 
-    def run(self, nsamples=128, seqlen=512, no_zero_point=False, cached_awq_results=None):
+    def run(self, nsamples=128, seqlen=512, no_zero_point=False):    
         q_config = {
             "zero_point": not no_zero_point,  # by default True
             "q_group_size": self.group_size,  # whether to use group quantization
         }
         print("Quantization config:", q_config)
         self.model.config.use_cache = False
-
-        if cached_awq_results is None:
-            # Full calibration path
-            awq_results = run_awq(self.model, self.tokenizer, q_config=q_config, arch=self.arch, clip_asym=self.clip_asym, n_samples=nsamples, seqlen=seqlen, do_owq=self.do_owq, outlier=self.owq)
-            # run_awq modifies weights in-place (apply_scale), so reload clean model before apply_awq
-            self.load_model(device_map='cpu', dtype=self.dtype)
-        else:
-            # Cached path: skip expensive calibration; model is already clean from __init__
-            print(f"[AWQ cache] Reusing cached awq_results (skipping calibration)")
-            awq_results = cached_awq_results
-
+        awq_results = run_awq(self.model, self.tokenizer, q_config=q_config, arch=self.arch, clip_asym=self.clip_asym, n_samples=nsamples, seqlen=seqlen, do_owq=self.do_owq, outlier=self.owq)
+        self.load_model(device_map='cpu', dtype=self.dtype)
+        # self.model = simple_dispatch_model(self.model, self.device_map)
         self.model = dispatch_model(self.model, self.device_map)
         apply_awq(self.model, awq_results, q_config=q_config, arch=self.arch, clip_asym=self.clip_asym, do_owq=self.do_owq, outlier=self.owq)
         torch.cuda.empty_cache()
         gc.collect()
-        return awq_results
