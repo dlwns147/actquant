@@ -380,9 +380,9 @@ def main(args):
             for i in I:
                 info = {k: f'{metric_vals[k][i]:.4f}' for k in quantile_specs}
                 print(f'  arch[{i}]: {info}')
-        elif args.random_sample is not None and args.random_sample < len(pf):
-            I = np.random.choice(I, size=args.random_sample, replace=False)
-            I.sort()
+        elif args.random_sample is not None:
+            # Sampling already done at the top (valid_nd_idx has min(random_sample, n_total) entries)
+            I = list(range(len(pf)))
         else:
             I = I[:args.n]
 

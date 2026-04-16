@@ -33,10 +33,10 @@ USE_KEY_TOKEN=False
 # W_METHOD="hqq layer_prune"
 # W_METHOD_TEXT="hqq_layer_prune"
 
-# W_METHOD=hqq
-# W_METHOD_TEXT=hqq
-W_METHOD=awq
-W_METHOD_TEXT=awq
+W_METHOD=hqq
+W_METHOD_TEXT=hqq
+# W_METHOD=awq
+# W_METHOD_TEXT=awq
 # W_METHOD="awq layer_prune"
 # W_METHOD_TEXT=awq_layer_prune
 # W_METHOD=fp16
