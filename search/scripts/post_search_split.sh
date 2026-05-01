@@ -371,8 +371,11 @@ ARGS="--gpu_id ${DEVICES} \
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
 --datasets ${DATASETS} \
---random_sample ${RANDOM_SAMPLE}"
-# --quantile_sample ${QUANTILE_SAMPLE}"
+--comp_obj ${COMP_OBJ} \
+--comp_obj_min ${MIN_COMP_OBJ} \
+--comp_obj_max ${MAX_COMP_OBJ} \
+--random_sample ${RANDOM_SAMPLE} \
+--quantile_sample ${QUANTILE_SAMPLE}"
 # --longbench_config ${LONGBENCH_CONFIG} \
 # --minilongbench \
 # --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}"

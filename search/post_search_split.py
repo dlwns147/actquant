@@ -74,6 +74,7 @@ class HighTradeoffPoints(DecisionMaking):
 
 def main(args):
     print(args)
+    set_seed(args.seed)
 
     # Generate testcases if requested
     if args.generate_testcases:
@@ -249,7 +250,13 @@ def main(args):
     # Step 3: Get valid ND indices — three mutually exclusive paths
     n_total = int(np.prod(nd_shape))
 
-    if args.random_sample is not None:
+    # When quantile_sample is set, quantiles must be computed over the full filtered
+    # candidate set, so we skip the random pre-sampling shortcut and use the
+    # range-filter (or full-sort) path instead. The "+ extra random" samples are
+    # then drawn from the quantile-selected set's complement in the I-selection step.
+    random_only = args.random_sample is not None and not args.quantile_sample
+
+    if random_only:
         # Sample from the full combo space (all Pareto combinations), ignoring range filter
         n_draw = min(args.random_sample, n_total)
         rng_flat = np.random.choice(n_total, size=n_draw, replace=False)
@@ -380,6 +387,26 @@ def main(args):
             for i in I:
                 info = {k: f'{metric_vals[k][i]:.4f}' for k in quantile_specs}
                 print(f'  arch[{i}]: {info}')
+
+            # Optional: add extra random samples drawn from candidates NOT picked by
+            # quantile selection. This realises the "QUANTILE_SAMPLE + 이를 제외한
+            # 추가 random sample" mode. Total evaluated = len(I_quant) + n_extra.
+            if args.random_sample is not None and args.random_sample > 0:
+                quant_set = set(I)
+                available = np.array(
+                    [j for j in range(len(ps)) if j not in quant_set], dtype=np.int64
+                )
+                n_extra = int(min(args.random_sample, len(available)))
+                if n_extra > 0:
+                    extra = np.random.choice(available, size=n_extra, replace=False)
+                    extra_list = sorted(int(e) for e in extra)
+                    print(f'[random_sample] adding {n_extra} additional random samples '
+                          f'(excluding {len(I)} quantile-selected; pool={len(available)})')
+                    assert quant_set.isdisjoint(extra_list), \
+                        "quantile-selected and random-sampled indices must not overlap"
+                    I = sorted(list(quant_set) + extra_list)
+                print(f'[total] {len(I)} architectures to evaluate '
+                      f'({len(quant_set)} quantile + {len(I) - len(quant_set)} random)')
         elif args.random_sample is not None:
             # Sampling already done at the top (valid_nd_idx has min(random_sample, n_total) entries)
             I = list(range(len(pf)))
