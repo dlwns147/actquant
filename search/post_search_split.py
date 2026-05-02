@@ -26,6 +26,10 @@ from utils.data import get_tokenizer
 from utils.ruler import eval_ruler
 from utils.longeval import eval_longeval_lines, generate_lines_testcases
 from utils.minilongbench import pred_minilongbench, eval_minilongbench
+from utils.select import (
+    LazyPs, build_arch, draw_random, assemble_F,
+    select_valid_nd_idx, quantile_select,
+)
 import warnings
 warnings.simplefilter("ignore")
 
@@ -247,172 +251,86 @@ def main(args):
                 f"Supported: wbits, kvbits, kbits, vbits, kvdim, kdim, vdim, "
                 f"eff_kvbits, eff_kbits, eff_vbits, memory")
 
-    # Step 3: Get valid ND indices — three mutually exclusive paths
-    n_total = int(np.prod(nd_shape))
+    # Parse --quantile_sample once — its presence also gates the candidate-set
+    # builder (quantiles need the full filtered set, not a random pre-sample).
+    quantile_specs = {}
+    for spec in args.quantile_sample:
+        k, v = spec.split('#')
+        quantile_specs[k] = [float(q) for q in v.split(',')]
 
-    # When quantile_sample is set, quantiles must be computed over the full filtered
-    # candidate set, so we skip the random pre-sampling shortcut and use the
-    # range-filter (or full-sort) path instead. The "+ extra random" samples are
-    # then drawn from the quantile-selected set's complement in the I-selection step.
-    random_only = args.random_sample is not None and not args.quantile_sample
-
-    if random_only:
-        # Sample from the full combo space (all Pareto combinations), ignoring range filter
-        n_draw = min(args.random_sample, n_total)
-        rng_flat = np.random.choice(n_total, size=n_draw, replace=False)
-        valid_nd_idx = np.stack(np.unravel_index(rng_flat, nd_shape), axis=1)
-        valid_metrics = new_metric_nd[tuple(valid_nd_idx.T)]
-        valid_nd_idx  = valid_nd_idx[np.argsort(valid_metrics)]
-
-    elif n_comp_obj_min > 0:
-        # Filter-first: apply range mask on ND arrays → only N_valid << n_total indices
-        mask = np.ones(nd_shape, dtype=bool)
-        for comp_nd, lo, hi in zip(comp_nd_list, args.comp_obj_min, args.comp_obj_max):
-            mask &= (comp_nd >= lo) & (comp_nd <= hi)
-        valid_nd_idx = np.argwhere(mask)   # (N_valid, n_dims)
-        print(f'range_idx : {len(valid_nd_idx)}')
-        if len(valid_nd_idx) == 0 and comp_nd_list:
-            first_nd = np.asarray(comp_nd_list[0])
-            print(f'[debug] comp_obj[0] range in results: min={first_nd.min():.3f}, max={first_nd.max():.3f}')
-            print(f'[debug] comp_obj_min={args.comp_obj_min}, comp_obj_max={args.comp_obj_max}')
-        valid_metrics = new_metric_nd[tuple(valid_nd_idx.T)]
-        valid_nd_idx  = valid_nd_idx[np.argsort(valid_metrics)]
-
-    else:
-        # No filter, no random: unavoidably sort all combos O(n_total)
-        sort_order   = np.argsort(new_metric_nd.ravel())
-        valid_nd_idx = np.stack(np.unravel_index(sort_order, nd_shape), axis=1)
-
-    # Step 5: Assemble small F for N_valid rows only
-    vt = tuple(valid_nd_idx.T)   # tuple of (N_valid,) index arrays, one per dim
-    new_metric_vals = new_metric_nd[vt]
-    comp_metrics    = np.column_stack([_efm[k][valid_nd_idx[:, i]]
-                                       for i, k in enumerate(expr_keys)])
-    F_parts = [new_metric_vals.reshape(-1, 1), comp_metrics]
-    if comp_nd_list:
-        comp_obj_vals = np.column_stack([np.asarray(nd)[vt] for nd in comp_nd_list])
-        F_parts.append(comp_obj_vals)
-    F = np.column_stack(F_parts)
-
-    # Step 6: Build merged arch dicts only for final selected rows
-    def _build_merged_arch_nd(nd_idx_row):
-        """nd_idx_row: int array of length n_dims (one entry per expr component)."""
-        arch = {
-            'q': {
-                'w': default_arch['q']['w'],
-                'k': default_arch['q']['k'],
-                'v': default_arch['q']['v'],
-            },
-            'p': {
-                'k': default_arch['p']['k'],
-                'v': default_arch['p']['v'],
-            }
-        }
-        for dim_i, key in enumerate(expr_keys):
-            sv = _esm[key][nd_idx_row[dim_i]]
-            if key == 'w':
-                arch['q']['w'] = sv['q']['w']
-            elif key == 'kv':
-                arch['q']['k'] = sv['q']['k']
-                arch['q']['v'] = sv['q']['v']
-            elif key == 'kvdim':
-                arch['p']['k'] = sv['p']['k']
-                arch['p']['v'] = sv['p']['v']
-            elif key == 'eff_kv':
-                arch['q']['k'] = sv['q']['k']
-                arch['q']['v'] = sv['q']['v']
-                arch['p']['k'] = sv['p']['k']
-                arch['p']['v'] = sv['p']['v']
-        return arch
-
-    def _build_subnets(row_indices):
-        """row_indices: indices into valid_nd_idx (the filtered+sorted set)."""
-        return np.array([_build_merged_arch_nd(valid_nd_idx[r]) for r in row_indices],
-                        dtype=object)
-
+    # ─────────────── Candidate set & F (vectorised, see utils/select.py) ───────────────
+    valid_nd_idx = select_valid_nd_idx(
+        nd_shape, new_metric_nd, comp_nd_list,
+        comp_obj_min=args.comp_obj_min, comp_obj_max=args.comp_obj_max,
+        random_sample=args.random_sample,
+        has_quantile=bool(quantile_specs),
+        has_prefer=bool(args.prefer),
+    )
+    F = assemble_F(valid_nd_idx, expr_keys, _efm, comp_nd_list, new_metric_nd)
     pf = F
-    ps = _build_subnets(np.arange(len(F)))
-        
-    if args.high_tradeoff:
-        I = NonDominatedSorting().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], only_non_dominated_front=True)
+    ps = LazyPs(lambda row: build_arch(default_arch, expr_keys, _esm, row),
+                valid_nd_idx)
 
+    # ─────────────────────── Select indices I ───────────────────────
     if args.prefer:
-        # preferences
         preferences = {}
-        # for p in args.prefer.split("+"):
         for p in args.prefer:
-            k, v = p.split("#")
+            k, v = p.split('#')
             preferences[k] = float(v)
-        weights = np.fromiter(preferences.values(), dtype=float)        
-        # I = ASF().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], weights).argsort()[0]
-        I = ASF().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]], weights).argsort()[:args.n].reshape(args.n)
-        
+        weights = np.fromiter(preferences.values(), dtype=float)
+        I = ASF().do(pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]],
+                     weights).argsort()[:args.n].reshape(args.n)
+
+    elif args.high_tradeoff:
+        I = NonDominatedSorting().do(
+            pf[:, [0, *[i for i in range(-n_comp_obj, 0)]]],
+            only_non_dominated_front=True)
+
+    elif quantile_specs:
+        axis_cache = {}
+        I_quant, metric_vals = quantile_select(
+            quantile_specs, valid_nd_idx, expr_keys, _esm, default_arch,
+            config, group_size, args.n_token, axis_cache=axis_cache,
+        )
+        print(f'[quantile_sample] selected {len(I_quant)} unique architectures '
+              f'out of {len(valid_nd_idx)} candidates')
+        for i in I_quant:
+            print(f'  arch[{i}]: '
+                  + str({k: f'{metric_vals[k][i]:.4f}' for k in quantile_specs}))
+
+        I_extra = []
+        if args.random_sample is not None and args.random_sample > 0:
+            I_extra = draw_random(args.random_sample, len(valid_nd_idx),
+                                  exclude=I_quant)
+            print(f'[random_sample] adding {len(I_extra)} additional random samples '
+                  f'(excluding {len(I_quant)} quantile-selected; '
+                  f'pool={len(valid_nd_idx) - len(I_quant)})')
+        I = sorted(set(I_quant) | set(I_extra))
+        assert len(I) == len(I_quant) + len(I_extra), \
+            'quantile and random samples must be disjoint'
+        print(f'[total] {len(I)} architectures to evaluate '
+              f'({len(I_quant)} quantile + {len(I_extra)} random)')
+
+    elif args.random_sample is not None:
+        # The fast path inside select_valid_nd_idx already pre-sampled (or
+        # narrowed to the filter); evaluate everything in valid_nd_idx.
+        I = list(range(len(valid_nd_idx)))
+
     else:
-        I = list(range(len(pf)))
-        if args.quantile_sample:
-            # Parse: "wbits#0.1,0.5,0.9" → {'wbits': [0.1, 0.5, 0.9]}
-            quantile_specs = {}
-            for spec in args.quantile_sample:
-                k, v = spec.split('#')
-                quantile_specs[k] = [float(q) for q in v.split(',')]
+        I = list(range(min(args.n, len(valid_nd_idx))))
 
-            # Compute metric values for all architectures in filtered set (ps)
-            metric_vals = {}
-            for key in quantile_specs:
-                metric_vals[key] = np.array([
-                    get_net_info(a, config, group_size, n_token=args.n_token)[key] for a in ps
-                ])
-
-            # Compute target values at each quantile position
-            target_vals = {}
-            for key, quantiles in quantile_specs.items():
-                target_vals[key] = [np.quantile(metric_vals[key], q) for q in quantiles]
-                print(f'[quantile_sample] {key}: range=[{metric_vals[key].min():.4f}, {metric_vals[key].max():.4f}]')
-                print(f'[quantile_sample] {key}: targets={[f"{t:.4f}" for t in target_vals[key]]}')
-
-            # For each combination of quantile targets, find the nearest architecture (normalized L2)
-            I_set = set()
-            keys = list(quantile_specs.keys())
-            for combo in itertools.product(*[range(len(quantile_specs[k])) for k in keys]):
-                targets = {k: target_vals[k][qi] for k, qi in zip(keys, combo)}
-                dists = np.zeros(len(ps))
-                for k, t in targets.items():
-                    vals = metric_vals[k]
-                    val_range = vals.max() - vals.min()
-                    dists += ((vals - t) / val_range) ** 2 if val_range > 0 else (vals - t) ** 2
-                I_set.add(int(np.argmin(dists)))
-
-            I = sorted(I_set)
-            print(f'[quantile_sample] selected {len(I)} unique architectures out of {len(ps)} candidates')
-            for i in I:
-                info = {k: f'{metric_vals[k][i]:.4f}' for k in quantile_specs}
-                print(f'  arch[{i}]: {info}')
-
-            # Optional: add extra random samples drawn from candidates NOT picked by
-            # quantile selection. This realises the "QUANTILE_SAMPLE + 이를 제외한
-            # 추가 random sample" mode. Total evaluated = len(I_quant) + n_extra.
-            if args.random_sample is not None and args.random_sample > 0:
-                quant_set = set(I)
-                available = np.array(
-                    [j for j in range(len(ps)) if j not in quant_set], dtype=np.int64
-                )
-                n_extra = int(min(args.random_sample, len(available)))
-                if n_extra > 0:
-                    extra = np.random.choice(available, size=n_extra, replace=False)
-                    extra_list = sorted(int(e) for e in extra)
-                    print(f'[random_sample] adding {n_extra} additional random samples '
-                          f'(excluding {len(I)} quantile-selected; pool={len(available)})')
-                    assert quant_set.isdisjoint(extra_list), \
-                        "quantile-selected and random-sampled indices must not overlap"
-                    I = sorted(list(quant_set) + extra_list)
-                print(f'[total] {len(I)} architectures to evaluate '
-                      f'({len(quant_set)} quantile + {len(I) - len(quant_set)} random)')
-        elif args.random_sample is not None:
-            # Sampling already done at the top (valid_nd_idx has min(random_sample, n_total) entries)
-            I = list(range(len(pf)))
-        else:
-            I = I[:args.n]
-
+    if quantile_specs and args.random_sample:
+        sel_mode = 'quantile+random'
+    elif quantile_specs:
+        sel_mode = 'quantile'
+    elif args.random_sample is not None:
+        sel_mode = 'random'
+    elif args.prefer:
+        sel_mode = 'prefer'
+    else:
+        sel_mode = f'top-{args.n}'
+    print(f'[selection] mode={sel_mode}  |I|={len(I)}  '
+          f'|candidates|={len(valid_nd_idx)}  (n_total={int(np.prod(nd_shape))})')
 
     # always add most accurate architectures
     # I = np.append(I, 0)

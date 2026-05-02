@@ -140,7 +140,10 @@ N_TOKEN=16384
 # N_TOKEN=1048576
 
 # COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
-COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
+# Loosened from 0.001 (±0.1%) to 0.05 (±5%) so QUANTILE_SAMPLE picks span the
+# full bit search space [2.25, 4.25]; tight 0.1% pinned wbits ≈ 4 due to weight-
+# memory span (1.73e9) being 263× the tolerance window.
+COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
 # COMP_OBJ_THRESHOLD_LIST=(0.005 $(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
 
 # PREFER="metric#0.0 ${TARGET_COMP_OBJ}#${TARGET_COMP_OBJ_VAL}"
@@ -315,7 +318,7 @@ if [ -n "${KV_EXPR}" ]; then
 fi
 
 if [ -n "${KVDIM_EXPR}" ]; then
-    SAVE+="_kv_dim"
+    SAVE+="_kvdim_expr"
 fi
 
 if [ -n "${EFF_KV_EXPR}" ]; then
@@ -323,12 +326,13 @@ if [ -n "${EFF_KV_EXPR}" ]; then
 fi
 
 # RANDOM_SAMPLE=1000
-RANDOM_SAMPLE=200
+# RANDOM_SAMPLE=200
+RANDOM_SAMPLE=23
 
 # Quantile-based sampling: sample architectures at specific quantile positions of complexity metrics.
 # Format: metric#q1,q2,q3  (space-separated for multiple metrics → Cartesian product)
 # Example: 3 wbits positions x 3 kvbits positions = up to 9 unique architectures
-QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9"
+QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
 
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_sqrt_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
@@ -371,11 +375,11 @@ ARGS="--gpu_id ${DEVICES} \
 --min_seqlen ${MIN_SEQLEN} \
 --data_batch_size ${DATA_BATCH_SIZE} \
 --datasets ${DATASETS} \
---comp_obj ${COMP_OBJ} \
---comp_obj_min ${MIN_COMP_OBJ} \
---comp_obj_max ${MAX_COMP_OBJ} \
 --random_sample ${RANDOM_SAMPLE} \
 --quantile_sample ${QUANTILE_SAMPLE}"
+# --comp_obj ${COMP_OBJ} \
+# --comp_obj_min ${MIN_COMP_OBJ} \
+# --comp_obj_max ${MAX_COMP_OBJ} \
 # --longbench_config ${LONGBENCH_CONFIG} \
 # --minilongbench \
 # --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH}"
