@@ -2,17 +2,17 @@ DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-MODEL_PATH=/SSD/huggingface/meta-llama
-MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
-CONFIG=config/llama.json
-
-# MODEL_PATH=/SSD/huggingface/Qwen
-# MODEL_NAME=Qwen2.5-7B-Instruct
-# # MODEL_NAME=Qwen2.5-14B-Instruct
-# # DTYPE=bfloat16
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=Llama-3.1-8B-Instruct
 # DTYPE=float16
-# CONFIG=config/qwen2.json
+# CONFIG=config/llama.json
+
+MODEL_PATH=/SSD/huggingface/Qwen
+MODEL_NAME=Qwen2.5-7B-Instruct
+# MODEL_NAME=Qwen2.5-14B-Instruct
+# DTYPE=bfloat16
+DTYPE=float16
+CONFIG=config/qwen2.json
 
 # MODEL_PATH=/SSD/huggingface/mistralai
 # MODEL_NAME=Mistral-7B-Instruct-v0.3
@@ -45,10 +45,10 @@ W_GROUP_SIZE=128
 
 # KV_METHOD="hqq"
 # KV_METHOD_TEXT="hqq"
-# KV_METHOD="kivi"
-# KV_METHOD_TEXT="kivi"
-KV_METHOD="kivi think"
-KV_METHOD_TEXT="kivi_think"
+KV_METHOD="kivi"
+KV_METHOD_TEXT="kivi"
+# KV_METHOD="kivi think"
+# KV_METHOD_TEXT="kivi_think"
 # KV_METHOD="fp16"
 # KV_METHOD_TEXT="fp16"
 
@@ -75,13 +75,13 @@ V_QUANT_SCHEME=token
 
 # K pruning dim: integer # of head_dim channels to prune (head_dim=128 for Llama-3)
 # 0=0%, 16=12.5%, 32=25%, 48=37.5%, 64=50%
-# K_PRUNING_DIM=0
+K_PRUNING_DIM=0
 # K_PRUNING_DIM=16
-K_PRUNING_DIM=32
+# K_PRUNING_DIM=32
 # K_PRUNING_DIM=48
 # K_PRUNING_DIM=64
-# V_PRUNING_DIM=0
-V_PRUNING_DIM=32
+V_PRUNING_DIM=0
+# V_PRUNING_DIM=32
 
 COMP_OBJ="bits"
 COMP_OBJ_TEXT=bits
