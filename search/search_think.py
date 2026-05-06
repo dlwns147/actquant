@@ -100,6 +100,8 @@ class SearchThink:
             assert self.n_token > 0, "n_token should be bigger than 0 when using memory objective."
             
         self.stride = kwargs.pop('stride', 0)
+        self.prefill_prompt = kwargs.pop('prefill_prompt', False)
+        self.last_tokens = kwargs.pop('last_tokens', None)
         self.use_key_token = kwargs.pop('use_key_token', False)
         self.trunc_len = kwargs.pop('trunc_len', 512)
         self.sliding_window = kwargs.pop('sliding_window', 128)
@@ -164,6 +166,7 @@ class SearchThink:
             task_manager=self.task_manager,
             task_dict=self.task_dict,
             verbosity=self.verbosity,
+            last_tokens=self.last_tokens,
             use_key_token=self.use_key_token,
             trunc_len=self.trunc_len,
             sliding_window=self.sliding_window,
@@ -336,7 +339,7 @@ class SearchThink:
     def _evaluate(self, archs, accelerator):
         metric_list, complexity_list = [], []
         for arch in tqdm(archs, desc='Eval Arch'):
-            metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func, stride=self.stride)
+            metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func, stride=self.stride, prefill_prompt=self.prefill_prompt)
             metric_list.append(min(self.max_value, np.nan_to_num(list(metric.values())[0], nan=self.max_value)))
             complexity_list.append([complexity[obj] for obj in self.comp_obj])
 
@@ -656,6 +659,11 @@ if __name__ == '__main__':
     
     parser.add_argument('--stride', type=int, default=0,
                         help='chunk size for stride-aware eval with use_cache=True (0 = single forward pass)')
+    parser.add_argument('--last_tokens', type=int, default=None,
+                        help='If set, loss is computed only on the last N tokens per sample.')
+    parser.add_argument('--prefill_prompt', action='store_true',
+                        help='If set (with --last_tokens > 0), prefill the prompt in one forward '
+                             'and stride only the answer span (matches real-decode KV state).')
     parser.add_argument('--use_key_token', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
     parser.add_argument('--trunc_len', type=int, default=512, 
                         help='truncation length for long PPL/JSD calculation')

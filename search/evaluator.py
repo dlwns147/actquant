@@ -296,7 +296,7 @@ class LlamaEvaluator:
 
         return self.model
 
-    def eval(self, accelerator, arch, metric, model=None, loss_func='cross_entropy', stride=0):
+    def eval(self, accelerator, arch, metric, model=None, loss_func='cross_entropy', stride=0, prefill_prompt=False):
         if metric == 'ppl':
             loaders = self.test_loaders
         elif metric == 'loss':
@@ -317,7 +317,8 @@ class LlamaEvaluator:
                 loss_func=loss_func, 
                 stride=stride,
                 last_tokens=self.last_tokens,
-                dense_logits_list=self.dense_logits[dataset] if (self.loss_func in ['jsd', 'kld', 'topk']) else None, 
+                prefill_prompt=prefill_prompt,
+                dense_logits_list=self.dense_logits[dataset] if (self.loss_func in ['jsd', 'kld', 'topk']) else None,
                 key_token_list=self.key_token_list[dataset] if self.use_key_token else None, 
                 tokenizer=self.tokenizer,
                 num_fewshot=self.num_fewshot, 

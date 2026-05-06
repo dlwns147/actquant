@@ -39,27 +39,57 @@ $|\mathcal{X}_{\text{full}}| = (\text{W bits})^{n_{\text{linear-W}}} \cdot
 직접 sweep 은커녕 행성 단위 compute 로도 한 model 의 joint sweep 은
 불가능하다. 어떤 형태로든 분해(decomposition)에 의존해야 한다.
 
-### 1.2 차원 추가 → sample efficiency 저하
+### 1.2 Theorem 1 — Exponential search growth (sample-complexity necessity)
 
-결합 search space 는 Cartesian product 로 폭증하며, 동일한 fill distance 또는
-grid resolution 을 유지하려면 필요한 sample 수가 intrinsic dimension 에 대해
-**지수적으로 증가**한다. $d$-차원 unit hypercube 를 해상도 $\delta$ 로 cover 하기
-위한 sample 수의 lower bound 는
+**Discrete hit-probability form.** 각 axis 가 finite set 이고 $\mathcal{X} =
+\prod_{j=1}^d \mathcal{X}_j$, $|\mathcal{X}_j| = m_j$ 라 하자. 어떤 target set
+$T \subseteq \mathcal{X}$, $|T| = t$, $p = t/|\mathcal{X}|$ 에 대해 $N$ 번의 i.i.d.
+uniform random sampling 으로 $T$ 를 적어도 한 번 hit 할 확률은 $1 - (1-p)^N$
+이고, 성공확률 $1 - \eta$ 를 얻기 위해서는
+
+$$
+N \;\ge\; \frac{\log(1/\eta)}{p}.
+$$
+
+새 axis $d+1$ ($|m_{d+1}|$) 가 추가되면 $t$ 가 그대로일 때 $p \to p/m_{d+1}$,
+즉 같은 hit probability 를 위한 sample 수가 **multiplicative 하게** $m_{d+1}$
+배 증가한다.
+
+**Continuous covering form.** $[0,1]^d$ 를 $\ell_\infty$ 거리에서 fill distance
+$\delta$ 로 cover 하기 위한 sample 수의 lower bound 는
 
 $$
 N_\delta(d) \;\ge\; (1/\delta)^d.
 $$
 
-본 setup 의 axis 별 cardinality 로 환산하면:
+즉 동일 fill distance 유지 시 sample 수가 dimension $d$ 에 대해 **지수적으로**
+증가 (curse of dimensionality, Bellman).
 
-- (W only) 1-axis search → archive ≈ 10⁴ sample 로 |PF|=733 회수
-- (W, KV) 2-axis → 동일 해상도엔 ≈ 9× 더 필요
-- (W, KV, KVD) 3-axis → 동일 해상도엔 ≈ 45× 더 필요 (보수적 lower bound)
+**Corollary (본 setup 정량 환산)**:
+
+$$
+|\mathcal{X}_{\text{full}}| = 3^{224} \cdot 9^{64} \cdot 5^{64} \approx 4.79 \times 10^{212}, \qquad
+|\mathcal{C}| = |PF_W| \cdot |PF_{KV}| \cdot |PF_{KVD}| \approx 3.04 \times 10^{7}.
+$$
+
+축소비율
+
+$$
+\frac{|\mathcal{C}|}{|\mathcal{X}_{\text{full}}|} \;\approx\; 6.3 \times 10^{-206}
+\quad\Longleftrightarrow\quad
+\text{full 대비 약 } 1.6 \times 10^{205} \text{ 배 축소}.
+$$
+
+> *Direct joint search suffers from a multiplicative explosion of the discrete
+> Cartesian product. Equivalently, in a continuous relaxation, maintaining a
+> fixed fill distance requires a covering number exponential in the intrinsic
+> dimension. Therefore, per-method decomposition is not merely an engineering
+> choice but a **sample-complexity necessity**.*
 
 추가로 multi-objective optimization 에선 objective 수 또는 Pareto front 차원이
 커질수록 nondominated point 수가 급증하고 PF 정확 표현에 필요한 point 수도 빠르게
-증가한다 (von Lücken et al. 2014 등). **그러므로 결합 axis 에서 직접 search 보다
-method 별 search 후 low-dimensional surrogate 학습이 sample-efficient**.
+증가한다 (von Lücken et al. 2014). **결합 axis 에서 직접 search 보다 method 별
+search 후 low-dimensional surrogate 학습이 sample-efficient**.
 
 ---
 
@@ -133,74 +163,208 @@ $$
   (단일 input 과 그것이 포함된 모든 interaction)
 - 본 연구는 ARD-GP 위에서 Saltelli pick-and-freeze Monte Carlo estimator 로 추정.
 
-### 2.4 Theorem — 2ε-Pareto containment
+### 2.4 Theorem 2 — Surrogate 2ε-Pareto stability
 
-**Setup.** $y_{\mathrm{full}} = F_{\mathrm{add}} + r$, $\|r\|_\infty \le \epsilon$.
-Complexity 는 **monotone aggregation**
+**Definition (α-Pareto).** Loss $y$ 와 complexity $c$ 모두 minimize. 점 $a$ 가
+$y$ 에 대해 *α-Pareto* 라는 것은 어떤 $a'$ 도 동시에 $c(a') \le c(a)$ 와
+$y(a') < y(a) - \alpha$ 를 만족하지 않는다는 뜻. $\alpha = 0$ 이면 standard Pareto.
 
-$$
-c(a) = \Phi\bigl(c_W(a_W),\; c_{KV}(a_{KV}),\; c_{KVD}(a_{KVD})\bigr)
-$$
-
-이고 $\Phi$ 가 각 argument 에 대해 nondecreasing 이라 가정한다.
-
-> **Note**: weight memory 는 method 별 additive $c_W + c_{KV} + c_{KVD}$ 이지만
-> KV cache memory 는 $b_{KV} \cdot d_{KV}$ 처럼 곱 형태로 결합한다. 그러나 둘 다
-> 각 component 에 대해 monotone 이므로 본 Theorem 에 포함된다 (additive 는
-> $\Phi(\cdot) = \sum$ 의 특수 경우).
-
-**Theorem 1 (Local PF containment).**
-$\mathrm{Pareto}(F_{\mathrm{add}}, c) \;\subseteq\; 2\epsilon\text{-Pareto}(y_{\mathrm{full}}, c).$
-
-**Proof.** $a^* \in \mathrm{Pareto}(F_{\mathrm{add}})$ 가 만약 $a^* \notin
-2\epsilon\text{-Pareto}(y_{\mathrm{full}})$ 이면 어떤 $a'$ 가 존재하여
-$c(a') \le c(a^*),\ y_{\mathrm{full}}(a') < y_{\mathrm{full}}(a^*) - 2\epsilon$.
-$|r| \le \epsilon$ 이므로
+**Setup.** Surrogate $\hat y : \mathcal{X} \to \mathbb{R}$ 가 domain $\mathcal{D}
+\subseteq \mathcal{X}$ 위에서 true loss $y$ 를 uniform 하게 근사:
 
 $$
-F_{\mathrm{add}}(a') \le y_{\mathrm{full}}(a') + \epsilon
-< y_{\mathrm{full}}(a^*) - \epsilon \le F_{\mathrm{add}}(a^*),
+\bigl\| \hat y - y \bigr\|_{\infty, \mathcal{D}}
+\;=\; \sup_{a \in \mathcal{D}} \bigl| \hat y(a) - y(a) \bigr|
+\;\le\; \epsilon.
 $$
 
-따라서 $a'$ 가 $(F_{\mathrm{add}}, c)$ 에서 $a^*$ 를 dominate — 모순. ∎
+Complexity $c(a)$ 는 정확히 계산.
 
-### 2.5 Theorem — Candidate set coverage (더 강한 형태)
-
-$\mathcal{C} = \mathrm{PF}_W \times \mathrm{PF}_{KV} \times \mathrm{PF}_{KVD}$ 라 하자.
-
-**Theorem 2 (Coverage).** $\Phi$ 가 각 argument 에 대해 monotone nondecreasing
-이고 $h_i(z_i)$ 가 $z_i$ 에 대해 monotone (예: $F_i$ 가 단조) 이면, 임의의 full
-architecture $a \in \mathcal{X}_{\text{full}}$ 에 대해 $b \in \mathcal{C}$ 가 존재하여
+**Theorem 2A (PF containment).** 위 setup 에서
 
 $$
-c(b) \le c(a), \qquad F_{\mathrm{add}}(b) \le F_{\mathrm{add}}(a).
+\mathrm{Pareto}_{\mathcal{D}}(\hat y, c) \;\subseteq\; 2\epsilon\text{-Pareto}_{\mathcal{D}}(y, c).
 $$
 
-따라서 $\|y_{\mathrm{full}} - F_{\mathrm{add}}\|_\infty \le \epsilon$ 일 때
+**Proof.** $\hat a \in \mathrm{Pareto}_{\mathcal{D}}(\hat y, c)$ 가 $2\epsilon\text{-Pareto}$
+가 아니면 어떤 $a' \in \mathcal{D}$ 가 존재하여 $c(a') \le c(\hat a)$, $y(a') <
+y(\hat a) - 2\epsilon$. Uniform bound 로부터
+
+$$
+\hat y(a') \le y(a') + \epsilon
+< y(\hat a) - \epsilon \le \hat y(\hat a),
+$$
+
+즉 $a'$ 가 $(\hat y, c)$ 에서 $\hat a$ 를 dominate — 모순. ∎
+
+**Theorem 2B (Budgeted regret form).** 임의 budget $\tau$ 에 대해
+
+$$
+a^*_\tau \in \arg\!\!\min_{a \in \mathcal{D}: c(a) \le \tau} y(a),
+\qquad
+\hat a_\tau \in \arg\!\!\min_{a \in \mathcal{D}: c(a) \le \tau} \hat y(a).
+$$
+
+그러면
+
+$$
+\boxed{\quad y(\hat a_\tau) \;\le\; y(a^*_\tau) + 2\epsilon. \quad}
+$$
+
+**Proof.** $y(\hat a_\tau) \le \hat y(\hat a_\tau) + \epsilon \le \hat y(a^*_\tau)
++ \epsilon \le y(a^*_\tau) + 2\epsilon$. ∎
+
+> **해석 (오해 방지)**: Theorem 2 는 *frontier Hausdorff distance* 가 $\le 2\epsilon$
+> 라는 강한 주장이 아니다. 정확한 의미는 "*고정된 complexity budget 에서 surrogate
+> 로 고른 design 의 true loss 가 true budgeted optimum 보다 $2\epsilon$ 이상
+> 나쁘지 않다*". §6 의 budgeted regret 해석.
+
+> **일반성**: Theorem 2 는 surrogate $\hat y$ 의 *형태에 무관* 하다 ($F_{\mathrm{add}}$,
+> ARD-GP, RBF tps+linear, M10 모두 적용). 단, $\epsilon$ 은 *그 surrogate* 의
+> residual.
+
+> **Empirical vs deterministic**: 본 연구에서 보고하는 $\hat\epsilon^{\text{test}}$
+> 는 **150 held-out joint sample 위의 empirical sup-residual** 이지 $\mathcal{X}$
+> 전체 $4.8 \times 10^{212}$ 위의 deterministic uniform bound 가 아니다. 따라서
+> 결과는 항상 "**measured residual 하의 empirical 2$\epsilon$-Pareto evidence**"
+> 로 표현. Frontier 영역까지 확장하려면 §6 Step 6 의 frontier-knee audit 필요.
+
+### 2.5 Theorem 3 — Local PF Cartesian product coverage
+
+**Setup.** 각 method $i \in \{W, KV, KVD\}$ 에 대해 local proxy loss
+$z_i(a_i) = \ell_i(a_i)$, local complexity $c_i(a_i)$, local Pareto frontier
+
+$$
+\mathrm{PF}_i \;=\; \mathrm{Pareto}_{a_i \in \mathcal{X}_i}\bigl( z_i, c_i \bigr),
+\qquad
+\mathcal{C} \;=\; \mathrm{PF}_W \times \mathrm{PF}_{KV} \times \mathrm{PF}_{KVD}.
+$$
+
+Joint complexity $c(a) = \Phi(c_W(a_W), c_{KV}(a_{KV}), c_{KVD}(a_{KVD}))$.
+Surrogate scorer $H(a) = G(z_W(a_W), z_{KV}(a_{KV}), z_{KVD}(a_{KVD}))$.
+
+**Conditions.**
+- **(C1)** $\Phi$ 는 각 argument 에 대해 monotone nondecreasing.
+- **(C2)** $G : \mathbb{R}^3 \to \mathbb{R}$ 은 각 coordinate $z_i$ 에 대해
+  monotone nondecreasing on the candidate-relevant region.
+
+> (C2) 는 additive surrogate $G(z) = \sum_i h_i(z_i)$ 의 경우 각 $h_i$ 가
+> nondecreasing 이면 자동 충족. ARD-GP 같은 nonparametric scorer 의 경우 **별도
+> coordinate-wise monotonicity audit** 이 필요 (§5.2 audit 결과 참조).
+
+**Theorem 3 (Coverage).** (C1)–(C2) 하에서 임의의 $a \in \mathcal{X}_{\text{full}}$
+에 대해 $b \in \mathcal{C}$ 가 존재하여
+
+$$
+c(b) \le c(a), \qquad H(b) \le H(a).
+$$
+
+**Proof.** Finite $\mathcal{X}_i$ 에서 임의의 $a_i$ 는 $\mathrm{PF}_i$ 의 한 점
+$b_i$ 에 의해 weakly dominated: $z_i(b_i) \le z_i(a_i)$ 이고 $c_i(b_i) \le
+c_i(a_i)$. (그렇지 않으면 dominance chain 을 따라 더 나은 점으로 이동, finite set
+이므로 결국 PF 도달.) $b = (b_W, b_{KV}, b_{KVD}) \in \mathcal{C}$ 에 대해 (C1)
+로 $c(b) \le c(a)$, (C2) 로 $H(b) \le H(a)$. ∎
+
+**Corollary (true-loss coverage).** 추가로 $\|y - H\|_{\infty, \mathcal{X}_{\text{full}}}
+\le \epsilon$ 이면 $y(b) \le H(b) + \epsilon \le H(a) + \epsilon \le y(a) + 2\epsilon$.
+즉
 
 $$
 \boxed{\;
 \forall a \in \mathcal{X}_{\text{full}},\ \exists\, b \in \mathcal{C} :\
-c(b) \le c(a)\ \text{and}\ y_{\mathrm{full}}(b) \le y_{\mathrm{full}}(a) + 2\epsilon.
+c(b) \le c(a)\ \text{and}\ y(b) \le y(a) + 2\epsilon.
 \;}
 $$
 
-즉 **local PF Cartesian product 로 후보를 제한해도 full search 의 좋은 점을
-loss 2ε 이내에서 놓치지 않는다** (실제 NAS pipeline 에서 더 직접적인 보장).
+**Theorem 3' (Approximate local PF, archive coverage slack).** 실제로 $\mathrm{PF}_i$
+는 NSGA2 archive 에서 추출한 **empirical PF** 이다. Archive PF 가 $\delta_i$-covering
+property 를 가진다고 하자: 임의의 $a_i \in \mathcal{X}_i$ 에 대해 어떤 $b_i \in
+\mathrm{PF}_i$ 가 존재하여 $c_i(b_i) \le c_i(a_i)$, $z_i(b_i) \le z_i(a_i) + \delta_i$.
+$G$ 가 coordinate-wise Lipschitz 이고 $|G(z) - G(z')| \le \sum_i L_i |z_i - z_i'|$
+이면
 
-**Proof sketch.** 만약 $a$ 의 component $a_i$ 가 $\mathrm{PF}_i$ 에 없으면 같은
-method 안에 $a_i'$ 가 존재하여 $h_i(z_i(a_i')) \le h_i(z_i(a_i))$ 이고
-$c_i(a_i') \le c_i(a_i)$ 중 하나가 strict. $F_{\mathrm{add}}$ 가 $h_i$ 의 합이고
-$\Phi$ 가 monotone 이므로, $a_i \to a_i'$ 교체가 $F_{\mathrm{add}}, c$ 둘 다
-악화시키지 않는다. 모든 component 에 대해 반복하면 $b \in \mathcal{C}$. ∎
+$$
+H(b) \le H(a) + \sum_i L_i \delta_i,
+\qquad
+y(b) \le y(a) + 2\epsilon + \sum_i L_i \delta_i.
+$$
 
-> **Monotonicity remark**: per-method PF 가 raw `prev_metric` $z_i$ 기준으로
-> 계산되는 것과 $F_{\mathrm{add}}$ 의 1-D component $h_i(z_i) = F_0/3 + F_i$
-> 기준 PF 가 동치이려면 $h_i$ 가 $z_i$ 에 대해 monotone 이어야 한다. §5 의
-> ARD-GP-recovered main effect 곡선 (gradient signs $[0.17, 0.99]$ for W,
-> $[0.52, 1.50]$ for KV, $[0.08, 0.92]$ for KVD — 모두 양수) 으로 monotonicity
-> 를 empirical 로 확인. monotonicity 가 깨지는 영역에선 local archive 를
-> $h_i$ 기준으로 re-rank 해야 한다.
+> **해석**: exact local PF 가 아닌 archive PF 의 경우 최종 corridor 는
+> $2\epsilon$ 이 아니라 $2\epsilon + \sum_i L_i \delta_i$. 본 setup 의 archive
+> 크기 ($|PF_W|=733$, $|PF_{KV}|=321$, $|PF_{KVD}|=129$) 가 충분하면 $\delta_i$
+> 는 작아 추가 slack 무시 가능 — 본 README 는 이 가정 하에 결과를 보고.
+
+### 2.6 Surrogate 형태별 (C2) audit — partial derivative 공식과 검증
+
+**핵심**: Theorem 3 의 (C2) 는 *raw $z_i$ 좌표에 대한 surrogate 의 partial
+derivative 부호 조건* 이며 surrogate 형태에 따라 검증 방식이 다르다. 단순 R²
+가 높다고 자동 충족되지 않음. ARD length-scale 또한 sensitivity 일 뿐
+monotonicity 가 아니다.
+
+| Surrogate | $\partial G/\partial z_i$ 형태 | 검증 방법 |
+|---|---|---|
+| **M0** $\;G = \sum_i \beta_i z_i$ | $\beta_i$ (constant) | OLS 계수 부호 |
+| **M1** $\;G = \beta_0 + \sum_i \beta_i z_i$ | $\beta_i$ (constant) | OLS 계수 부호 (intercept 무관) |
+| **M10** $\;G = \beta_0 + \sum \beta_i z_i + \sum q_i z_i^2 + \sum_{i<j}\gamma_{ij} z_i z_j$ | affine in $z$: $\beta_i + 2 q_i z_i + \sum_{j\ne i} \gamma_{ij} z_j$ | box 8-corner check (affine ⇒ extreme on corner) + dense |
+| **RBF cubic+linear** $\;G = \sum_k \alpha_k r_k^3 + \beta^\top z + b$ | $\beta_i + 3 \sum_k \alpha_k r_k (z_i - x_{k,i})$ | dense gradient audit |
+| **RBF tps+linear** $\;G = \sum_k \alpha_k r_k^2 \log r_k + \beta^\top z + b$ | $\beta_i + \sum_k \alpha_k (2 \log r_k + 1)(z_i - x_{k,i})$ | dense gradient audit |
+| **ARD-GP** $\;G(z) = \sum_k \alpha_k k(z, x_k)$, $\alpha = (K + \sigma_n^2 I)^{-1} y$ | $\beta_i + \sum_k \alpha_k k(z, x_k) (x_{k,i} - z_i) / \ell_i^2$ | dense gradient audit |
+
+> **중요한 구분**: 1D main effect $g_i(z_i) = \mathbb{E}_{z_{-i}}[G(z)] - f_0$
+> 의 monotonicity 와 *full surrogate* $G(z_W, z_{KV}, z_{KVD})$ 의
+> coordinate-wise monotonicity 는 다른 조건이다. 후자가 더 강한 조건이며
+> Theorem 3 에 필요한 것은 *후자*. 1D main effect 단조성은 Hoeffding additive
+> $\hat F_{\mathrm{add}} = \sum_i h_i(z_i)$ 에 대해서만 (C2) 를 자동 보장
+> (script: `verify_main_effect_monotonicity.py`).
+
+**audit 결과** — `archive/verify_monotonicity_all_surrogates.py`. 두 audit set 위에서
+finite-difference gradient 부호 비율 측정 — **두 set 모두 동일한 bounding box
+$[z_W^{\min}, z_W^{\max}] \times [z_{KV}^{\min}, z_{KV}^{\max}] \times [z_{KVD}^{\min},
+z_{KVD}^{\max}] = [0.019, 0.657] \times [0.018, 0.136] \times [0.019, 0.328]$ 안에
+있고, 분포만 다름**:
+
+- **$\mathcal{D}_{\mathrm{meas}}$** = 200 measured joint sample. *Non-uniform*
+  (실제 측정 분포). Candidate scoring 시 surrogate 가 평가하는 영역의 proxy.
+- **$\mathcal{D}_{\mathrm{box}}$** = 5000 Latin-hypercube fill of the same
+  bounding box. *Uniform* fill of box-interior — 측정점이 sparse 한 interior
+  pocket 까지 cover. Box 바깥 외삽이 아니라 **box 안의 interpolation hole** 까지
+  test.
+
+| Surrogate | $\mathcal{D}_{\mathrm{meas}}$ frac ≥ 0 (W / KV / KVD) | $\mathcal{D}_{\mathrm{box}}$ frac ≥ 0 (W / KV / KVD) | 적용 영역 |
+|---|---|---|---|
+| **M0** ($\beta = [+0.61, +1.24, +0.51]$, all $+$) | 100 / 100 / 100 | 100 / 100 / 100 | **GLOBAL** ✓ |
+| **M1** ($\beta = [+0.60, +1.08, +0.47]$, all $+$) | 100 / 100 / 100 | 100 / 100 / 100 | **GLOBAL** ✓ |
+| **M10** | 100 / 100 / **99.5** | 88.1 / 83.3 / 68.5 | $\mathcal{D}_{\mathrm{meas}}$ ≥99.5% ✓; box VIOLATED |
+| **RBF cubic+linear** | 100 / **98.0** / 99.5 | 100 / 100 / 100 | $\mathcal{D}_{\mathrm{meas}}$ 98% (small wiggle); $\mathcal{D}_{\mathrm{box}}$ ✓ |
+| **RBF tps+linear** | 100 / **99.0** / 99.5 | 100 / 100 / 100 | $\mathcal{D}_{\mathrm{meas}}$ 99% ✓; $\mathcal{D}_{\mathrm{box}}$ ✓ |
+| **ARD-GP** | 100 / 100 / **99.0** | 100 / 79.0 / 57.9 | $\mathcal{D}_{\mathrm{meas}}$ 99% ✓; box VIOLATED |
+| (Hoeffding additive $\hat F_{\mathrm{add}} = \sum h_i$, 1D check) | 100 / 100 / 100 (correlated MC) | 100 / 100 / 100 | **GLOBAL** ✓ |
+
+**해석**:
+
+- **M0 / M1**: OLS 결과 모든 계수가 strict positive → **(C2) 가 무조건 global 충족**.
+  Theorem 3 적용 가장 깔끔. 단 residual 이 큼 ($\hat\epsilon_\infty^{\mathrm{M1}} = 0.0590$).
+- **M10**: $q_i, \gamma_{ij}$ 가 모두 negative (curvature/saturation 흡수) 이지만
+  $\beta_i$ 가 충분히 커서 $\mathcal{D}_{\mathrm{meas}}$ 에선 99.5% 충족.
+  Box-interior fill ($\mathcal{D}_{\mathrm{box}}$) 의 8-corner 중 일부 음수 →
+  **theorem 적용은 $\mathcal{D}_{\mathrm{meas}}$ 한정**.
+- **RBF cubic / tps**: $\mathcal{D}_{\mathrm{meas}}$ 에서 KV 축 small wiggle
+  (98–99%, 측정점이 몰린 영역의 fitting 변동). 흥미롭게도 $\mathcal{D}_{\mathrm{box}}$
+  의 sparse interior 에서는 100% — RBF interpolant 가 측정점이 적은 hole 영역에서
+  linear tail 이 dominate 하여 globally monotone.
+- **ARD-GP**: $\mathcal{D}_{\mathrm{meas}}$ 99% ≥ 0 → measured 분포 영역 한정
+  (C2) 충족. $\mathcal{D}_{\mathrm{box}}$ 의 sparse interior 에서는 KV 79%,
+  KVD 58% 로 깨짐 — box 바깥 외삽이 아니라 **box 안 interpolation hole** 에서
+  GP posterior wiggle 이 monotonicity 깨뜨림.
+- **Hoeffding $\hat F_{\mathrm{add}} = \sum h_i(z_i)$**: 1D main effect $h_i$
+  가 strictly monotone (correlated MC, 38/38 grid pts) → (C2) 자동 global ✓.
+
+> Figures: [`figures/verify_monotonicity_all.png`](figures/verify_monotonicity_all.png)
+> (6 surrogate × 3 axis gradient histogram on $\mathcal{D}_{\mathrm{meas}}$),
+> [`figures/verify_monotonicity.png`](figures/verify_monotonicity.png) (1D main
+> effect),
+> [`figures/verify_ardgp_monotonicity.png`](figures/verify_ardgp_monotonicity.png)
+> (ARD-GP 3D coord-wise).
 
 본 setup 에서 PF 조합 cardinality 는
 
@@ -416,30 +580,99 @@ $$
 이론값과 실측값이 sampling noise + finite-N + monotone calibration 차이 범위 내
 일치 (2.3% gap).
 
-§2.4 Theorem 1 의 **empirical** 적용:
+**Theorem 2 + Theorem 3 통합 — surrogate 별 empirical $2\hat\epsilon$ corridor
++ monotonicity 검증 status**:
+
+| Surrogate $\hat y$ | $\hat\epsilon_\infty^{\text{test}}$ | $2\hat\epsilon$ corridor | / $\ln 2$ | (C2) audit | Theorem 3 적용 영역 |
+|---|---|---|---|---|---|
+| **M0** $\beta_i z_i$ | 0.0643 | 0.1286 | 18.6 % | $\beta = [+0.61, +1.24, +0.51]$ | **GLOBAL** ✓ |
+| **M1** $\beta_0 + \beta_i z_i$ | 0.0590 | 0.1180 | 17.0 % | $\beta = [+0.60, +1.08, +0.47]$ | **GLOBAL** ✓ |
+| Hoeffding $\hat F_{\mathrm{add}}$ | 0.0858 | 0.1716 | 24.8 % | $h_i'(z_i) > 0$ ∀$i$ ✓ | GLOBAL (1D MC) |
+| **M10** full quadratic | 0.0496 | 0.0992 | 14.3 % | $\mathcal{D}_{\mathrm{meas}}$ 99.5% ✓; box ✗ | $\mathcal{D}_{\mathrm{meas}}$ 한정 |
+| **RBF cubic+linear** | 0.0310 | 0.0620 | 8.9 % | $\mathcal{D}_{\mathrm{meas}}$ 98% (mostly); box ✓ | (Lipschitz slack 고려 시) |
+| **RBF tps+linear** | 0.0241 | 0.0482 | 7.0 % | $\mathcal{D}_{\mathrm{meas}}$ 99% ✓; box ✓ | $\mathcal{D}_{\mathrm{meas}}$ ≥99% ✓ |
+| **ARD-GP (full)** | **0.0255** | **0.0510** | **7.4 %** | $\mathcal{D}_{\mathrm{meas}}$ 99% ✓; box ✗ | $\mathcal{D}_{\mathrm{meas}}$ 한정 |
+
+---
+
+**Pipeline 의 두 가지 역할 분리**:
+
+본 NAS pipeline 에서 surrogate 는 두 역할을 한다:
+1. **Candidate restriction** (Theorem 3 PF-product coverage): $\mathcal{X}_{\text{full}} \to \mathcal{C} = \prod_i \mathrm{PF}_i$ 정당화
+2. **Candidate scoring** (Theorem 2 PF stability): $\mathcal{C}$ 위에서 best 점 선정
+
+**역할 1 (restriction)** 은 **(C2) 가 globally 충족되는 surrogate** 를 써야 안전하므로
+**M1 또는 Hoeffding $\hat F_{\mathrm{add}}$** 가 정확한 선택. **역할 2 (scoring)** 은
+**candidate region 한정 (C2) 만 충족하면 충분** 하므로 **ARD-GP / RBF tps** 가 더
+정확.
+
+**최종 corridor 의 세 가지 표현 옵션**:
+
+**Case A (강한 claim, candidate-relevant region 한정).** ARD-GP 가 동시에 두
+역할 모두 수행. Theorem 3 의 (C2) 가 $\mathcal{D}_{\mathrm{meas}}$ 위 99% 충족
+이므로 **candidate region 한정** corridor:
 
 $$
 \boxed{\;
-\hat\epsilon_\infty^{\text{test}} = 0.0858 \;\Rightarrow\;
-\mathrm{Pareto}(\hat F_{\mathrm{add}}) \subseteq 2\hat\epsilon_\infty^{\text{test}}\text{-Pareto}(y_{\mathrm{full}}),\
-2\hat\epsilon_\infty^{\text{test}} = 0.172
+\hat\epsilon_\infty^{\text{GP, test}} = 0.0255 \;\Rightarrow\;
+2\hat\epsilon_{\mathrm{GP}} = 0.051 \quad (\approx 7.4\%\text{ of }\ln 2)
 \;}
 $$
 
-⚠️ **중요한 표현 한계**: 위 식의 $\hat\epsilon_\infty^{\text{test}}$ 는 **150
-random held-out sample 에서 측정한 empirical sup-residual** 이지, 전체 $4.8
-\times 10^{212}$ search space 에 대한 deterministic uniform bound 가 아니다.
-즉 위 결과는 정확히는 다음으로 읽어야 한다:
+> 단 이 corridor 의 *Theorem 3 derivation* 은 ARD-GP 의 (C2) 가 $\mathcal{X}_{\mathrm{full}}$
+> 전체에서 충족된다고 가정. 실측은 $\mathcal{D}_{\mathrm{meas}}$ 99% 만 보장
+> ($\mathcal{D}_{\mathrm{box}}$ 에서 KV/KVD 깨짐). 따라서 *Theorem 2* (surrogate
+> PF stability) corridor 로만 해석하는 것이 안전.
 
-> *On the held-out 150 random joint samples, the empirical worst-case residual is
-> $\hat\epsilon_\infty^{\text{test}} = 0.0858$, yielding an **empirical
-> 2$\epsilon$-Pareto evidence corridor** of 0.172 in test region.*
+**Case B (가장 깔끔, $\hat F_{\mathrm{add}}$ 단일 사용).** Restriction 과 scoring
+모두 Hoeffding additive $\hat F_{\mathrm{add}}$ 로. (C2) global 충족 자동 보장:
 
-$\hat\epsilon_2^{\text{test}} = 0.0468$ 은 RMS error 이므로 worst-case Pareto
-guarantee 에 직접 들어가지 않고 **typical / average-case residual scale** 로
-해석. 더 강한 주장을 하려면 §6 step 5 에 명시한 frontier-knee audit 으로 random
-test 가 아닌 frontier-relevant region 에서도 residual bound 가 유지되는지 확인해야
-한다.
+$$
+\boxed{\;
+\hat\epsilon_\infty^{\text{add, test}} = 0.0858 \;\Rightarrow\;
+2\hat\epsilon_{\mathrm{add}} = 0.172 \quad (\approx 24.8\%\text{ of }\ln 2)
+\;}
+$$
+
+가장 보수적이지만 가정 없이 모든 정리가 정확히 적용.
+
+**Case C (recommended, 두 역할 분리).** Restriction 은 M1 (또는 $\hat F_{\mathrm{add}}$)
+으로 (C2) global 충족. Scoring 은 ARD-GP 로 더 정확. Budgeted regret form
+(Theorem 2B) 에서 두 error 가 더해짐:
+
+$$
+y(\hat a_\tau) \;\le\; \min_{c(a) \le \tau} y(a) \;+\; 2\epsilon_{\mathrm{M1}} \;+\; 2\epsilon_{\mathrm{GP}}.
+$$
+
+Empirical 대입: $2(0.0590) + 2(0.0255) = 0.169$ (≈ 24.4% of $\ln 2$). 또는 더 보수적으로
+M1 대신 $\hat F_{\mathrm{add}}$ 쓰면 $0.172 + 0.051 = 0.223$.
+
+> *We use the additive M1 surrogate (β coefficients verified positive) to
+> justify the local PF Cartesian product restriction. ARD-GP, RBF tps+linear,
+> and M10 are then used for accurate candidate scoring; their
+> coordinate-wise monotonicity is empirically verified ($\ge 99\%$) on the
+> candidate-relevant region $\mathcal{D}_{\mathrm{meas}}$. When this audit
+> passes, the smaller residual yields a tighter empirical 2$\hat\epsilon$-Pareto
+> corridor for the scoring step. Otherwise, the formal candidate restriction
+> guarantee remains tied to the monotone additive surrogate.*
+
+---
+
+⚠️ **중요한 표현 한계**: 위 모든 $\hat\epsilon^{\text{test}}$ 는 **150 random
+held-out sample 에서 측정한 empirical sup-residual** 이지, 전체 $4.8 \times
+10^{212}$ search space 에 대한 deterministic uniform bound 가 아니다. 즉:
+
+> *The reported $\hat\epsilon_\infty^{\text{test}}$ is not a deterministic
+> supremum over $\mathcal{X}_{\text{full}}$. It is an empirical worst-case
+> residual over 150 held-out random joint samples. Therefore, the resulting
+> $2\hat\epsilon$ corridor should be interpreted as **empirical evidence under
+> the sampled joint distribution**, not as a formal global guarantee.*
+
+$\hat\epsilon_2^{\text{test}}$ 는 RMS error 이므로 worst-case Pareto guarantee 에
+직접 들어가지 않고 **typical / average-case residual scale** 로 해석. 더 강한
+주장을 하려면 §6 Step 6 의 frontier-knee audit + Mahalanobis nearest-train
+distance audit 으로 random test 가 아닌 frontier-relevant region 에서도 residual
+bound 가 유지되는지 확인해야 한다.
 
 **JSD range 주의**: base-$e$ JSD 의 이론 상한은 $\ln 2 \approx 0.693$, base-2 JSD
 는 $[0, 1]$. 본 측정은 base-$e$ 이므로 $0.094$ (typical) ~ $0.172$ (worst-case)
@@ -478,43 +711,97 @@ corridor 는 $\ln 2$ 대비 13.6 % ~ 24.8 %. CE loss 또는 unbounded 변환의 
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
-│ Step 4. Surrogate ε bound — 150 random test only             │
-│   ─ ‖y_actual − y_pred‖_∞, _2 reported                        │
-│   ─ pred/actual scatter, residual histogram                  │
-│   ─ NO PF / HV comparison ※                                   │
-│   ※ 후보 PF 조합 ≈ 3·10⁷ 이지만 candidate 별 y_actual 측정    │
-│     불가, 150 test 만으로 PF/HV 추정은 frontier sparsity 때문 │
-│     신뢰 불가.                                                │
-│   ─ §5.3 의 empirical ε + §2.4 Theorem 으로 evidence:         │
-│       Pareto(F_add) ⊆ 2ε̂_∞-Pareto(y_full),  2ε̂_∞ = 0.172     │
-│     (※ empirical, not deterministic uniform bound)            │
+│ Step 4. Surrogate ε̂ bound + (C2) audit — 150 test, 2 audits  │
+│   ─ ε̂_∞ per surrogate (Theorem 2):                            │
+│       M0:0.064  M1:0.059  M10:0.050  RBF-c:0.031  RBF-t:0.024 │
+│       ARD-GP:0.026   F_add:0.086                              │
+│   ─ (C2) audit per surrogate (Theorem 3):                     │
+│       M0/M1: β_i 모두 nonneg → GLOBAL ✓                      │
+│       F_add: 1D h_i monotone (38/38 corr-MC pts) → GLOBAL ✓  │
+│       M10:    D_meas 99.5% ✓ / D_box VIOLATED                │
+│       RBF-t:  D_meas 99% ✓  / D_box ✓                       │
+│       ARD-GP: D_meas 99% ✓  / D_box VIOLATED (KV 79%/KVD 58%)│
+│   (※ all ε̂ empirical on 150 test, not deterministic uniform) │
 └──────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
-│ Step 5. Candidate scoring & Pareto sorting                   │
+│ Step 5. Two-role split + Pareto sorting (§5.3 Case C)        │
 │   ─ C = PF_W × PF_KV × PF_KVD ≈ 3.04·10⁷ candidates          │
-│   ─ score = ARD-GP(z_W, z_KV, z_KVD)                         │
-│   ─ chunk-wise prediction → Pareto-sort over (score, c(a))   │
-│   ─ Theorem 2 (Coverage): for every a∈X_full, ∃b∈C with      │
-│       c(b)≤c(a) and y(b)≤y(a)+2ε̂                            │
+│   Role 1 — Candidate restriction (Theorem 3 PF coverage):    │
+│     M1 (β_i>0) → C 가 X_full 을 ε_M1=0.059 corridor 내 지배  │
+│   Role 2 — Candidate scoring (Theorem 2 PF stability):       │
+│     ARD-GP → score 의 ε_GP=0.026 corridor                    │
+│   Combined budget regret (Theorem 2B):                       │
+│     y(â_τ) ≤ min y(a) + 2ε_M1 + 2ε_GP = 0.169                │
+│                                                               │
+│   Corridor 옵션 요약 (§5.3 cases):                            │
+│   • Case A: ARD-GP 단일, candidate region 한정 → 0.051       │
+│   • Case B: F_add 단일, global 가정 무 → 0.172               │
+│   • Case C (recommended): split = 0.169 ~ 0.223              │
 └──────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
-│ Step 6. Frontier audit (recommended for stronger claim)      │
-│   ─ predicted PF 의 knee/extreme point 10–20개를 추가 실측    │
-│   ─ frontier-relevant region 에서 ε̂ bound 재확인             │
-│   ─ random test ε̂ ≈ frontier ε̂ 이면 §5.3 empirical evidence  │
-│     를 frontier 영역까지 확장 가능                            │
+│ Step 6. Frontier & support audits (강한 claim 위한 권장)      │
+│   (a) Frontier-knee audit: predicted PF 의 knee/extreme       │
+│       10–20개를 추가 실측 → frontier ε̂ ≈ random test ε̂ 검증  │
+│   (b) Mahalanobis support audit: candidate PF C 전체에 대해   │
+│       d_train(z) = min_{z_j∈X_train} ‖z − z_j‖_{Σ⁻¹} 계산하고  │
+│       knee/extreme 점이 train support 내인지 확인              │
+│       (extrapolation 점 → ARD-GP corridor 신뢰도 저하)        │
+│   (c) 두 audit 통과 시 §5.3 Case A 의 0.051 corridor 강화 가능│
 └──────────────────────────────────────────────────────────────┘
 ```
 
-본 분석은 **held-out 150 random sample 의 empirical $\hat\epsilon$ 와 §2.4
-Theorem 1 + §2.5 Theorem 2 의 결합** 으로 정당화한다. 즉 결과는 결정론적 uniform
-bound 가 아니라 **measured surrogate residual 하의 empirical 2$\epsilon$-Pareto
-evidence**. 더 강한 frontier 보장을 원하면 Step 6 의 frontier audit 으로 random
-test 외 frontier-relevant region 에서도 residual bound 유지 여부를 추가 실측 권장.
+본 분석은 **held-out 150 random sample 의 empirical $\hat\epsilon$ + Theorems
+1–3 의 결합** 으로 정당화한다. 즉 결과는 결정론적 uniform bound 가 아니라
+**measured surrogate residual 하의 empirical 2$\epsilon$-Pareto evidence**.
+더 강한 frontier 보장을 원하면 Step 6 의 frontier/Mahalanobis audit 으로 확장
+권장.
+
+---
+
+### 6.1 What this method does and does not claim
+
+> **Strong claims (직접 지지됨)**
+> 1. Full joint space $4.79 \times 10^{212}$ 는 직접 탐색 불가능 (Theorem 1).
+> 2. Per-method PF product $\approx 3.04 \times 10^{7}$ 가 후보로 충분 — 약
+>    $1.6 \times 10^{205}$ 배 축소.
+> 3. Standalone per-method loss $z_i$ 가 joint loss 를 잘 설명: M1 (linear
+>    additive) $R^2 = 0.946$, M10 (quadratic) $R^2 = 0.981$, ARD-GP / RBF tps
+>    $R^2 = 0.996$.
+> 4. Sobol additive ratio $\sum_i S_i = 94.9 \%$ → interaction mass $\approx
+>    5.1\%$ (small).
+> 5. **M0/M1 의 (C2) 가 globally 충족** ($\beta_i$ 모두 strict positive)
+>    → Theorem 3 PF-coverage 가 *Hoeffding additive / M1* 에 대해 정확히 성립,
+>    Case B/C 는 가정 없이 적용.
+> 6. Theorem 2 (surrogate stability) + Theorem 3 (PF coverage) 는 정리로 증명.
+>
+> **Empirical-only claims (deterministic global guarantee 가 아님)**
+> 7. 보고된 $\hat\epsilon^{\text{test}}$ 는 150 random held-out sample 위의
+>    empirical sup-residual 이지 $\mathcal{X}_{\text{full}}$ 전체의 uniform
+>    bound 가 아니다 → 항상 "*empirical 2$\epsilon$-Pareto evidence*" 로 표현.
+> 8. ARD-GP / M10 의 (C2) 는 **measured-distribution $\mathcal{D}_{\mathrm{meas}}$
+>    한정** 99% 충족. Box-interior uniform fill $\mathcal{D}_{\mathrm{box}}$
+>    (측정점이 sparse 한 hole 포함) 에선 깨짐 → Case A 의 좁은 0.051 corridor
+>    는 measured-distribution 영역 한정.
+> 9. RBF tps+linear 는 두 영역 모두 ≥99% — *practical 으로* monotone-audited
+>    nonparametric scorer.
+> 10. Pairwise Sobol $S_{ij}$ 는 CI > estimate. "aggregate interaction mass
+>     ≈ 5%" 만 보고 (individual pair ranking 미주장).
+>
+> **Final summary (한 문장으로)**
+> *Our method does not claim a deterministic global Pareto guarantee over the
+> $4.8 \times 10^{212}$ full space. Instead, the candidate restriction
+> $\mathcal{C} = \prod_i \mathrm{PF}_i$ is justified by Theorem 3 under the
+> monotone additive surrogate M1 (whose OLS coefficients are verified strictly
+> positive — global C2), and ARD-GP / RBF tps+linear (verified $\ge 99\%$
+> coordinate-wise monotone on the candidate-relevant region $\mathcal{D}_{\mathrm{meas}}$)
+> serve as accurate scorers. The resulting empirical 2$\hat\epsilon$-Pareto
+> corridor lies between $0.118$ (M1-only) and $0.051$ (ARD-GP, region-restricted),
+> and the joint loss is explained by the three per-method scalar summaries with
+> $R^2 \approx 0.996$, with estimated interaction mass only about 5%.*
 
 ---
 
@@ -697,11 +984,12 @@ ANOVA 분해 모방 (TPS+poly) 을 압도.
 > 존재해야 hier-WD 가 실용적 의미. 본 README 는 동일 budget 가정 (50 train 내)
 > 하의 결과만 다룸.
 
-> 검증 노트: ARD-GP 는 §5/01 과 동일한 `length_scale_bounds=(1e-3,1e3)`,
-> `n_restarts=5`. 이전 (1e-4,1e4) bounds 는 N=27 에서 over-fit local maximum
-> ($l = [0.10, 0.11, 0.19]$, log-marg-lik $7.46$ vs $11.86$) 에 떨어지는 문제 →
-> 정정 후 N=27, 35, 50 에서 모두 stable. ARD-GP 결과는 [§5.2](#52-ard-gp-내부-분석--automatic-relevance-determination) 의 length_scales
-> $[0.21, 0.18, 0.23]$ 와 일치.
+> 검증 노트: ARD-GP 는 §5/01 과 동일 hyperparameter setting (`length_scale_bounds
+> =(1e-4,1e4)`, `n_restarts=20`, normalize_y, alpha=1e-8) 사용. N=50 에서 stable
+> 한 fit 으로 raw length scales $[l_W, l_{KV}, l_{KVD}] = [0.2867, 0.2594, 0.2533]$
+> ([§5.2 (a)](#52-ard-gp-내부-분석--automatic-relevance-determination) 의 값) 가
+> 본 README 의 일관된 reference. (이전 일부 archive 보고서에서 다른 bound 설정
+> 으로 fit 한 값들과 혼동되지 않도록 주의.)
 
 스크립트: [`04_hier_surrogate_analysis.py`](04_hier_surrogate_analysis.py),
 figures: [`figures/04_hier_*.png`](figures/).
@@ -715,16 +1003,21 @@ analysis/v3/
 ├── README.md                     ← 본 narrative + 수학 분석
 ├── 01_surrogate_comparison.py    ← §4–5.1: surrogate model 비교
 ├── 02_ard_gp_analysis.py         ← §5.2–5.3: ARD-GP 내부 + ε bounds
-├── 03_pareto_combination.py      ← §6: empirical 2ε-Pareto evidence
+├── 03_pareto_combination.py      ← §5.3: empirical 2ε-Pareto evidence
 ├── 04_hier_surrogate_analysis.py ← §7: hier surrogate 보조 분석
-├── archive/                       ← 보조 분석들
+├── archive/
+│   ├── verify_main_effect_monotonicity.py     ← §2.6 (A): 1D h_i monotone
+│   ├── verify_ardgp_coordinate_monotonicity.py ← §2.6 (B): ARD-GP 3D coord
+│   ├── verify_monotonicity_all_surrogates.py  ← §2.6: 6 surrogate × 3 axis
+│   └── ...
 └── figures/
     ├── 01_surrogate_*.png         (3개)
     ├── 02_ard_gp_*.png            (5개)
     ├── 03_pareto_combination_*.png (2개)
-    ├── 04_hier_sweep_curves.png   (R² vs n_pair, pair_kernel × resid_model 6 패널)
-    ├── 04_hier_kernel_compare.png (TPS vs RBF cubic head-to-head per pair)
-    └── 04_hier_resid_compare.png  (residual model 비교 per pair × kernel)
+    ├── 04_hier_*.png              (6개)
+    ├── verify_monotonicity.png       ← 1D main effect g_i + gradient
+    ├── verify_ardgp_monotonicity.png ← ARD-GP coord-wise on D_meas/D_box
+    └── verify_monotonicity_all.png   ← 6 surrogate × 3 axis gradient hist
 ```
 
 ---
@@ -748,10 +1041,19 @@ analysis/v3/
 | M1 (1차 additive) $R^2$ | 0.9461 |
 | Additive $\hat F_{\mathrm{add}}$ (Hoeffding) $R^2$ | 0.8351 |
 | (모든 $R^2$ = $1 - \mathrm{SSE}/\mathrm{SST}$, scikit-learn `r2_score`) |  |
+| **$\hat\epsilon_\infty^{\text{test}}$ (M1 on 150 test)** | 0.0590 |
+| **$\hat\epsilon_\infty^{\text{test}}$ (ARD-GP on 150 test)** | **0.0255** (empirical, not uniform) |
 | **$\hat\epsilon_\infty^{\text{test}}$ (additive on 150 test)** | **0.0858** (empirical, not uniform) |
 | **$\hat\epsilon_2^{\text{test}}$ (additive on 150 test)** | 0.0468 (RMS, typical scale) |
 | Empirical $\mathrm{Var}(r)/\mathrm{Var}(y)$ vs Sobol $1-\sum S_i$ | 7.4 % vs 5.1 % (gap 2.3 %) |
-| **Empirical 2$\epsilon$-Pareto evidence corridor** | $2\hat\epsilon_\infty^{\text{test}} = 0.172$ (≈ 24.8 % of $\ln 2$) |
+| **(C2) audit (Thm 3) — M0/M1 OLS β** | $\beta_W = +0.60$, $\beta_{KV} = +1.08$, $\beta_{KVD} = +0.47$ — all $+$, **GLOBAL** ✓ |
+| **(C2) audit — Hoeffding $\hat F_{\mathrm{add}}$ 1D gradients** | $\nabla g_W \in [+0.189, +1.189]$, $\nabla g_{KV} \in [+0.372, +0.925]$, $\nabla g_{KVD} \in [+0.084, +0.681]$ — **GLOBAL** ✓ |
+| **(C2) audit — ARD-GP coord-wise** | $\mathcal{D}_{\mathrm{meas}}$ 99% ✓; $\mathcal{D}_{\mathrm{box}}$ KV 79%/KVD 58% ✗ (region-restricted) |
+| **(C2) audit — RBF tps+linear** | $\mathcal{D}_{\mathrm{meas}}$ 99% ✓; $\mathcal{D}_{\mathrm{box}}$ ✓ |
+| **(C2) audit — M10 full quadratic** | $\mathcal{D}_{\mathrm{meas}}$ 99.5% ✓; $\mathcal{D}_{\mathrm{box}}$ ✗ |
+| **2$\epsilon$-Pareto corridor (Case A: ARD-GP scorer, region-restricted)** | $2\hat\epsilon = 0.051$ (≈ 7.4 % of $\ln 2$) |
+| **2$\epsilon$-Pareto corridor (Case B: $\hat F_{\mathrm{add}}$ single, global)** | $2\hat\epsilon = 0.172$ (≈ 24.8 % of $\ln 2$) |
+| **2$\epsilon$-Pareto corridor (Case C: M1 + ARD-GP split, recommended)** | $2(\epsilon_{\mathrm{M1}} + \epsilon_{\mathrm{GP}}) = 0.169$ |
 
 > 모든 ε 값은 **150 random held-out sample 위의 empirical 측정** 이며, 전체
 > $4.8 \times 10^{212}$ search space 위의 deterministic uniform bound 가 아니다.

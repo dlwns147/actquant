@@ -1,0 +1,23 @@
+{
+  "Y_jsd_niah_single_1": {
+    "n": 30,
+    "spearman_X_all": 0.9697441601779755,
+    "spearman_X_key": 0.9759733036707454,
+    "pearson_X_all": 0.9803304096600307,
+    "pearson_X_key": 0.9829512311168708
+  },
+  "Y_jsd_ruler_vt": {
+    "n": 30,
+    "spearman_X_all": 0.9492769744160177,
+    "spearman_X_key": 0.9537263626251389,
+    "pearson_X_all": 0.9751047040612402,
+    "pearson_X_key": 0.9785320714394573
+  },
+  "Y_jsd_mean": {
+    "n": 30,
+    "spearman_X_all": 0.9648498331479423,
+    "spearman_X_key": 0.9719688542825362,
+    "pearson_X_all": 0.9798138234815867,
+    "pearson_X_key": 0.9828424801622216
+  }
+}

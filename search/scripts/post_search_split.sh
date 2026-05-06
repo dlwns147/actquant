@@ -334,6 +334,23 @@ RANDOM_SAMPLE=23
 # Example: 3 wbits positions x 3 kvbits positions = up to 9 unique architectures
 QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
 
+if [ -n "${QUANTILE_SAMPLE}" ]; then
+    QS_TEXT=""
+    for entry in ${QUANTILE_SAMPLE}; do
+        metric="${entry%%#*}"
+        quantiles="${entry#*#}"
+        short_metric="${metric%bits}"
+        short_q="${quantiles//0./}"
+        short_q="${short_q//,/}"
+        QS_TEXT+="_${short_metric}${short_q}"
+    done
+    SAVE+="_qs${QS_TEXT}"
+fi
+
+if [ -n "${RANDOM_SAMPLE}" ] && [ "${RANDOM_SAMPLE}" -gt 0 ]; then
+    SAVE+="_rs${RANDOM_SAMPLE}"
+fi
+
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_sqrt_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
 

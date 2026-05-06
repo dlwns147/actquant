@@ -124,12 +124,54 @@ def main(args):
         }
     }
 
+    # Adapt subnets whose layer count differs from the target config (e.g., when
+    # post-processing a Llama-32-layer expr archive against Qwen2-28-layer config).
+    # Truncates leading layers if subnet is longer; right-pads with the median value
+    # of the existing list if shorter. Preserves dict/list structure recursively.
+    # WARNING: this is a structural workaround; per-layer choices were optimised
+    # for the source architecture's sensitivity, not the target's.
+    def _adapt_to_n_block(value, n):
+        if isinstance(value, dict):
+            return {k: _adapt_to_n_block(v, n) for k, v in value.items()}
+        if isinstance(value, list):
+            if len(value) == 0 or not isinstance(value[0], (int, float, list)):
+                return value  # not a per-layer list
+            if len(value) == n:
+                return value
+            if len(value) > n:
+                return value[:n]
+            # pad: repeat last element
+            return list(value) + [value[-1]] * (n - len(value))
+        return value
+
+    def _adapt_subnet(subnet):
+        return _adapt_to_n_block(subnet, n_block)
+
     # Load and optionally Pareto-filter each provided expr archive
     def load_expr(expr_path, comp_obj_key):
         with open(expr_path, 'r') as f:
             result_json = json.load(f)
         archive = result_json['archive'] + result_json['candidates']
-        subnets_arr = np.array([v[0] for v in archive])
+        raw_subnets = [v[0] for v in archive]
+        # Detect layer-count mismatch (looks at first leaf list length)
+        def _first_list_len(s):
+            if isinstance(s, dict):
+                for vv in s.values():
+                    r = _first_list_len(vv)
+                    if r is not None:
+                        return r
+            elif isinstance(s, list) and s and not isinstance(s[0], dict):
+                return len(s)
+            return None
+        if raw_subnets:
+            src_n = _first_list_len(raw_subnets[0])
+            if src_n is not None and src_n != n_block:
+                print(f"[load_expr] WARNING: {os.path.basename(expr_path)} subnets have "
+                      f"{src_n} layers but target config has {n_block}; auto-truncating/padding. "
+                      f"Per-layer choices were tuned for the source model's sensitivity, "
+                      f"not the target's — results are NOT comparable to a native search.")
+            raw_subnets = [_adapt_subnet(s) for s in raw_subnets]
+        subnets_arr = np.array(raw_subnets)
         metric_vals = [v[1] for v in archive]
         comp_vals = [get_net_info(n, config, group_size)[comp_obj_key] for n in subnets_arr]
         sort_idx = np.argsort(metric_vals)
@@ -399,14 +441,15 @@ def main(args):
         #     accelerator.print(f'Selected arch[{idx}] {comp_obj}: {pf_list[i][idx, 1:].tolist()}, metric: {pf_list[i][idx_list[i], 0].tolist()}')            
 
         if args.datasets:
-            if args.stride is not None:
+            # use_cache=True path: explicit stride, OR prefill_prompt mode (needs past_kv).
+            if args.stride is not None or args.prefill_prompt:
                 if 'kivi' in args.kv_method:
                     model.config.kivi_config.residual_length = args.residual_length
                 elif 'hqq' in args.kv_method:
                     model.generation_config.cache_config = args.residual_length
                 model.config.quant_kv_output = False
                 model.config.use_cache = True
-                
+
             else:
                 if 'kivi' in args.kv_method:
                     model.config.kivi_config.residual_length = 0
@@ -419,7 +462,7 @@ def main(args):
             # model.config.quant_kv_output = True if args.stride is None else False
             # model.config.use_cache = True if args.stride is not None else False
 
-            metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride)[0] if args.datasets else 0
+            metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride, prefill_prompt=args.prefill_prompt)[0] if args.datasets else 0
             # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
             # print(f'[{idx}] complexity: {complexity}, {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
             print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
@@ -760,10 +803,13 @@ if __name__ == '__main__':
                         help='which metric predictor model to fit (ppl/loss)')
     parser.add_argument('--loss_func', type=str, default='cross_entropy',
                         help='')
-    parser.add_argument('--stride', type=int, default=None, 
+    parser.add_argument('--stride', type=int, default=None,
                         help='')
-    parser.add_argument('--last_tokens', type=int, default=None, 
+    parser.add_argument('--last_tokens', type=int, default=None,
                         help='')
+    parser.add_argument('--prefill_prompt', action='store_true',
+                        help='If set (with --last_tokens > 0), prefill the prompt in one forward '
+                             'and stride only the answer span (matches real-decode KV state).')
     parser.add_argument('--seed', type=int, default=0,
                         help='')
                         

@@ -44,8 +44,57 @@ def quant_kv_output(module, key_states, value_states, attention_mask, query_stat
     kivi_config = module.config.kivi_config
 
     if hasattr(module.config, 'quant_kv_output') and module.config.quant_kv_output:
-        key_states = fake_quant(key_states, kivi_config.k_group_size[module.layer_idx], kivi_config.k_bits[module.layer_idx], kivi_config.k_quant_scheme, attention_mask=attention_mask)
-        value_states = fake_quant(value_states, kivi_config.v_group_size[module.layer_idx], kivi_config.v_bits[module.layer_idx], kivi_config.v_quant_scheme, attention_mask=attention_mask)
+        layer_idx = module.layer_idx
+        kgs = kivi_config.k_group_size[layer_idx]
+        vgs = kivi_config.v_group_size[layer_idx]
+        kbits = kivi_config.k_bits[layer_idx]
+        vbits = kivi_config.v_bits[layer_idx]
+        T = key_states.shape[-2]
+        R = getattr(kivi_config, 'residual_length', 0) or 0
+
+        # Residual-aware fake-quant: leave the last R tokens at full precision
+        # so the most-recent context (where answer-token queries attend most
+        # strongly) is not lossy. This matches real-decode behaviour where the
+        # newest residual_length tokens always sit in the FP residual buffer.
+        # K (channel scheme): the quant slab's T-dim must be divisible by kgs.
+        if R > 0 and T <= R:
+            # Whole sequence fits in the FP residual window — leave untouched.
+            pass
+        elif R > 0:
+            # T > R: quantise first (T-R) tokens, keep last R FP.
+            quant_len_k = (T - R) - ((T - R) % kgs)
+            if quant_len_k > 0:
+                key_quant = fake_quant(
+                    key_states[:, :, :quant_len_k, :].contiguous(),
+                    kgs, kbits, kivi_config.k_quant_scheme,
+                )
+                key_states = torch.cat([key_quant, key_states[:, :, quant_len_k:, :]], dim=2)
+            # else: T-R < kgs (very short prefix); leave whole K at FP
+            quant_len_v = T - R
+            value_quant = fake_quant(
+                value_states[:, :, :quant_len_v, :].contiguous(),
+                vgs, vbits, kivi_config.v_quant_scheme,
+            )
+            value_states = torch.cat([value_quant, value_states[:, :, quant_len_v:, :]], dim=2)
+        else:
+            # Legacy path (R == 0): quantise everything we can.
+            if T % kgs == 0:
+                key_states = fake_quant(
+                    key_states, kgs, kbits, kivi_config.k_quant_scheme,
+                    attention_mask=attention_mask,
+                )
+            else:
+                quant_len = T - (T % kgs)
+                if quant_len > 0:
+                    kq = fake_quant(
+                        key_states[:, :, :quant_len, :].contiguous(),
+                        kgs, kbits, kivi_config.k_quant_scheme,
+                    )
+                    key_states = torch.cat([kq, key_states[:, :, quant_len:, :]], dim=2)
+            value_states = fake_quant(
+                value_states, vgs, vbits, kivi_config.v_quant_scheme,
+                attention_mask=attention_mask,
+            )
         # ThinK: apply pruning masking only in the no-cache (quant_kv_output=True) path.
         # When use_cache=True (quant_kv_output=False), the cache mechanism handles pruning
         # via v_keep_mask_for_cache computed in the attention forward ThinK block.

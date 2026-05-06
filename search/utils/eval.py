@@ -191,7 +191,7 @@ def get_logits(model, loader, key_token_list=None, last_tokens=None, ignore_inde
 
 
 @torch.no_grad()
-def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, ignore_index=-100):
+def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, ignore_index=-100, prefill_prompt=False):
     """
     Evaluate loss on a model using a data loader.
 
@@ -208,8 +208,13 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
         stride: If > 0, splits each sequence into chunks of this size and performs multiple
                 forward passes with use_cache=True, computing loss only on new tokens per chunk.
                 If 0 (default), performs a single forward pass over the full sequence.
+        last_tokens: If set, only the last N positions per sequence participate in loss.
+        prefill_prompt: If True (and last_tokens is set), prefill the prompt
+                (positions [:-last_tokens]) in one forward, then push the answer
+                (last `last_tokens` positions) in chunks of `stride` (or one chunk
+                of `last_tokens` if `stride <= 0`). This matches real-decode KV
+                cache evolution far more closely than chunking the whole sequence.
         ignore_index: Index to ignore in loss calculation
-        k: Top-k parameter (for topk loss, not used in cross_entropy/jsd)
 
     Returns:
         Average loss value
@@ -228,8 +233,47 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
         batch_size = inputs.shape[0]
         total_seq_len = inputs.shape[1]
 
-        # Forward pass: stride-based with use_cache=True, or single pass
-        if stride is not None and stride > 0:
+        # ── Forward strategy ────────────────────────────────────────
+        # 1) prefill_prompt + last_tokens set: prefill prompt, then stride answer.
+        # 2) stride>0: chunked forward over the whole sequence (legacy).
+        # 3) else: single forward pass.
+        use_prefill_mode = (
+            prefill_prompt and last_tokens is not None
+            and 0 < last_tokens < total_seq_len
+        )
+        if use_prefill_mode:
+            prompt_len = total_seq_len - last_tokens
+            answer_stride = stride if (stride is not None and stride > 0) else last_tokens
+            chunked_logits = []
+            past_key_values = None
+
+            # Prefill prompt
+            prompt_input = inputs[:, :prompt_len]
+            prompt_attn = attention_mask[:, :prompt_len] if attention_mask is not None else None
+            prompt_out = model(
+                prompt_input,
+                attention_mask=prompt_attn,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            chunked_logits.append(prompt_out.logits)
+            past_key_values = prompt_out.past_key_values
+
+            # Stride through the answer span
+            for start in range(prompt_len, total_seq_len, answer_stride):
+                end = min(start + answer_stride, total_seq_len)
+                chunk_input = inputs[:, start:end]
+                chunk_attn = attention_mask[:, :end] if attention_mask is not None else None
+                chunk_outputs = model(
+                    chunk_input,
+                    attention_mask=chunk_attn,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+                chunked_logits.append(chunk_outputs.logits)
+                past_key_values = chunk_outputs.past_key_values
+            lm_logits = torch.cat(chunked_logits, dim=1)
+        elif stride is not None and stride > 0:
             # Split the sequence into stride-sized chunks and forward incrementally.
             # Each chunk only passes new tokens; past KV cache provides context.
             # Equivalent to a single full forward pass but memory-efficient for long sequences.
@@ -319,7 +363,7 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, prefill_prompt=False, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
     """
     Evaluate metric on a model using a data loader.
     
@@ -353,7 +397,7 @@ def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_ent
     if metric == 'ppl':
         return eval_ppl(model, accelerator, loader, seqlen=seqlen, stride=stride)
     elif metric == 'loss':
-        return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list, stride=stride, last_tokens=last_tokens)
+        return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list, stride=stride, last_tokens=last_tokens, prefill_prompt=prefill_prompt)
     elif 'gsm8k' in metric:
         return eval_zeroshot(model, tokenizer, task_list=[metric], limit=limit, batch_size=batch_size, num_fewshot=num_fewshot, verbosity=verbosity, task_manager=task_manager, task_dict=task_dict)
     else:

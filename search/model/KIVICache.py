@@ -999,10 +999,14 @@ class KIVIFakeCache(DynamicCache):
             new_val_full = combined_val[:, :, -residual_length:, :].contiguous()
 
         if val_to_quant is not None:
-            assert val_to_quant.shape[2] % cfg.v_group_size[layer_idx] == 0, (
-                f"Stride value tokens ({val_to_quant.shape[2]}) must be divisible by "
-                f"v_group_size ({cfg.v_group_size[layer_idx]}). Adjust stride accordingly."
-            )
+            # Only the channel scheme groups along the T axis; the token scheme groups
+            # along D (head_dim), so T-divisibility is irrelevant there.
+            if cfg.v_quant_scheme == 'channel':
+                assert val_to_quant.shape[2] % cfg.v_group_size[layer_idx] == 0, (
+                    f"Stride value tokens ({val_to_quant.shape[2]}) must be divisible by "
+                    f"v_group_size ({cfg.v_group_size[layer_idx]}) for channel scheme. "
+                    f"Adjust stride accordingly."
+                )
             # ThinK: apply V keep_mask (zero-fill) before and after fake_quant for consistency
             value_keep_mask = self.value_keep_mask_cache[layer_idx] if layer_idx < len(self.value_keep_mask_cache) else None
             val_to_quant_m = val_to_quant
