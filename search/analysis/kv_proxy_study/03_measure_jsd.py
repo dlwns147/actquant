@@ -129,7 +129,7 @@ def main():
             break
         ids = encs[s:s+seg].unsqueeze(0).cuda()
         samples.append((ids[:, :args.prompt_len], ids[:, args.prompt_len:]))
-        fp = fp16_dir / f"seq{args.prompt_len}_sample{i}.pt"
+        fp = fp16_dir / f"seq{args.prompt_len}_a{args.answer_len}_sample{i}.pt"
         assert fp.exists(), f"Missing fp16 logits: {fp}"
         fp16_logits.append(torch.load(fp).cuda())  # [A, V]
 

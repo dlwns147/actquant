@@ -231,12 +231,18 @@ else:
     print("(skip speed plot — data/speed_results.json missing)")
 
 # ── Fig 5: prefill+answer-stride bias vs stride ───────────────────────
+# Restricted to answer_len=128 to keep this panel comparable across configs;
+# longer answer_len analysis lives in 07_plot_long_answer.py.
 if ps_ce is not None and ps_jsd is not None:
-    ps_strides = sorted({int(s) for r in ps_ce for s in r["strides"].keys()})
+    PS_ANS_LEN = 128
+    ps_strides = sorted({int(s) for r in ps_ce
+                         if r.get("answer_len", 128) == PS_ANS_LEN
+                         for s in r["strides"].keys()})
 
     def get_ps(rows, cfg, seq):
         for r in rows:
-            if r["cfg"] == cfg and r["prompt_len"] == seq:
+            if (r["cfg"] == cfg and r["prompt_len"] == seq
+                    and r.get("answer_len", 128) == PS_ANS_LEN):
                 return r
         return None
 
@@ -290,27 +296,24 @@ if ps_ce is not None and ps_jsd is not None:
     plt.close(fig)
     print(f"Saved → {FIG / 'prefill_stride_bias.png'}")
 
-    # Correlation table
-    print("\n=== Prefill-stride: config-level Pearson(L_gen, L_prefill_stride) over 9 cfgs ===")
-    print("--- CE ---")
-    print(f"{'seq':>5}  " + "  ".join([f"s{s:>4}" for s in ps_strides]))
-    for seq in seqlens:
-        line = f"{seq:>5}  "
-        g = np.array([gen_ce[c] for c in cfgs] if seq == seqlens[0]
-                     else [np.mean(get(ce, c, seq)["gen"]) for c in cfgs])
-        for s in ps_strides:
-            p = np.array([np.mean(get_ps(ps_ce, c, seq)["strides"][str(s)]) for c in cfgs])
-            line += f"{corr(g, p):+7.4f}  "
-        print(line)
-    print("--- JSD ---")
-    print(f"{'seq':>5}  " + "  ".join([f"s{s:>4}" for s in ps_strides]))
-    for seq in seqlens:
-        line = f"{seq:>5}  "
-        g = np.array([np.mean(get(jsd, c, seq)["gen"]) for c in cfgs])
-        for s in ps_strides:
-            p = np.array([np.mean(get_ps(ps_jsd, c, seq)["strides"][str(s)]) for c in cfgs])
-            line += f"{corr(g, p):+7.4f}  "
-        print(line)
+    # Correlation table — only over (cfg, seq) cells where prefill_stride data exists
+    ps_cfgs = [c for c in cfgs if get_ps(ps_jsd, c, seqlens[0]) is not None]
+    if ps_cfgs:
+        print(f"\n=== Prefill-stride: config-level Pearson(L_gen, L_prefill_stride) "
+              f"over {len(ps_cfgs)} cfgs at A={PS_ANS_LEN} ===")
+        print("--- JSD ---")
+        print(f"{'seq':>5}  " + "  ".join([f"s{s:>4}" for s in ps_strides]))
+        for seq in seqlens:
+            present = [c for c in ps_cfgs if get_ps(ps_jsd, c, seq) is not None]
+            if not present:
+                continue
+            line = f"{seq:>5}  "
+            g = np.array([np.mean(get(jsd, c, seq)["gen"]) for c in present])
+            for s in ps_strides:
+                p = np.array([np.mean(get_ps(ps_jsd, c, seq)["strides"][str(s)])
+                              for c in present])
+                line += f"{corr(g, p):+7.4f}  "
+            print(line)
 else:
     print("(skip prefill-stride plot — data/prefill_stride_*.json missing)")
 

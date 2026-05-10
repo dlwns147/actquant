@@ -57,7 +57,13 @@ def main():
     ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     encs = tok("\n\n".join(ds["text"]), return_tensors="pt").input_ids[0]
 
+    # Accumulate across multiple invocations: load existing, replace any (seq,answer_len) match
     rows = []
+    if out_ce_path.exists():
+        try:
+            rows = json.load(open(out_ce_path))
+        except Exception:
+            rows = []
     for seq in seqlens:
         seg = seq + args.answer_len
         ces = []
@@ -68,10 +74,14 @@ def main():
             ids = encs[s:s+seg].unsqueeze(0).cuda()
             p, a = ids[:, :seq], ids[:, seq:]
             logits, ce = forward_one(model, p, a)
-            torch.save(logits, out_logits_dir / f"seq{seq}_sample{i}.pt")
+            torch.save(logits, out_logits_dir / f"seq{seq}_a{args.answer_len}_sample{i}.pt")
             ces.append(ce)
             print(f"  seq={seq} sample={i}  L_fp16={ce:.4f}  logits saved", flush=True)
+        # Replace any existing row for this (prompt_len, answer_len), then append
+        rows = [r for r in rows
+                if not (r.get("prompt_len") == seq and r.get("answer_len", 128) == args.answer_len)]
         rows.append({"prompt_len": seq, "answer_len": args.answer_len, "fp16": ces})
+        rows.sort(key=lambda r: (r["prompt_len"], r.get("answer_len", 128)))
         with open(out_ce_path, "w") as f:
             json.dump(rows, f, indent=2)
     print(f"\nSaved CE -> {out_ce_path}")

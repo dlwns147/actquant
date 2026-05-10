@@ -1,0 +1,30 @@
+Falsification of Cartesian-combined Pareto Front
+======================================================================
+
+n_evaluated = 7 / 100
+
+AWQ-measured loss y_actual (n=7):
+  range: [0.01478, 0.61145]   mean: 0.18024   std: 0.26132
+
+ARD-GP residual  (y_actual − pred_μ):
+  mean:    +0.06276   std: 0.10573
+  |r|_p95: 0.24026
+  ε_∞:     0.25887   ε_2: 0.12295
+
+PF residual  (y_actual − f*(c)):
+  range:   [-0.00319, +0.59347]   mean: +0.16227
+  p05:     -0.00319   p95: +0.58249
+  (negative ⇒ beats Cartesian PF)
+
+ε-violations (y < f* − ε):
+  eps=0.005:    0/7  (0.0%)   95% upper CI on rate: 42.80%
+  eps=0.01:    0/7  (0.0%)   95% upper CI on rate: 42.80%
+  eps=0.02:    0/7  (0.0%)   95% upper CI on rate: 42.80%
+  eps=0.05:    0/7  (0.0%)   95% upper CI on rate: 42.80%
+
+Calibration (binned predicted P vs actual rate):
+  P∈  [0,0.05): n=  2  mean_pred=0.000   actual_rate=0.000
+  P∈[0.05,0.1): n=0
+  P∈ [0.1,0.2): n=0
+  P∈ [0.2,0.4): n=0
+  P∈ [0.4,1.0): n=  5  mean_pred=0.471   actual_rate=1.000

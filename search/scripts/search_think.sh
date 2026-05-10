@@ -200,8 +200,11 @@ PREDICTOR=rbf
 # PREDICTOR=gp
 
 DATASET=wikitext2
-# N_SAMPLE=128
-N_SAMPLE=32
+N_SAMPLE=128
+# N_SAMPLE=32
+# N_SAMPLE=64
+# SEQLEN=1024
+# SEQLEN=1536
 SEQLEN=2048
 DATA_BATCH_SIZE=1
 MIN_SEQLEN=0
@@ -222,9 +225,22 @@ MIN_SEQLEN=0
 # # MIN_SEQLEN=0
 
 # STRIDE=0
-# STRIDE=128
-STRIDE=512
+# STRIDE=32
+# STRIDE=64
+STRIDE=128
+# STRIDE=512
 # STRIDE=1024
+
+# PREFILL_PROMPT=False
+# LAST_TOKENS=0
+PREFILL_PROMPT=True
+# LAST_TOKENS=128
+# LAST_TOKENS=256
+LAST_TOKENS=512
+# LAST_TOKENS=1024
+
+# SEQLEN=$(( ${SEQLEN} + ${LAST_TOKENS} ))
+# SEQLEN=$(( ${SEQLEN} - ${LAST_TOKENS} ))
 
 GA_POP_SIZE=200
 
@@ -245,7 +261,12 @@ SAVE_ITER=10
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_hqq_kv_${KV_METHOD}_w24k24v24bits_w128k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_2048seqlen_0minseq_jsd/loss
 SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_hqq_kv_kivi_w24k24v24bits_w128k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_2048seqlen_0minseq_jsd/loss
 
-SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_w_${W_METHOD_TEXT}_kv_${KV_METHOD}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}bits_w${W_GROUP_SIZE}kv${KV_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_kdim${K_PRUNING_DIM_TEXT}_vdim${V_PRUNING_DIM_TEXT}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${DATA_BATCH_SIZE}bs_${N_SAMPLE}sample_${SEQLEN}seq_${N_TOKEN}token_${PREDICTOR}_${STRIDE}stride
+PP_TAG=""
+if [ ${PREFILL_PROMPT} == 'True' ]; then
+    PP_TAG="_pp${LAST_TOKENS}"
+fi
+
+SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_w_${W_METHOD_TEXT}_kv_${KV_METHOD}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}bits_w${W_GROUP_SIZE}kv${KV_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_kdim${K_PRUNING_DIM_TEXT}_vdim${V_PRUNING_DIM_TEXT}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${DATA_BATCH_SIZE}bs_${N_SAMPLE}sample_${SEQLEN}seq_${N_TOKEN}token_${PREDICTOR}_${STRIDE}stride${PP_TAG}
 
 N_PROC=1
 
@@ -312,6 +333,10 @@ if [ ${STRIDE} -gt 0 ]; then
     ARGS+=" --stride ${STRIDE} "
 else
     ARGS+=" --quant_kv_output "
+fi
+
+if [ ${PREFILL_PROMPT} == 'True' ]; then
+    ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
 fi
 
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} search_think.py \

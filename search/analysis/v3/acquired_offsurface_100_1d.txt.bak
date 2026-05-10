@@ -1,0 +1,45 @@
+Off-surface acquisition for AWQ falsification (n=100)
+======================================================================
+
+Sources:
+  W archive:    10450, top-50 pooled
+  KV archive:   4147, top-50 pooled
+  KVDIM archive:4530, top-50 pooled
+  AWQ train:    200 samples for ARD-GP fit
+
+ARD-GP:
+  length scales: W=0.1737  KV=0.1741  KVD=0.2001
+  σ_f²=1.2124, σ_n²=0.001761
+
+Pool: 125,000  (Cartesian 8,000 / off-surface 117,000)
+
+Selection:
+  P(violator)-stratified: 75  (25 buckets × top-3)
+  σ-extras (P>1%):        25
+
+P(violator) = Φ((f*−μ)/σ)   (under ARD-GP posterior):
+  max:               0.4826
+  mean:              0.1216
+  n_P > 0.05:        31/100
+  n_P > 0.10:        28/100
+
+Predicted PF gap (= f*(c) − μ):
+  max:               -0.00024
+  mean:              -0.15069
+  n_pred_gap > 0.005:0/100
+  n_pred_gap > 0.01: 0/100
+
+Sigma:
+  σ mean: 0.0239,  σ max: 0.0794
+
+Complexity coverage (wbits + eff_kvbits):
+  range:       [3.973, 8.755]
+  q10/q50/q90: 4.966 / 6.245 / 8.608
+
+How to evaluate (downstream):
+  1. Read archs from /NAS/SJ/actquant/search/analysis/v3/acquired_offsurface_100.json
+  2. Feed into post_search_split.py-style AWQ eval loop:
+     for arch in archs:
+         model = evaluator.sample(arch)
+         metric = evaluator.eval(arch=arch, model=model, ...)
+  3. Compare measured loss vs record['pf_baseline'] for ε-violation

@@ -118,7 +118,7 @@ def main():
             break
         ids = encs[s:s+seg].unsqueeze(0).cuda()
         samples.append((ids[:, :args.prompt_len], ids[:, args.prompt_len:]))
-        fp = fp16_dir / f"seq{args.prompt_len}_sample{i}.pt"
+        fp = fp16_dir / f"seq{args.prompt_len}_a{args.answer_len}_sample{i}.pt"
         assert fp.exists(), f"Missing fp16 logits: {fp}"
         fp16_logits.append(torch.load(fp).cuda())
 
@@ -132,11 +132,11 @@ def main():
         return []
 
     rows_ce, rows_jsd = load(out_ce), load(out_jsd)
-    done = {(r["cfg"], r["prompt_len"]) for r in rows_ce}
+    done = {(r["cfg"], r["prompt_len"], r.get("answer_len", 128)) for r in rows_ce}
 
     for cfg in args.configs.split(","):
-        if (cfg, args.prompt_len) in done:
-            print(f"[skip] {cfg} @ {args.prompt_len}", flush=True); continue
+        if (cfg, args.prompt_len, args.answer_len) in done:
+            print(f"[skip] {cfg} @ p={args.prompt_len} a={args.answer_len}", flush=True); continue
         kb, vb = [int(x) for x in cfg.split(":")]
         print(f"\n=== K{kb}V{vb} seq={args.prompt_len} strides={strides} ===")
         model, _ = build(args.model_path, kb, vb, args.kgs, args.vgs, args.residual_length)

@@ -419,7 +419,11 @@ def main(args):
     )
     
     comp_save_list = [list() for _ in get_net_info({}, config, group_size=-1, n_token=0).keys()]
-    n_pf_metric_cols = F.shape[1] - n_comp_obj  # new_metric + one component metric per expr key
+    # F layout from assemble_F: [combined_metric, (metric_k, comp_obj_k) per expr_key, comp_obj_cols].
+    # Save only combined + per-method metrics — drop the comp_obj duplicates inside the efm pairs
+    # (they're already in comp_save_list rows like wbits/kvbits/kvdim).
+    pf_metric_idx = [0] + [1 + 2 * i for i in range(len(expr_keys))]
+    n_pf_metric_cols = len(pf_metric_idx)
     metric_save_list = [list() for _ in range(len(args.datasets) + n_pf_metric_cols)]
     for idx in tqdm(I):
         arch = ps[idx]
@@ -464,15 +468,14 @@ def main(args):
 
             metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride, prefill_prompt=args.prefill_prompt)[0] if args.datasets else 0
             # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
-            # print(f'[{idx}] complexity: {complexity}, {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
-            print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
+            print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, pf_metric_idx[1:]].tolist()}')
             if (args.random_sample is not None or args.quantile_sample) and args.save and args.results_csv_file:
                 for c_i, c in enumerate(complexity.values()):
                     comp_save_list[c_i].append(c)
                 for m_i, m in enumerate(metric.values()):
                     metric_save_list[m_i].append(m)
-                for m_i, m in enumerate(pf[idx, 0: -n_comp_obj]):
-                    metric_save_list[m_i + len(args.datasets)].append(m)
+                for m_i, col in enumerate(pf_metric_idx):
+                    metric_save_list[m_i + len(args.datasets)].append(pf[idx, col])
                     
                 os.makedirs(args.save, exist_ok=True)
                 with open(os.path.join(args.save, args.results_csv_file), 'w') as f:

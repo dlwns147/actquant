@@ -294,8 +294,8 @@ def main(args):
             metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func)[0] if args.datasets else 0
             complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
             # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
-            # print(f'[{idx}] complexity: {complexity}, {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
-            print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: -n_comp_obj]}')
+            pf_metric_end = -n_comp_obj if n_comp_obj > 0 else None  # Python slice: arr[0:-0] is empty; use None to mean "to end"
+            print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, metric: {[pf[idx, 0]]}, prev_metric: {pf[idx, 1: pf_metric_end]}')
             print(f'complexity: {list(complexity.keys())}')
             print(f'complexity: {list(complexity.values())}')
             if args.random_sample is not None and args.save and args.results_csv_file:
@@ -303,7 +303,7 @@ def main(args):
                     comp_save_list[c_i].append(c)
                 for m_i, m in enumerate(metric.values()):
                     metric_save_list[m_i].append(m)
-                for m_i, m in enumerate(pf[idx, 0: -n_comp_obj]):
+                for m_i, m in enumerate(pf[idx, 0: pf_metric_end]):
                     metric_save_list[m_i + len(args.datasets)].append(m)
                     
                 os.makedirs(args.save, exist_ok=True)
