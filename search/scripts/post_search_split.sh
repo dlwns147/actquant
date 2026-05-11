@@ -257,7 +257,7 @@ BETA=-2
 
 W_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_200.stats
 KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603271708_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x3gs0kdim0vdim_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
-KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
+# KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
 # EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603280405_Llama-3.1-8B-Instruct_eff_kvbits_w4kv234_hqq_kivi_i200n50_w128kv3264128x3_k0_16_32_48_64v0_r128_chto_0.1-5_jsd_wik_128s2048l16384t_rbf_s512/iter_200.stats
 
 # W_EXPR=
@@ -327,12 +327,11 @@ fi
 
 # RANDOM_SAMPLE=1000
 # RANDOM_SAMPLE=200
-RANDOM_SAMPLE=23
+# RANDOM_SAMPLE=23
+# QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
 
-# Quantile-based sampling: sample architectures at specific quantile positions of complexity metrics.
-# Format: metric#q1,q2,q3  (space-separated for multiple metrics → Cartesian product)
-# Example: 3 wbits positions x 3 kvbits positions = up to 9 unique architectures
-QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
+RANDOM_SAMPLE=41
+QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
 
 if [ -n "${QUANTILE_SAMPLE}" ]; then
     QS_TEXT=""

@@ -19,8 +19,8 @@ CONFIG=config/llama.json
 
 
 # COMP_OBJ=wbits
-# COMP_OBJ=kvbits
-COMP_OBJ=kvdim
+COMP_OBJ=kvbits
+# COMP_OBJ=kvdim
 # COMP_OBJ=eff_kvbits
 # COMP_OBJ=memory
 
@@ -82,8 +82,10 @@ elif [ ${COMP_OBJ} == 'kvbits' ]; then
 
     KV_BITS="2 3 4"
     KV_BITS_TEXT="234"
-    KV_GROUP_SIZE=("32 64 128" "32 64 128" "32 64 128")
-    KV_GROUP_SIZE_TEXT=3264128x3
+    # KV_GROUP_SIZE=("32 64 128" "32 64 128" "32 64 128")
+    # KV_GROUP_SIZE_TEXT=3264128x3
+    KV_GROUP_SIZE=("32 64 128" "32 64 128" "128")
+    KV_GROUP_SIZE_TEXT=3264128x2_128
 
     K_PRUNING_DIM="0"
     # V_PRUNING_DIM="0 16 32 48 64"

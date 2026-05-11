@@ -28,7 +28,7 @@ from utils.longeval import eval_longeval_lines, generate_lines_testcases
 from utils.minilongbench import pred_minilongbench, eval_minilongbench
 from utils.select import (
     LazyPs, build_arch, draw_random, assemble_F,
-    select_valid_nd_idx, quantile_select,
+    select_valid_nd_idx, quantile_select, axis_of_map,
 )
 import warnings
 warnings.simplefilter("ignore")
@@ -299,6 +299,23 @@ def main(args):
     for spec in args.quantile_sample:
         k, v = spec.split('#')
         quantile_specs[k] = [float(q) for q in v.split(',')]
+
+    # Abort if a quantile metric's axis isn't searched: it would collapse to a
+    # constant and silently produce fewer unique samples than requested
+    # (e.g. kvdim quantile without --kvdim_expr → all 128).
+    if quantile_specs:
+        _axis_map = axis_of_map(expr_keys)
+        _expr_flag = {'w': '--w_expr', 'kv': '--kv_expr',
+                      'kvdim': '--kvdim_expr', 'eff_kv': '--eff_kv_expr'}
+        _missing = [(k, _axis_map.get(k)) for k in quantile_specs
+                    if _axis_map.get(k) is not None
+                    and _axis_map.get(k) not in expr_keys]
+        if _missing:
+            for k, ax in _missing:
+                print(f"[quantile_sample] ERROR: metric '{k}' depends on axis "
+                      f"'{ax}' but {_expr_flag.get(ax, ax)} was not provided; "
+                      f"quantile would collapse to a constant.")
+            raise SystemExit(1)
 
     # ─────────────── Candidate set & F (vectorised, see utils/select.py) ───────────────
     valid_nd_idx = select_valid_nd_idx(
