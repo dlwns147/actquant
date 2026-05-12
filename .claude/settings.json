@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(python3 /tmp/cmp_accuracy.py)",
+      "Bash(python3)",
+      "Bash(chmod +x /NAS/SJ/actquant/poc/benchmark_proxy/amq_all_random/scripts/predictor_drift.sh /NAS/SJ/actquant/poc/benchmark_proxy/amq_all_random/scripts/predictor_drift_all.sh)",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import pySOT, os; print\\(os.path.dirname\\(pySOT.__file__\\)\\)\")",
+      "Bash(ls /opt/conda/lib/python3.11/site-packages/pySOT/surrogate/)",
+      "Read(//opt/conda/lib/python3.11/site-packages/pySOT/surrogate/**)",
+      "Bash(grep -n \"def to_unit_box\" /opt/conda/lib/python3.11/site-packages/pySOT/utils.py)",
+      "Read(//opt/conda/lib/python3.11/site-packages/pySOT/**)",
+      "Bash(python plot_strat_vs_jsd_strat.py)",
+      "Bash(python3 plot_compare_wikitext2_vs_all_random_seeds.py)",
+      "Bash(python3 plot_compare_jsd_gsm8k_vs_livebench_seeds.py)",
+      "Bash(xargs -I '{}' python3 -c ' *)",
+      "Bash(python3 plot_compare_wikitext2_vs_jsd_livebench_seeds.py)",
+      "Bash(python3 plot_compare_n64_vs_jsd_seeds.py)",
+      "Bash(python3 plot_compare_seed42_only.py)",
+      "Bash(CUDA_VISIBLE_DEVICES=0,1,2,3 python3 /tmp/measure_6_pareto_archs.py)",
+      "Bash(find /NAS/SJ/actquant -name \"*.py\" -newer /etc/hostname 2>/dev/null | xargs grep -l \"Sample-mean distribution\\\\|var ratio\\\\|w3+w4\\\\|n_sims\" 2>/dev/null | head -10)",
+      "Read(//etc/**)",
+      "Bash(python3 amq/evaluation/sample_mean_distribution_rand16_rand64_jsd16.py)",
+      "Bash(nvidia-smi --query-gpu=index,name,memory.free,memory.total --format=csv,noheader)",
+      "Bash(chmod +x /NAS/SJ/actquant/poc/benchmark_proxy/amq_all_random/amq/results/uniform_per_row_jsd/measure_margin.sh)",
+      "Bash(./measure_margin.sh)",
+      "Bash(tee measure_margin.log)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

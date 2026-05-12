@@ -23,19 +23,27 @@ def axis_of_map(expr_keys):
     """Map a per-arch metric key to the expr axis it depends on.
 
     Returns None for keys that don't reduce to a single axis under the current
-    expr_keys (e.g. 'memory' always spans w + kv + kvdim)."""
+    expr_keys (e.g. 'memory' always spans w + kv + kvdim).
+
+    `metric_*` keys are per-axis search-time JSD/loss values read from each
+    axis's own PF archive (column 0 of `efm[axis]`). They map 1-to-1 to the
+    expr axis name regardless of whether `eff_kv` is in expr_keys."""
     has_eff = 'eff_kv' in expr_keys
     return {
-        'wbits':       'w',
-        'kvbits':      'eff_kv' if has_eff else 'kv',
-        'kbits':       'eff_kv' if has_eff else 'kv',
-        'vbits':       'eff_kv' if has_eff else 'kv',
-        'kvdim':       'eff_kv' if has_eff else 'kvdim',
-        'kdim':        'eff_kv' if has_eff else 'kvdim',
-        'vdim':        'eff_kv' if has_eff else 'kvdim',
-        'eff_kvbits':  'eff_kv' if has_eff else None,
-        'eff_kbits':   'eff_kv' if has_eff else None,
-        'eff_vbits':   'eff_kv' if has_eff else None,
+        'wbits':         'w',
+        'kvbits':        'eff_kv' if has_eff else 'kv',
+        'kbits':         'eff_kv' if has_eff else 'kv',
+        'vbits':         'eff_kv' if has_eff else 'kv',
+        'kvdim':         'eff_kv' if has_eff else 'kvdim',
+        'kdim':          'eff_kv' if has_eff else 'kvdim',
+        'vdim':          'eff_kv' if has_eff else 'kvdim',
+        'eff_kvbits':    'eff_kv' if has_eff else None,
+        'eff_kbits':     'eff_kv' if has_eff else None,
+        'eff_vbits':     'eff_kv' if has_eff else None,
+        'metric_w':      'w',
+        'metric_kv':     'kv',
+        'metric_kvdim':  'kvdim',
+        'metric_eff_kv': 'eff_kv',
     }
 
 
@@ -195,14 +203,33 @@ def assemble_F(valid_nd_idx, expr_keys, efm, comp_nd_list, new_metric_nd):
 # ───────────────────────── selection ─────────────────────────
 
 def quantile_select(quantile_specs, valid_nd_idx, expr_keys, esm, default_arch,
-                    config, group_size, n_token, axis_cache=None, verbose=True):
+                    config, group_size, n_token, axis_cache=None, efm=None,
+                    verbose=True):
     """Pick architecture indices at the cartesian product of per-metric quantile
-    positions. Returns (sorted unique I_quant, dict of metric_vals)."""
-    metric_vals = {
-        k: metric_over(valid_nd_idx, k, expr_keys, esm, default_arch,
-                       config, group_size, n_token, cache=axis_cache)
-        for k in quantile_specs
-    }
+    positions. Returns (sorted unique I_quant, dict of metric_vals).
+
+    `efm` (optional dict {axis: (n,2) array}) is required when any spec key
+    starts with `metric_` — that key reads the per-axis search-time metric
+    (loss / JSD) from `efm[axis][nd_idx, 0]` rather than from `get_net_info`."""
+    _axis_map = axis_of_map(expr_keys)
+    metric_vals = {}
+    for k in quantile_specs:
+        if k.startswith('metric_'):
+            ax_name = _axis_map.get(k)
+            if ax_name is None or ax_name not in expr_keys:
+                raise ValueError(f"quantile_sample '{k}' needs expr axis "
+                                 f"'{ax_name}' but it is not in expr_keys "
+                                 f"{expr_keys}")
+            if efm is None or ax_name not in efm:
+                raise ValueError(f"quantile_sample '{k}' requires efm dict "
+                                 f"containing axis '{ax_name}' (its (metric, "
+                                 f"comp) array); pass efm= to quantile_select")
+            ax_i = expr_keys.index(ax_name)
+            metric_vals[k] = efm[ax_name][valid_nd_idx[:, ax_i], 0]
+        else:
+            metric_vals[k] = metric_over(valid_nd_idx, k, expr_keys, esm,
+                                         default_arch, config, group_size,
+                                         n_token, cache=axis_cache)
     target_vals = {k: [np.quantile(v, q) for q in quantile_specs[k]]
                    for k, v in metric_vals.items()}
     if verbose:

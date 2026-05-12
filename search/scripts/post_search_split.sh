@@ -225,13 +225,18 @@ MIN_SEQLEN=2048
 DATA_BATCH_SIZE=1
 # MIN_SEQLEN=0
 
-
+# STRIDE=0
 STRIDE=128
-# STRIDE=256
+# STRIDE=512
 # STRIDE=1024
+
+# PREFILL_PROMPT=False
+# LAST_TOKENS=0
+PREFILL_PROMPT=True
+# LAST_TOKENS=128
+# LAST_TOKENS=256
+LAST_TOKENS=512
 # LAST_TOKENS=1024
-# LAST_TOKENS=512
-LAST_TOKENS=128
 
 
 # TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
@@ -267,6 +272,14 @@ KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603271708_Llama-3.1-8B-Instru
 
 # W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_200.stats
 # KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
+
+# RANDOM_SAMPLE=1000
+# RANDOM_SAMPLE=200
+# RANDOM_SAMPLE=23
+# QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
+
+RANDOM_SAMPLE=41
+QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
 
 LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONGBENCH_CONFIG=utils/longbench_config
@@ -324,14 +337,6 @@ fi
 if [ -n "${EFF_KV_EXPR}" ]; then
     SAVE+="_eff_kv_expr"
 fi
-
-# RANDOM_SAMPLE=1000
-# RANDOM_SAMPLE=200
-# RANDOM_SAMPLE=23
-# QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
-
-RANDOM_SAMPLE=41
-QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
 
 if [ -n "${QUANTILE_SAMPLE}" ]; then
     QS_TEXT=""
@@ -457,6 +462,10 @@ if [ ${STRIDE} -gt 0 ]; then
     ARGS+=" --stride ${STRIDE} "
 else
     ARGS+=" --quant_kv_output "
+fi
+
+if [ ${PREFILL_PROMPT} == 'True' ]; then
+    ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
 fi
 
 if [ ${W_METHOD} == "hqq" ]; then

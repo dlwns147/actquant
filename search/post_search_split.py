@@ -350,6 +350,7 @@ def main(args):
         I_quant, metric_vals = quantile_select(
             quantile_specs, valid_nd_idx, expr_keys, _esm, default_arch,
             config, group_size, args.n_token, axis_cache=axis_cache,
+            efm=_efm,
         )
         print(f'[quantile_sample] selected {len(I_quant)} unique architectures '
               f'out of {len(valid_nd_idx)} candidates')
@@ -897,8 +898,14 @@ if __name__ == '__main__':
     parser.add_argument('--random_sample', type=int, default=None,
                         help='')
     parser.add_argument('--quantile_sample', type=str, nargs='+', default=[],
-                        help='sample architectures at specific quantile positions of complexity metrics. '
-                             'Format: metric#q1,q2,q3  e.g. --quantile_sample wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9')
+                        help='sample architectures at specific quantile positions of per-axis metrics. '
+                             'Format: metric#q1,q2,q3  e.g. --quantile_sample wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9. '
+                             'Supported metrics: complexity (wbits/kvbits/kvdim/eff_kvbits/eff_kbits/eff_vbits/'
+                             'kbits/vbits/kdim/vdim) and per-axis search-time metric '
+                             '(metric_w/metric_kv/metric_kvdim/metric_eff_kv). '
+                             'metric_* uses the search-time JSD/loss distribution of each axis PF (column 0 of '
+                             'the per-axis expr archive), which gives wider input-space coverage than '
+                             'wbits/kvbits/kvdim quantiles when the complexity→loss map is convex.')
     parser.add_argument('--random_sample_path', type=str, default='', 
                         help='')
     parser.add_argument('--grid_search', type=float, nargs='+', default=[])
