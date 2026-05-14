@@ -2,23 +2,17 @@ DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-# MODEL_PATH=/SSD/huggingface/meta-llama
-# # MODEL_NAME=Llama-2-7b-hf
-# # MODEL_NAME=Llama-2-13b-hf
-# MODEL_NAME=Llama-3.1-8B-Instruct
-# DTYPE=float16
-# CONFIG=config/llama.json
-
-MODEL_PATH=/SSD/huggingface/Qwen
-# MODEL_NAME=Qwen2.5-7B
-# MODEL_NAME=Qwen2.5-14B
-# MODEL_NAME=Qwen2.5-32B
-# MODEL_NAME=Qwen2.5-72B
-MODEL_NAME=Qwen2.5-7B-Instruct
-# MODEL_NAME=Qwen2.5-14B-Instruct
-# DTYPE=bfloat16
+MODEL_PATH=/SSD/huggingface/meta-llama
+MODEL_NAME=Llama-3.1-8B-Instruct
 DTYPE=float16
-CONFIG=config/qwen2.json
+CONFIG=config/llama.json
+
+# MODEL_PATH=/SSD/huggingface/Qwen
+# MODEL_NAME=Qwen2.5-7B-Instruct
+# # MODEL_NAME=Qwen2.5-14B-Instruct
+# # DTYPE=bfloat16
+# DTYPE=float16
+# CONFIG=config/qwen2.json
 
 # MODEL_PATH=/SSD/huggingface/mistralai
 # # MODEL_NAME=Mistral-7B-v0.3
@@ -212,10 +206,11 @@ LOSS_FUNC="jsd"
 
 
 # N_SAMPLE=4
-N_SAMPLE=8
+# N_SAMPLE=8
 # N_SAMPLE=16
 # N_SAMPLE=32
 # N_SAMPLE=64
+N_SAMPLE=128
 SEQLEN=2048
 MIN_SEQLEN=2048
 # SEQLEN=8192
@@ -262,7 +257,7 @@ BETA=-2
 
 W_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_200.stats
 KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603271708_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x3gs0kdim0vdim_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
-# KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
+KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
 # EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603280405_Llama-3.1-8B-Instruct_eff_kvbits_w4kv234_hqq_kivi_i200n50_w128kv3264128x3_k0_16_32_48_64v0_r128_chto_0.1-5_jsd_wik_128s2048l16384t_rbf_s512/iter_200.stats
 
 # W_EXPR=
@@ -278,8 +273,31 @@ KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603271708_Llama-3.1-8B-Instru
 # RANDOM_SAMPLE=23
 # QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
 
-RANDOM_SAMPLE=41
-QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
+RANDOM_SAMPLE=23
+QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.01,0.5,0.99"
+# RANDOM_SAMPLE=41
+# QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
+# QUANTILE_SAMPLE="metric_w#0.1,0.5,0.9 metric_kvdim#0.1,0.5,0.9"
+
+# How to draw the RANDOM_SAMPLE extras (only matters when QUANTILE_SAMPLE is also set).
+# - random                   : uniform random (legacy default)
+# - coverage_nsga2_joint     : KDTree covering-radius / mean — joint coverage
+# - coverage_nsga2_marginal  : per-axis std-of-gaps, aggregated by COVERAGE_PER_AXIS_AGG
+SAMPLING_METHOD=coverage_nsga2_marginal
+# SAMPLING_METHOD=random
+# SAMPLING_METHOD=coverage_nsga2_joint
+
+# Coordinate space for coverage_nsga2_* fitness.
+# - z    : per-axis loss-value normalised; concentrates picks in long-tail
+# - rank : per-axis rank / (n_axis-1) ∈ [0,1]; distribution-invariant per axis
+COVERAGE_COORD=rank
+# COVERAGE_COORD=z
+
+# Aggregator for coverage_nsga2_marginal (ignored otherwise).
+# - max    : Tchebycheff — minimise max_k std_k. Strict per-axis evenness. DEFAULT.
+# - sum    : Σ_k std_k. Slightly faster, allows axis trade-offs.
+# - pareto : n_axes-obj NSGA2 (original).
+COVERAGE_PER_AXIS_AGG=max
 
 LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
 LONGBENCH_CONFIG=utils/longbench_config
@@ -353,6 +371,12 @@ fi
 
 if [ -n "${RANDOM_SAMPLE}" ] && [ "${RANDOM_SAMPLE}" -gt 0 ]; then
     SAVE+="_rs${RANDOM_SAMPLE}"
+    # 1-3 char tag: method[coord][agg].  e.g. r / jr / jz / mrm / mzs / mrp
+    case "${SAMPLING_METHOD}" in
+        random)                  SAVE+="_r" ;;
+        coverage_nsga2_joint)    SAVE+="_j${COVERAGE_COORD:0:1}" ;;
+        coverage_nsga2_marginal) SAVE+="_m${COVERAGE_COORD:0:1}${COVERAGE_PER_AXIS_AGG:0:1}" ;;
+    esac
 fi
 
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_random_sample_${W_METHOD_TEXT}_${KV_METHOD}_${RANDOM_SAMPLE}_sample_${SEED}seed_${KV_SCALE}_kv_scale_${DATASETS_TEXT}_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta
@@ -392,12 +416,16 @@ ARGS="--gpu_id ${DEVICES} \
 --kv_scale ${KV_SCALE} \
 --kvdim_scale ${KVDIM_SCALE} \
 --eff_kv_scale ${EFF_KVDIM_SCALE} \
+--datasets ${DATASETS} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
---data_batch_size ${DATA_BATCH_SIZE} \
---datasets ${DATASETS} \
+--n_sample ${N_SAMPLE} \
+--data_batch_size ${DATA_BATCH_SIZE}
 --random_sample ${RANDOM_SAMPLE} \
---quantile_sample ${QUANTILE_SAMPLE}"
+--quantile_sample ${QUANTILE_SAMPLE} \
+--sampling_method ${SAMPLING_METHOD} \
+--coverage_coord ${COVERAGE_COORD} \
+--coverage_per_axis_agg ${COVERAGE_PER_AXIS_AGG}"
 # --comp_obj ${COMP_OBJ} \
 # --comp_obj_min ${MIN_COMP_OBJ} \
 # --comp_obj_max ${MAX_COMP_OBJ} \

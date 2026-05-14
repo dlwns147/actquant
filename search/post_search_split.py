@@ -29,6 +29,7 @@ from utils.minilongbench import pred_minilongbench, eval_minilongbench
 from utils.select import (
     LazyPs, build_arch, draw_random, assemble_F,
     select_valid_nd_idx, quantile_select, axis_of_map,
+    coverage_subset_nsga2_extras,
 )
 import warnings
 warnings.simplefilter("ignore")
@@ -360,11 +361,33 @@ def main(args):
 
         I_extra = []
         if args.random_sample is not None and args.random_sample > 0:
-            I_extra = draw_random(args.random_sample, len(valid_nd_idx),
-                                  exclude=I_quant)
-            print(f'[random_sample] adding {len(I_extra)} additional random samples '
-                  f'(excluding {len(I_quant)} quantile-selected; '
-                  f'pool={len(valid_nd_idx) - len(I_quant)})')
+            if args.sampling_method == 'random':
+                I_extra = draw_random(args.random_sample, len(valid_nd_idx),
+                                      exclude=I_quant)
+                print(f'[random_sample] adding {len(I_extra)} additional random samples '
+                      f'(excluding {len(I_quant)} quantile-selected; '
+                      f'pool={len(valid_nd_idx) - len(I_quant)})')
+            else:
+                # coverage_nsga2_{joint|marginal}: discrete SubsetProblem-style GA
+                # over K positions in valid_nd_idx; custom Sampling/Crossover/
+                # Mutation keep K-cardinality + validity (no continuous→snap step).
+                # Coordinate space (--coverage_coord) and per-axis aggregator
+                # (--coverage_per_axis_agg) tune the fitness; see utils.select.
+                fit_mode = args.sampling_method.replace('coverage_nsga2_', '')
+                I_extra = coverage_subset_nsga2_extras(
+                    valid_nd_idx, _efm, expr_keys,
+                    anchor_idx=I_quant, K=args.random_sample,
+                    fitness=fit_mode,
+                    coord=args.coverage_coord,
+                    per_axis_agg=args.coverage_per_axis_agg,
+                    seed=args.seed, verbose=False,
+                )
+                print(f'[coverage_nsga2 fitness={fit_mode} '
+                      f'coord={args.coverage_coord} '
+                      f'per_axis_agg={args.coverage_per_axis_agg}] '
+                      f'adding {len(I_extra)} coverage-optimised samples '
+                      f'(excluding {len(I_quant)} quantile-selected; '
+                      f'pool={len(valid_nd_idx) - len(I_quant)})')
         I = sorted(set(I_quant) | set(I_extra))
         assert len(I) == len(I_quant) + len(I_extra), \
             'quantile and random samples must be disjoint'
@@ -906,8 +929,33 @@ if __name__ == '__main__':
                              'metric_* uses the search-time JSD/loss distribution of each axis PF (column 0 of '
                              'the per-axis expr archive), which gives wider input-space coverage than '
                              'wbits/kvbits/kvdim quantiles when the complexity→loss map is convex.')
-    parser.add_argument('--random_sample_path', type=str, default='', 
+    parser.add_argument('--random_sample_path', type=str, default='',
                         help='')
+    parser.add_argument('--sampling_method', type=str, default='random',
+                        choices=['random', 'coverage_nsga2_joint', 'coverage_nsga2_marginal'],
+                        help='How to draw --random_sample extras (only used when --quantile_sample also set).\n'
+                             '  random                  : uniform random (default).\n'
+                             '  coverage_nsga2_joint    : discrete GA over K positions into valid_nd_idx,\n'
+                             '                            2-obj covering radius + mean coverage of proxy pool.\n'
+                             '  coverage_nsga2_marginal : discrete GA on per-axis std-of-gaps; aggregator\n'
+                             '                            chosen via --coverage_per_axis_agg.\n'
+                             'Both modes use SubsetProblem-style custom operators (per-axis-sorted PF input,\n'
+                             'K positions in valid_nd_idx as chromosome) + Strategy-3 ensemble. No snap.\n'
+                             'See utils.select.coverage_subset_nsga2_extras for hyperparameters.')
+    parser.add_argument('--coverage_coord', type=str, default='rank', choices=['z', 'rank'],
+                        help='Coordinate space for the coverage_nsga2_* fitness:\n'
+                             '  z    : per-axis (z - z_min) / z_range; sensitive to loss-distribution tail.\n'
+                             '  rank : per-axis rank / (n_axis - 1) ∈ [0, 1]; distribution-invariant per\n'
+                             '         axis. Pairs naturally with --coverage_per_axis_agg=max for uniform\n'
+                             '         per-axis sampling.')
+    parser.add_argument('--coverage_per_axis_agg', type=str, default='max',
+                        choices=['max', 'sum', 'pareto'],
+                        help='Aggregator over per-axis std-of-gaps when sampling_method=coverage_nsga2_marginal:\n'
+                             '  max    : Tchebycheff — minimise max_k std_k. DEFAULT. Strongest "no axis\n'
+                             '           worse than any other" pressure. Single-obj GA.\n'
+                             '  sum    : Σ_k std_k. Single-obj GA. Slightly faster, allows axis trade-offs.\n'
+                             '  pareto : (std_axis_0, …) as n_axes-obj NSGA2. Original Pareto-front mode.\n'
+                             'Ignored when sampling_method=coverage_nsga2_joint or random.')
     parser.add_argument('--grid_search', type=float, nargs='+', default=[])
     
     parser.add_argument('--sqrt', action='store_true', help='')
