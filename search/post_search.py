@@ -1,473 +1,488 @@
+"""post_search.py — stage 2 of the two-stage post-search.
+
+Reads the results.csv produced by sample_surrogate.py, fits a surrogate via
+predictor.factory.get_predictor (--surrogate: rbf / gp / mlp / carts / as),
+re-ranks the full combo space with the surrogate's prediction, selects the
+final architecture(s) under the COMP_OBJ range (prefer / high_tradeoff /
+top-n), then evaluates + benchmarks them.
+
+If --sample_path is omitted, the additive combined metric (args scales,
+same as the old post_search_split.py) is used instead of a fitted surrogate.
+"""
 import os
 import json
+import csv
 import argparse
+import warnings
+from time import time
+
 import torch
 import numpy as np
+import scipy.stats as stats
 from pymoo.decomposition.asf import ASF
-from pymoo.visualization.scatter import Scatter
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
-# from pymoo.model.decision_making import DecisionMaking, normalize, find_outliers_upper_tail, NeighborFinder
-from pymoo.core.decision_making import DecisionMaking, find_outliers_upper_tail, NeighborFinder
-from pymoo.util.normalization import normalize
+from tqdm import tqdm
 
 from evaluator import LlamaEvaluator
-from tqdm import tqdm
-from time import time
-import csv
-from matplotlib import pyplot as plt
-from utils.func import init_accelerator, get_net_info, clean_up, process_dtype
-from utils.eval import measure_latency, eval_zeroshot
-from utils.eval_long_bench import pred_long_bench, eval_long_bench
+from predictor.factory import get_predictor
+from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
+                        evaluate_metric, configure_model_cache, get_net_info,
+                        clean_up)
+from utils.select import LazyPs, build_arch, assemble_F, select_valid_nd_idx
+from utils.eval import eval_zeroshot
+from utils.longbench import pred_longbench, eval_longbench
 from utils.data import get_tokenizer
-from quant.model import get_quantized_model
-from model.replace import replace_kv_cache
-import gc
-import warnings
+from utils.ruler import eval_ruler
+from utils.longeval import eval_longeval_lines, generate_lines_testcases
+from utils.minilongbench import pred_minilongbench, eval_minilongbench
+
 warnings.simplefilter("ignore")
 
-import datasets
-datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True 
+SURROGATES = ('rbf', 'gp', 'mlp', 'carts', 'as')
 
-class HighTradeoffPoints(DecisionMaking):
 
-    def __init__(self, epsilon=0.125, n_survive=None, normalize=True, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.epsilon = epsilon
-        self.n_survive = n_survive  # number of points to be selected
-        self.normalize = normalize
+# ───────────────────────── results.csv reader ─────────────────────────
+def load_sample_csv(path, n_comp, n_axes, n_datasets=1):
+    """Parse a sample_surrogate results.csv → (X, y, y_combined, n_valid).
 
-    def _do(self, F, **kwargs):
-        n, m = F.shape
+    X (N, n_axes) per-axis search metric, y (N,) measured metric on the first
+    dataset. NaN-metric columns (in-progress runs) are dropped, matching
+    analysis/v5/_common.extract_xy.
+    """
+    with open(path) as f:
+        rows = [r for r in csv.reader(f) if r]
+    ncol = max(len(r) for r in rows)
+    M = np.full((len(rows), ncol), np.nan)
+    for i, r in enumerate(rows):
+        for j, v in enumerate(r):
+            try:
+                M[i, j] = float(v)
+            except ValueError:
+                pass
+    y_row = n_comp                    # first --datasets metric
+    comb_row = n_comp + n_datasets    # pf column 0 (combined predicted)
+    axis0 = comb_row + 1              # per-axis metrics start here
+    y_all = M[y_row, :ncol]
+    valid = ~np.isnan(y_all)
+    X = M[axis0:axis0 + n_axes, :ncol].T[valid]
+    y = y_all[valid]
+    y_comb = M[comb_row, :ncol][valid] if M.shape[0] > comb_row else X.sum(1)
+    return dict(X=X, y=y, y_combined=y_comb, n_valid=int(valid.sum()))
 
-        if self.normalize:
-            F = normalize(F, estimate_bounds_if_none=True)
-            # F = normalize(F, self.ideal_point, self.nadir_point, estimate_bounds_if_none=True)
 
-        neighbors_finder = NeighborFinder(F, epsilon=0.125, n_min_neigbors="auto", consider_2d=False)
+# ───────────────────────── LongEval testcase gen ─────────────────────────
+def maybe_generate_testcases(args):
+    """Handle --generate_testcases; returns True if the caller should exit."""
+    if not args.generate_testcases:
+        return False
+    print("Generating LongEval testcases...")
+    generate_lines_testcases(
+        num_lines_list=args.generate_testcases_num_lines,
+        num_test_samples=args.generate_testcases_num_samples,
+        line_idx_opt=args.generate_testcases_line_idx_opt,
+        output_dir=args.generate_testcases_output_dir)
+    print("Testcase generation completed.")
+    return bool(args.generate_testcases_only)
 
-        mu = np.full(n, - np.inf)
 
-        # for each solution in the set calculate the least amount of improvement per unit deterioration
-        for i in range(n):
+# ───────────────────────── benchmarks ─────────────────────────
+def run_benchmarks(args, model, model_id):
+    """passkey / zeroshot / longbench / minilongbench / ruler / longeval for
+    one (already sampled) architecture. Each block needs the KV cache on."""
+    if args.pass_key_file:
+        clean_up()
+        configure_model_cache(args, model, use_cache=True)
+        print("-----------------------------------")
+        enc = get_tokenizer(model_id)
+        for line in open(args.pass_key_file, "r"):
+            clean_up()
+            torch.cuda.reset_max_memory_allocated()
+            example = json.loads(line)
+            prompt_postfix = "What is the pass key? The pass key is "
+            prompt = example["input"] + prompt_postfix
+            input_ids = enc(prompt, return_tensors="pt").input_ids.cuda()
+            print("-----------------------------------")
+            print(f"#Tokens of Prompt:", input_ids.shape[1], end=" ")
+            print("Passkey target:", example["target"])
+            tokens = model.generate(input_ids,
+                                    max_new_tokens=len(example["target"]))
+            answer = prompt_postfix + enc.decode(
+                tokens[0].tolist()[input_ids.shape[1]:],
+                skip_special_tokens=True)
+            answer = f"[ {answer.replace(chr(10), chr(92) + 'n')} ]"
+            peak = torch.cuda.max_memory_allocated()
+            print(answer)
+            print(f"Mem: {peak / 1024 / 1024 / 1024:.3f} GB")
+            print("-----------------------------------\n")
 
-            # for each neighbour in a specific radius of that solution
-            neighbors = neighbors_finder.find(i)
+    if args.zeroshot:
+        clean_up()
+        configure_model_cache(args, model, use_cache=True)
+        results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id),
+                                task_list=args.tasks,
+                                batch_size=args.lm_eval_batch_size)
+        total_result = []
+        print(f'task : {list(results.keys())}')
+        for task, result in results.items():
+            new_result = {k: float(v) for k, v in result.items()
+                          if k in ['em,none', 'exact_match,strict-match',
+                                   'exact_match,flexible-extract',
+                                   'bleu_max,none', 'bleu_acc,none',
+                                   'acc,none']}
+            print(f'task: {task}, result: {list(new_result.keys())}, '
+                  f'{list(new_result.values())}')
+            total_result += list(new_result.values())
+        print(f'total_result: {total_result}')
 
-            # calculate the trade-off to all neighbours
-            diff = F[neighbors] - F[i]
+    if args.longbench:
+        clean_up()
+        configure_model_cache(args, model, use_cache=True)
+        t0 = time()
+        pred_longbench(model, tokenizer=get_tokenizer(model_id),
+                       save_path=args.longbench_result_path,
+                       longbench_config=args.longbench_config,
+                       e=args.longbench_e)
+        eval_longbench(args.longbench_result_path, args.longbench_e)
+        sentences = [f"{k}: {v}\n" for k, v in vars(args).items()]
+        sentences += [f'Longbench Time: {time() - t0:.2f}s', "\n"]
+        with open(os.path.join(args.longbench_result_path,
+                               "pred_e" if args.longbench_e else "pred",
+                               'result.txt'), 'w') as f:
+            f.writelines(sentences)
 
-            # calculate sacrifice and gain
-            sacrifice = np.maximum(0, diff).sum(axis=1)
-            gain = np.maximum(0, -diff).sum(axis=1)
+    if args.minilongbench:
+        clean_up()
+        configure_model_cache(args, model, use_cache=True)
+        t0 = time()
+        pred_minilongbench(
+            model, tokenizer=get_tokenizer(model_id),
+            save_path=args.minilongbench_result_path,
+            longbench_config=args.longbench_config,
+            data_dir=args.minilongbench_data_dir or None,
+            model_name=args.model_name)
+        eval_minilongbench(args.minilongbench_result_path)
+        mlb_time = time() - t0
+        print(f'MiniLongBench Time: {mlb_time:.2f}s')
+        sentences = [f"{k}: {v}\n" for k, v in vars(args).items()]
+        sentences.append(f'MiniLongBench Time: {mlb_time:.2f}s\n')
+        with open(os.path.join(args.minilongbench_result_path, "pred",
+                               "result.txt"), 'w') as f:
+            f.writelines(sentences)
 
-            # np.warnings.filterwarnings('ignore')
-            tradeoff = sacrifice / gain
+    if args.ruler:
+        clean_up()
+        configure_model_cache(args, model, use_cache=True)
+        t0 = time()
+        eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id,
+                   tasks=args.ruler_task, yaml_path=args.ruler_yaml_path,
+                   batch_size=args.ruler_batch_size, length=args.ruler_length,
+                   nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks,
+                   result_path=args.ruler_result_path, seed=args.seed)
+        print(f'RULER Time: {time() - t0:.2f}s')
 
-            # otherwise find the one with the smalled one
-            mu[i] = np.nanmin(tradeoff)
-        if self.n_survive is not None:
-            return np.argsort(mu)[-self.n_survive:]
+    if args.longeval:
+        clean_up()
+        configure_model_cache(args, model, use_cache=True)
+        t0 = time()
+        if args.longeval_result_path:
+            d = os.path.dirname(args.longeval_result_path)
+            os.makedirs(d if d else '.', exist_ok=True)
+            result_path = args.longeval_result_path
         else:
-            return find_outliers_upper_tail(mu)  # return points with trade-off > 2*sigma
+            result_path = ''
+        eval_longeval_lines(
+            model=model, tokenizer=get_tokenizer(model_id),
+            test_dir=args.longeval_test_dir, model_name_or_path=model_id,
+            num_lines_list=args.longeval_num_lines,
+            eval_shortest_only=args.longeval_shortest_only,
+            result_path=result_path, use_cache=True)
+        longeval_time = time() - t0
+        print(f'LongEval Lines Task Time: {longeval_time:.2f}s')
+        if args.longeval_result_path:
+            sentences = [f"{k}: {v}\n" for k, v in vars(args).items()]
+            sentences += [f'LongEval Time: {longeval_time:.2f}s', "\n"]
+            with open(args.longeval_result_path.replace('.json',
+                                                        '_summary.txt'),
+                      'w') as f:
+                f.writelines(sentences)
 
 
 def main(args):
     print(args)
+    ctx = init_run(args)
+    if maybe_generate_testcases(args):
+        return
 
-    with open(args.config, 'r') as f:
-        config = json.load(f)[args.model_name]
-    
-    accelerator, device_map = init_accelerator(args.gpu_id, config)
-    dtype = process_dtype(args.dtype)
-
-    with open(args.expr, 'r') as f:
-        result_json = json.load(open(args.expr))
-        archive = result_json['archive'] + result_json['candidates']
-
-    group_size = {'w': args.w_group_size, 'k': args.k_group_size, 'v': args.v_group_size}
     n_comp_obj = len(args.comp_obj)
-    # assert n_comp_obj == len(archive[0][2:])
-    subnets, metric = [v[0] for v in archive], [v[1] for v in archive]
-    comp_obj = [[get_net_info(n, config, group_size, n_token=args.n_token)[obj] for n in subnets] for obj in args.comp_obj]
-    sort_idx = np.argsort(metric)
-    F = np.column_stack((metric, *comp_obj))[sort_idx, :]
-    n_comp_obj_min, n_comp_obj_max = len(args.comp_obj_min), len(args.comp_obj_max)
-    assert n_comp_obj == n_comp_obj_min and n_comp_obj_min == n_comp_obj_max
+    assert n_comp_obj == len(args.comp_obj_min) == len(args.comp_obj_max)
 
-    # import matplotlib.pyplot as plt
-    # plt.scatter(F[:, 1], F[:, 2], c='b', s=5, alpha=0.8, facecolor=None)
-    # # plt.scatter(temp_norm[:, 1], temp_norm[:, 0], c='b', s=5, alpha=0.8, facecolor=None, label='candidates')
-    # # plt.scatter(temp_norm[I, 1], temp_norm[I, 0], c='r', s=5, label='selected points')
-    # plt.xlabel('w_bits')
-    # plt.ylabel('kv_bits')
-    # plt.grid()
-    # plt.legend()
-    # plt.savefig('w_kv_bits.png')
-    # exit()
-    
-    if n_comp_obj_min > 0:
-        # range_idx = np.argwhere(np.logical_and(F[:, 1] > args.sec_obj_range[0], F[:, 1] < args.sec_obj_range[1])).flatten()
-        flag = np.ones((F.shape[0]), dtype=bool)
-        for i in range(n_comp_obj):
-            flag = np.logical_and(flag, np.logical_and(F[:, i + 1] >= args.comp_obj_min[i], F[:, i + 1] <= args.comp_obj_max[i]))
-        range_idx = np.argwhere(flag).flatten()
-        print(f'range_idx : {len(range_idx)}')
-        
-        pf = F[range_idx, :]
-        ps = np.array(subnets)[sort_idx][range_idx]
+    expr_map = build_expr_map(args, ctx)
+    nd = build_nd(args, ctx, expr_map)
+    expr_keys, _esm, _efm = nd.expr_keys, nd.esm, nd.efm
+    K = len(expr_keys)
 
-    elif args.only_front:
-        front = NonDominatedSorting().do(F, only_non_dominated_front=True)
-        pf = F[front, :]
-        ps = np.array(subnets)[sort_idx][front]
-        
+    # ─────────────────────── candidate set under COMP_OBJ ───────────────────────
+    valid_nd_idx = select_valid_nd_idx(
+        nd.nd_shape, nd.new_metric_nd, nd.comp_nd_list,
+        comp_obj_min=args.comp_obj_min, comp_obj_max=args.comp_obj_max,
+        random_sample=None, has_quantile=False, has_prefer=bool(args.prefer))
+    if len(valid_nd_idx) == 0:
+        msg = ["[post_search] no architecture satisfies the COMP_OBJ range — "
+               "0 candidates after filtering."]
+        for i, obj in enumerate(args.comp_obj):
+            nd_i = np.asarray(nd.comp_nd_list[i])
+            msg.append(f"  {obj}: achievable [{nd_i.min():.4g}, {nd_i.max():.4g}]"
+                       f"  requested [{args.comp_obj_min[i]:.4g}, "
+                       f"{args.comp_obj_max[i]:.4g}]")
+        msg.append("Adjust --comp_obj_min/--comp_obj_max (or COMP_OBJ_VAL in "
+                   "the script) into the achievable range. Note: model/config "
+                   f"is {args.model_name} but expr archives may be from another "
+                   "model — cross-model adapts layer count and shifts the "
+                   "achievable memory range.")
+        raise SystemExit("\n".join(msg))
+    F = assemble_F(valid_nd_idx, expr_keys, _efm, nd.comp_nd_list,
+                   nd.new_metric_nd)
+    # per-axis search-metric columns of F (col 0 of each (metric,comp) pair)
+    M_valid = F[:, [1 + 2 * i for i in range(K)]]
+
+    # ─────────────────────── surrogate → combined metric ───────────────────────
+    if args.sample_path:
+        smp = load_sample_csv(
+            args.sample_path,
+            n_comp=len(comp_key_order(ctx.config, ctx.group_size)),
+            n_axes=K, n_datasets=max(1, len(args.datasets)))
+        if smp['X'].shape[1] != K:
+            raise SystemExit(
+                f"sample CSV has {smp['X'].shape[1]} per-axis columns but "
+                f"{K} expr axes were provided; they must match "
+                f"(expr_keys={expr_keys}).")
+        print(f"[surrogate] training data: N={smp['n_valid']} axes={expr_keys}")
+        kw = {}
+        if args.surrogate == 'rbf':
+            lb = np.minimum(smp['X'].min(0), M_valid.min(0))
+            ub = np.maximum(smp['X'].max(0), M_valid.max(0))
+            kw = dict(kernel=args.rbf_kernel, tail='linear',
+                      lb=lb, ub=np.where(ub > lb, ub, lb + 1e-9))
+        model = get_predictor(args.surrogate,
+                              np.asarray(smp['X'], dtype=float),
+                              np.asarray(smp['y'], dtype=float), **kw)
+        yp_tr = np.asarray(model.predict(np.asarray(smp['X'], float))).reshape(-1)
+        ss_r = float(np.sum((smp['y'] - yp_tr) ** 2))
+        ss_t = float(np.sum((smp['y'] - smp['y'].mean()) ** 2))
+        r2 = 1.0 - ss_r / max(ss_t, 1e-30)
+        rho, _ = stats.spearmanr(yp_tr, smp['y'])
+        tau, _ = stats.kendalltau(yp_tr, smp['y'])
+        print(f"[surrogate={args.surrogate}] train R2={r2:.4f} "
+              f"rho={rho:.4f} tau={tau:.4f}")
+        pred = np.asarray(model.predict(M_valid)).reshape(-1).astype(float)
+        F[:, 0] = pred
     else:
-        pf = F
-        ps = np.array(subnets)[sort_idx]
-        
-    if args.high_tradeoff:
-        
-        I = NonDominatedSorting().do(pf, only_non_dominated_front=True)
-        # # choose the architectures with highest trade-off
-        # dm = HighTradeoffPoints(n_survive=args.n)
+        print("[surrogate] --sample_path not given → additive "
+              "args-scale combined metric")
+        pred = F[:, 0].astype(float)
 
-        # I = dm.do(np.column_stack([pf[:, 0], *[pf[:, 1+args.comp_obj.index(obj)] for obj in args.high_tradeoff]]))
-        # temp = np.column_stack([pf[:, 0], *[pf[:, 1+args.comp_obj.index(obj)] for obj in args.high_tradeoff]])
-        
-        # temp_norm = normalize(temp, estimate_bounds_if_none=True)
-        # import matplotlib.pyplot as plt
-        # plt.scatter(temp[:, 1], temp[:, 0], c='b', s=5, alpha=0.8, facecolor=None, label='candidates')
-        # plt.scatter(temp[I, 1], temp[I, 0], c='r', s=5, label='selected points')
-        # # plt.scatter(temp_norm[:, 1], temp_norm[:, 0], c='b', s=5, alpha=0.8, facecolor=None, label='candidates')
-        # # plt.scatter(temp_norm[I, 1], temp_norm[I, 0], c='r', s=5, label='selected points')
-        # plt.xlabel('latency')
-        # plt.ylabel('metric')
-        # plt.grid()
-        # plt.legend()
-        # plt.savefig('test2.png')
-        # exit()
-        
-        # I = dm.do(pf[idx])
+    # re-rank candidate set by the (surrogate) prediction, ascending
+    order = np.argsort(pred)
+    F = F[order]
+    valid_nd_idx = valid_nd_idx[order]
+    pf = F
+    ps = LazyPs(lambda row: build_arch(ctx.default_arch, expr_keys, _esm, row),
+                valid_nd_idx)
 
-    elif args.prefer:
-        # preferences
+    # ─────────────────────── final architecture selection ───────────────────────
+    if args.prefer:
         preferences = {}
-        # for p in args.prefer.split("+"):
         for p in args.prefer:
-            k, v = p.split("#")
+            k, v = p.split('#')
             preferences[k] = float(v)
         weights = np.fromiter(preferences.values(), dtype=float)
-
-        # choose the architectures thats closest to the preferences
-        I = ASF().do(pf, weights).argsort()[:args.n].reshape(args.n)
+        I = ASF().do(pf[:, [0, *range(-n_comp_obj, 0)]],
+                     weights).argsort()[:args.n].reshape(args.n)
+        sel_mode = 'prefer'
+    elif args.high_tradeoff:
+        I = NonDominatedSorting().do(pf[:, [0, *range(-n_comp_obj, 0)]],
+                                     only_non_dominated_front=True)
+        sel_mode = 'high_tradeoff'
     else:
-        I = range(len(pf))
+        I = list(range(min(args.n, len(valid_nd_idx))))
+        sel_mode = f'top-{args.n}'
 
-    # always add most accurate architectures
-    # I = np.append(I, 0)
+    print(f'[selection] mode={sel_mode}  |I|={len(I)}  '
+          f'|candidates|={len(valid_nd_idx)}  (n_total={nd.n_total})')
 
-    for idx in I:
-        # print(f'Selected arch[{idx}] {args.sec_obj}: {pf[idx, 1]:.4f}, metric: {pf[idx, 0]:.4f}, arch: {ps[idx]}')
-        # print(f'arch : {ps[idx]}')
-        print(f'Selected arch[{idx}] {args.comp_obj}: {pf[idx, 1:].tolist()}, metric: {pf[idx, 0].item():.4f}')
-
+    # ─────────────────────── evaluate + benchmark final arch ───────────────────────
     model_id = f'{args.model_path}/{args.model_name}'
-    # use_awq_gptq_owq = 'awq' in args.w_method or 'gptq' in args.w_method or 'owq' in args.w_method
-    
     if 'hqq' not in args.w_method:
         args.quant_model_paths = []
-
     evaluator = LlamaEvaluator(
-        config,
-        accelerator=accelerator,
-        model_id=model_id,
+        ctx.config, accelerator=ctx.accelerator, model_id=model_id,
         method={'w': args.w_method, 'kv': args.kv_method},
         quant_model_paths=args.quant_model_paths,
         outlier=torch.load(args.outlier_path) if args.outlier_path else None,
-        seqlen=args.seqlen,
-        n_sample=args.n_sample,
-        datasets=args.datasets,
-        device_map=device_map,
-        dtype=dtype,
+        seqlen=args.seqlen, min_seqlen=args.min_seqlen, n_sample=args.n_sample,
+        datasets=args.datasets, device_map=ctx.device_map, dtype=ctx.dtype,
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
-        group_size=group_size,
-        residual_length=args.residual_length,
-        # use_flash=args.use_flash,
-        k_quant_scheme=args.k_quant_scheme,
-        v_quant_scheme=args.v_quant_scheme,
-    )
+        group_size=ctx.group_size, residual_length=args.residual_length,
+        k_quant_scheme=args.k_quant_scheme, v_quant_scheme=args.v_quant_scheme,
+        loss_func=args.loss_func, last_tokens=args.last_tokens,
+        use_key_token=args.use_key_token, trunc_len=args.trunc_len,
+        sliding_window=args.sliding_window, alpha=args.alpha, beta=args.beta,
+        key_token_path=args.key_token_path)
 
     for idx in tqdm(I):
-
         arch = ps[idx]
-        # arch = dict()
-        # arch['linear'] = {linear: [4] * config['n_block'] for linear in config['linear']}
-        accelerator.print(arch)
-        
-        # weight_bits = np.concatenate(list(arch['w'].values()))
-        # do_owq = ((weight_bits - weight_bits.astype(int)).sum() != 0)
-        # print(f'do_owq : {do_owq}, use_awq_gptq_owq : {use_awq_gptq_owq}')
-        # if use_awq_gptq_owq:
-        #     w_method = 'awq' if 'awq' in args.w_method else 'gptq' if 'gptq' in args.w_method else 'owq' if 'owq' in args.w_method else None
-        #     evaluator.model = get_quantized_model(w_method, arch, model_id, device_map, dtype=dtype, config=config, do_owq=do_owq, owq_path=args.outlier_path)
-            # model = get_quantized_model(w_method, arch, model_id, device_map, dtype=dtype, config=config, do_owq=do_owq, owq_path=args.outlier_path)
-        # else:
+        complexity = get_net_info(arch, ctx.config, ctx.group_size,
+                                  n_token=args.n_token)
+        print(f'complexity: {list(complexity.keys())}')
+        print(f'complexity: {list(complexity.values())}')
+        ctx.accelerator.print(f'arch: {arch}')
         model = evaluator.sample(arch)
-            
-        print(f'Selected arch[{idx}] {args.comp_obj}: {pf[idx, 1:]}, metric: {pf[idx, 0]:.4f}')
+
         if args.datasets:
-            if args.kv_method == 'kivi':
-                model.config.kivi_config.residual_length = 0
-            elif args.kv_method == 'hqq':
-                model.generation_config.cache_config = 0
-            model.config.quant_kv_output = True
-            model.config.use_cache = False
+            metric = evaluate_metric(args, arch, model, evaluator,
+                                     ctx.accelerator)
+            print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, '
+                  f'pred_metric: {pf[idx, 0]}, per_axis_metric: '
+                  f'{pf[idx, [1 + 2 * i for i in range(K)]].tolist()}')
 
-            metric = evaluator.eval(arch=arch, metric='ppl', model=model, accelerator=accelerator)[0] if args.datasets else 0
-            complexity = get_net_info(arch, config, group_size, n_token=args.n_token)
-            # latency = measure_latency(model, generation=True, device=model.device) if args.latency else 0
-            print(f'complexity: {complexity}, ppl: {[p for p in metric.values()]}')
+        run_benchmarks(args, model, model_id)
 
-        if args.pass_key_file:
+        if ('awq' in args.w_method or 'gptq' in args.w_method
+                or 'qeft' in args.w_method):
+            del model, evaluator.model
             clean_up()
-            # model.config.residual_length = args.residual_length
-            if args.kv_method == 'kivi':
-                model.config.kivi_config.residual_length = args.residual_length
-            elif args.kv_method == 'hqq':
-                model.generation_config.cache_config = args.residual_length
-            model.config.quant_kv_output = False
-            model.config.use_cache = True
-            
-            # method_name = f"K{config.k_bits}V{config.v_bits} KiVi"
-            print( "-----------------------------------" )
-            enc = get_tokenizer(model_id)
-            for line in open(args.pass_key_file, "r"):
-                clean_up()
-                torch.cuda.reset_max_memory_allocated()
-                example = json.loads(line)
-                prompt_postfix = "What is the pass key? The pass key is "
-                prompt = example["input"] + prompt_postfix
-                input_ids = enc(prompt, return_tensors="pt").input_ids.cuda()
-                print( "-----------------------------------" )
-                print( f"#Tokens of Prompt:", input_ids.shape[1], end=" " )
-                print( "Passkey target:", example["target"] )
 
-                tokens = model.generate(input_ids, max_new_tokens=len(example["target"]))
-                answer = prompt_postfix + enc.decode(tokens[0].tolist()[input_ids.shape[1]:], skip_special_tokens=True)
-                answer = answer.replace("\n", "\\n")
-                # answer= f"{method_name}:\n     [ {answer} ]"
-                answer= f"[ {answer} ]"
-                
-                peak_memory = torch.cuda.max_memory_allocated()
-                print( answer )
-                print(f"Mem: {peak_memory / 1024 / 1024 / 1024:.3f} GB")
-                # print(f"Mem: {peak_memory / 1024 / 1024:.3f} MB")
-                print( "-----------------------------------\n" )
-        
-        if args.zeroshot:
-            clean_up()
-            # model.config.residual_length = args.residual_length
-            if args.kv_method == 'kivi':
-                model.config.kivi_config.residual_length = args.residual_length
-            elif args.kv_method == 'hqq':
-                model.generation_config.cache_config = args.residual_length
-            model.config.quant_kv_output = False
-            model.config.use_cache = True
-            
-            results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks, batch_size=args.lm_eval_batch_size)
-            
-            task = list(results.keys())
-            total_result = []
-            print(f'task : {task}')
-            for task, result in results.items():
-                # print(f'task: {task}, result: {result}')
-                new_result = {}
-                for k, v in result.items():
-                    if k in ['em,none', 'exact_match,strict-match', 'exact_match,flexible-extract', 'bleu_max,none', 'bleu_acc,none', 'acc,none']:
-                        new_result[k] = float(v)
-                print(f'task: {task}, result: {list(new_result.keys())}, {list(new_result.values())}')
-                total_result += list(new_result.values())
-            print(f'total_result: {total_result}')
-        
-        if args.long_bench:
-            clean_up()
-            # model.config.residual_length = args.residual_length
-            if args.kv_method == 'kivi':
-                model.config.kivi_config.residual_length = args.residual_length
-            elif args.kv_method == 'hqq':
-                model.generation_config.cache_config = args.residual_length
-            model.config.quant_kv_output = False
-            model.config.use_cache = True
-            
-            # if len(args.long_bench_task) == 0 and not args.long_bench_task_e:
-            #     args.long_bench_task = []
-            long_bench_start = time()
-            pred_long_bench(model, tokenizer=get_tokenizer(model_id), save_path=args.long_bench_result_path, long_bench_config=args.long_bench_config, e=args.long_bench_e)
-            eval_long_bench(args.long_bench_result_path, args.long_bench_e)
-            long_bench_time = time() - long_bench_start
-            
-            sentences = []
-            for k, v in vars(args).items():
-                sentences.append(f"{k}: {v}\n")
-            sentences.append(f'Longbench Time: {long_bench_time:.2f}s')
-            sentences.append("\n")
-
-            with open(os.path.join(args.long_bench_result_path, "pred_e" if args.long_bench_e else "pred", 'result.txt'), 'w') as f:
-                for sentence in sentences:
-                    f.write(sentence)
-                    
     print(args)
-    return
-
-    # if args.debug:
-    #     # print(ps[I])
-    #     # plot = Scatter()
-    #     # plot.add(pf, alpha=0.2)
-    #     # plot.add(pf[I, :], color="blue", s=10)
-    #     # plot.add(gs_data, color="red", s=10)
-    #     # plot.show()
-    #     # plot.save(os.path.join(args.save, "best_trade_off_line.png"))
-    #     os.makedirs(args.save, exist_ok=True)
-        
-    #     plt.scatter(complexity_list, [p[args.datasets[0]] for p in ppl_list], color='b', s=5, label='NSGA2')
-    #     if args.greedy_search_result_path:
-    #         with open(args.greedy_search_result_path, 'r') as f:
-    #             gs_data = list(csv.reader(f))
-    #             gs_bits = list(map(float, gs_data[1]))[:-3]
-    #             gs_metric = list(map(float, gs_data[2]))[:-3]
-    #             plt.scatter(gs_bits, gs_metric, color='r', s=5, label='Greedy Search')
-        
-    #     plt.xlabel(f'{args.sec_obj}')
-    #     plt.ylabel('PPL')
-    #     plt.legend()
-    #     plt.show()
-    #     plt.savefig(os.path.join(args.save, "best_trade_off_line.png"), dpi=300)
-
-    sentences = []
-    for k, v in vars(args).items():
-        sentences.append(f"{k}: {v}\n")
-    sentences.append("\n")
-    for a, c, p in zip(arch_list, complexity_list, ppl_list):
-        sentences.append(f"arch: {a}, bits: {c:.4f}, ppl: {p}\n")
-
-    with open(os.path.join(args.save, args.results_file), 'w') as f:
-        for sentence in sentences:
-            f.write(sentence)
-
-    with open(os.path.join(args.save, args.results_csv_file), 'w') as f:
-        writer = csv.writer(f)
-        writer.writerow(['arch', 'bits', 'params', 'sparsity', 'metric', 'latency'] + args.datasets)
-        for a, b, p, s, m, l, ppl in zip(arch_list, bits_list, param_list, sparsity_list, metric_list, latency_list, ppl_list):
-            writer.writerow([a, b, p, s, m, l] + list(ppl.values()))
-
-    with open(os.path.join(args.save, args.results_arch_file), 'w') as f:
-        json.dump({'archive': [[a, c, p] for a, c, p in zip(arch_list, complexity_list, ppl_list)]}, f, ensure_ascii=False, indent=4)
-
-    return
 
 
-
+def build_parser():
+    p = argparse.ArgumentParser(
+        description='Stage 2: fit surrogate from results.csv, pick final '
+                    'architecture under COMP_OBJ, evaluate + benchmark.')
+    # model / config
+    p.add_argument('--model_path', type=str, default='')
+    p.add_argument('--model_name', type=str, default='')
+    p.add_argument('--config', type=str, default='config/llama.json')
+    p.add_argument('--dtype', type=str, default='auto',
+                   choices=['float16', 'float', 'fp16', 'bfloat16', 'bfloat',
+                            'bf16', 'auto'])
+    p.add_argument('--gpu_id', type=str, default='0')
+    p.add_argument('--seed', type=int, default=0)
+    # quant methods / bits
+    p.add_argument('--w_method', type=str, nargs='+', default=[],
+                   choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'])
+    p.add_argument('--kv_method', type=str, default='kivi',
+                   choices=['fp16', 'hqq', 'kivi'])
+    p.add_argument('--quant_model_paths', type=str, nargs='+', default=[])
+    p.add_argument('--w_bits', type=int, nargs='+', default=[])
+    p.add_argument('--k_bits', type=int, nargs='+', default=[2, 4])
+    p.add_argument('--v_bits', type=int, nargs='+', default=[2, 4])
+    p.add_argument('--w_group_size', type=int, default=128)
+    p.add_argument('--k_group_size', type=int, default=128)
+    p.add_argument('--v_group_size', type=int, default=128)
+    p.add_argument('--residual_length', type=int, default=128)
+    p.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'])
+    p.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'])
+    p.add_argument('--outlier_path', type=str, default='')
+    # calibration data / metric
+    p.add_argument('--datasets', type=str, nargs='+', default=[])
+    p.add_argument('--metric', type=str, default='ppl')
+    p.add_argument('--loss_func', type=str, default='cross_entropy')
+    p.add_argument('--stride', type=int, default=None)
+    p.add_argument('--last_tokens', type=int, default=None)
+    p.add_argument('--prefill_prompt', action='store_true')
+    p.add_argument('--n_sample', type=int, default=128)
+    p.add_argument('--seqlen', type=int, default=2048)
+    p.add_argument('--min_seqlen', type=int, default=0)
+    p.add_argument('--data_batch_size', type=int, default=1)
+    p.add_argument('--n_token', type=int, default=0)
+    # expr archives + additive-metric scales (fallback when no sample CSV)
+    p.add_argument('--w_expr', type=str, default='')
+    p.add_argument('--kv_expr', type=str, default='')
+    p.add_argument('--kvdim_expr', type=str, default='')
+    p.add_argument('--eff_kv_expr', type=str, default='')
+    p.add_argument('--expr_front', action='store_true')
+    p.add_argument('--sqrt', action='store_true')
+    p.add_argument('--w_scale', type=float, default=1.0)
+    p.add_argument('--kv_scale', type=float, default=1.0)
+    p.add_argument('--kvdim_scale', type=float, default=1.0)
+    p.add_argument('--eff_kv_scale', type=float, default=1.0)
+    # surrogate (predictor.factory.get_predictor)
+    p.add_argument('--sample_path', type=str, default='',
+                   help='results.csv from sample_surrogate.py (surrogate '
+                        'training data). If omitted, additive metric is used.')
+    p.add_argument('--surrogate', type=str, default='rbf', choices=SURROGATES,
+                   help='predictor.factory model: rbf | gp | mlp | carts | as')
+    p.add_argument('--rbf_kernel', type=str, default='tps',
+                   choices=['cubic', 'tps', 'linear'],
+                   help='RBF kernel when --surrogate rbf (v5: tps best)')
+    # comp_obj range + final selection
+    p.add_argument('--comp_obj', type=str, nargs='+', default=[])
+    p.add_argument('--comp_obj_min', type=float, nargs='+', default=[])
+    p.add_argument('--comp_obj_max', type=float, nargs='+', default=[])
+    p.add_argument('--prefer', type=str, nargs='+', default=[],
+                   help='preferences (metric#0.0 memory#6.2e9)')
+    p.add_argument('--high_tradeoff', type=str, nargs='+', default=[])
+    p.add_argument('-n', type=int, default=1,
+                   help='number of architectures desired')
+    # long-ppl key-token options (consumed by the evaluator)
+    p.add_argument('--use_key_token', action='store_true')
+    p.add_argument('--trunc_len', type=int, default=512)
+    p.add_argument('--sliding_window', type=int, default=128)
+    p.add_argument('--alpha', type=int, default=2)
+    p.add_argument('--beta', type=int, default=-2)
+    p.add_argument('--key_token_path', type=str, default='')
+    # output
+    p.add_argument('--save', type=str, default='')
+    p.add_argument('--results_csv_file', type=str, default='results.csv')
+    # benchmarks
+    p.add_argument('--latency', action='store_true')
+    p.add_argument('--zeroshot', action='store_true')
+    p.add_argument('--tasks', type=str, nargs='+',
+                   default=['coqa', 'gsm8k', 'truthfulqa'])
+    p.add_argument('--lm_eval_batch_size', type=int, default=None)
+    p.add_argument('--longbench', action='store_true')
+    p.add_argument('--longbench_e', action='store_true')
+    p.add_argument('--longbench_result_path', type=str, default='')
+    p.add_argument('--longbench_config', type=str, default='')
+    p.add_argument('--longbench_task', type=str, nargs='+', default=[])
+    p.add_argument('--pass_key_file', type=str, default='')
+    p.add_argument('--minilongbench', action='store_true')
+    p.add_argument('--minilongbench_result_path', type=str, default='')
+    p.add_argument('--minilongbench_data_dir', type=str, default='')
+    p.add_argument('--ruler', action='store_true')
+    p.add_argument('--ruler_task', type=str, nargs='+', default=None,
+                   choices=["niah_single_1", "niah_single_2", "niah_single_3",
+                            "niah_multikey_1", "niah_multikey_2",
+                            "niah_multikey_3", "niah_multivalue",
+                            "niah_multiquery", "ruler_vt", "ruler_cwe",
+                            "ruler_fwe", "ruler_qa_squad", "ruler_qa_hotpot"])
+    p.add_argument('--ruler_length', type=int, nargs='+', default=[4096])
+    p.add_argument('--ruler_yaml_path', type=str, default='')
+    p.add_argument('--ruler_sample', type=int, default=50)
+    p.add_argument('--ruler_gen_toks', type=int, default=None)
+    p.add_argument('--ruler_batch_size', type=int, default=1)
+    p.add_argument('--ruler_result_path', type=str, default='')
+    p.add_argument('--longeval', action='store_true')
+    p.add_argument('--longeval_test_dir', type=str, default='')
+    p.add_argument('--longeval_num_lines', type=int, nargs='+',
+                   default=[200, 300, 400, 500, 600, 680, 700, 800, 900, 1000,
+                            1100, 1200, 1350])
+    p.add_argument('--longeval_shortest_only', action='store_true')
+    p.add_argument('--longeval_result_path', type=str, default='')
+    # LongEval testcase generation passthrough
+    p.add_argument('--generate_testcases', action='store_true')
+    p.add_argument('--generate_testcases_only', action='store_true')
+    p.add_argument('--generate_testcases_num_lines', type=int, nargs='+',
+                   default=[200, 300, 400, 500, 600, 680, 700, 800, 900, 1000,
+                            1100, 1200, 1350])
+    p.add_argument('--generate_testcases_num_samples', type=int, default=50)
+    p.add_argument('--generate_testcases_line_idx_opt', type=str, default='LRT',
+                   choices=['LRT', 'LRT-ABCindex', 'LRT-UUID', 'LRT-NL'])
+    p.add_argument('--generate_testcases_output_dir', type=str,
+                   default='evaluation')
+    return p
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', type=str, default='',
-                        help='file path to supernet weights')
-    parser.add_argument('--model_name', type=str, default='',
-                        help='file path to supernet weights')
-    parser.add_argument('--config', type=str, default='config/llama.json',
-                        help='')
-    parser.add_argument('--dtype', type=str, default='auto', choices=['float16', 'float', 'fp16', 'bfloat16', 'bfloat', 'bf16', 'auto'],
-                        help='')
-    parser.add_argument('--comp_obj', type=str, nargs='+', default=['bits'], 
-                        help='second objective to optimize simultaneously')
-    parser.add_argument('--comp_obj_min', type=float, nargs='+', default=[],
-                        help='')
-    parser.add_argument('--comp_obj_max', type=float, nargs='+', default=[],
-                        help='')
-    parser.add_argument('--gpu_id', type=str, default='0',
-                        help='id of available gpus')
-    parser.add_argument('--quant_model_paths', type=str, nargs='+', default=[], 
-                        help='')
-    
-    parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
-                        help='')
-    parser.add_argument('--kv_method', type=str, default='kivi', choices=['hqq', 'kivi'],
-                        help='')
-    
-    parser.add_argument('--w_bits', type=int, nargs='+', default=[], 
-                        help='')
-    parser.add_argument('--k_bits', type=int, nargs='+', default=[2, 4], 
-                        help='')
-    parser.add_argument('--v_bits', type=int, nargs='+', default=[2, 4], 
-                        help='')
-    
-    parser.add_argument('--w_group_size', type=int, default=128, 
-                        help='')
-    parser.add_argument('--k_group_size', type=int, nargs='+', action='append', default=[],
-                        help='')
-    parser.add_argument('--v_group_size', type=int, nargs='+', action='append', default=[],
-                        help='')
-    # parser.add_argument('--k_group_size', type=int, default=128, 
-    #                     help='')
-    # parser.add_argument('--v_group_size', type=int, default=128, 
-    #                     help='')
-    
-    parser.add_argument('--residual_length', type=int, default=128, 
-                        help='')
-    # parser.add_argument('--use_flash', action='store_true', help='')
-
-    parser.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'], 
-                        help='')
-    parser.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'], 
-                        help='')
-
-    parser.add_argument('--save', type=str, default='.tmp',
-                        help='location of dir to save')
-    parser.add_argument('--expr', type=str, default='',
-                        help='location of search experiment dir')
-    parser.add_argument('--prefer', type=str, nargs='+', default=[], 
-                        help='preferences in choosing architectures (metric#10 bits#150)')
-    # parser.add_argument('--high_tradeoff', action='store_true', help='')
-    parser.add_argument('--high_tradeoff', type=str, nargs='+', default=[], 
-                        help='')
-    parser.add_argument('-n', type=int, default=1,
-                        help='number of architectures desired')
-    parser.add_argument('--seqlen', type=int, default=2048,
-                        help='')
-    parser.add_argument('--n_sample', type=int, default=128,
-                        help='')
-    parser.add_argument('--n_token', type=int, default=0, 
-                        help='target sequence length for memory calculation')
-    parser.add_argument('--debug', action='store_true', help='')
-    parser.add_argument('--datasets', type=str, nargs='+', default=[], 
-                        help='')
-    parser.add_argument('--only_front', action='store_true', help='')
-    parser.add_argument('--results_file', type=str, default='results.txt',
-                        help='')
-    parser.add_argument('--results_csv_file', type=str, default='results.csv',
-                        help='')
-    parser.add_argument('--results_arch_file', type=str, default='results_arch.json',
-                        help='')
-    parser.add_argument('--outlier_path', type=str, default='',
-                        help='')
-    parser.add_argument('--latency', action='store_true', help='')
-    parser.add_argument('--zeroshot', action='store_true', help='')
-    parser.add_argument('--tasks', type=str, nargs='+', default=['coqa', 'gsm8k', 'truthfulqa'])
-    parser.add_argument('--lm_eval_batch_size', type=int, default=None,
-                        help='')
-    parser.add_argument('--long_bench', action='store_true', help='')
-    parser.add_argument('--long_bench_e', action='store_true',
-                        help='number of architectures desired')
-    parser.add_argument('--long_bench_result_path', type=str, default='',
-                        help='')
-    parser.add_argument('--long_bench_config', type=str, default='',
-                        help='')
-    parser.add_argument('--long_bench_task', type=str, nargs='+', default=[])
-    parser.add_argument('--pass_key_file', type=str, default='',
-                        help='')
-
-
-
-    cfgs = parser.parse_args()
-    main(cfgs)
+    main(build_parser().parse_args())

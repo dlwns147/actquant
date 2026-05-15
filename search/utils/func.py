@@ -1,11 +1,15 @@
+import os
+import json
 import numpy as np
-from accelerate import Accelerator, InitProcessGroupKwargs
-from hqq.models.hf.base import AutoHQQHFModel
-from .dispatch import simple_dispatch_model
 import scipy.stats as stats
 import torch
-from transformers import AutoModelForCausalLM
 from datetime import timedelta
+# NOTE: accelerate / transformers / hqq are imported lazily inside the few
+# functions that need them (init_accelerator / load_hqq_model / get_hfmodel).
+# func.py is imported by nearly every entry point, and eagerly importing
+# accelerate→transformers→hqq cost ~77s on this filesystem (transformers
+# version-metadata scan alone ~59s); the numpy-only combo/sampling paths
+# (build_nd, load_expr, ...) must not pay that.
 import gc
 from copy import deepcopy
 import random
@@ -339,6 +343,7 @@ def getblock(model, config):
 
 
 def init_accelerator(gpu_id, config):
+    from accelerate import Accelerator, InitProcessGroupKwargs
     gpu_id = gpu_id.split(',')
 
     ipg_handler = InitProcessGroupKwargs(
@@ -378,6 +383,8 @@ def load_hqq_model(model_id,
                    use_cache=False,
                    attn_implementation='flash_attention_2',
                    inference=False):
+    from hqq.models.hf.base import AutoHQQHFModel
+    from .dispatch import simple_dispatch_model
 
     # # for fast model loading
     # org_kaiming_uniform = torch.nn.init.kaiming_uniform_
@@ -429,6 +436,7 @@ def get_hfmodel(model_name_or_path: str,
                 use_cache=False,
                 attn_implementation='flash_attention_2',
                 **kwargs):
+    from transformers import AutoModelForCausalLM
 
     # assert kwargs.get('attn_implementation') in ['hf', 'ft']        ## hf : huggingface, ft : faster transformer
     
@@ -492,3 +500,304 @@ def process_dtype(dtype):
         return 'auto'
     else:
         raise NotImplementedError(dtype)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Two-stage post-search shared core (sample_surrogate.py + post_search.py)
+#
+# Only logic both entry points genuinely need lives here:
+#   init_run        seed + config + accelerator + default arch
+#   build_expr_map  load the per-axis search archives
+#   build_nd        vectorised combo space (metric ND + comp_obj ND)
+#   comp_key_order  the get_net_info key order (results.csv complexity rows)
+#   evaluate_metric one calibration-set metric eval (+ KV-cache toggle)
+#
+# results.csv row layout (sample_surrogate writes, post_search reads), matching
+# analysis/v5/_common.py:
+#   rows 0 .. n_comp-1       complexity (comp_key_order; n_comp == 12)
+#   rows n_comp .. +n_ds-1   measured metric, one row per --datasets entry
+#   row  n_comp+n_ds         combined predicted metric (pf column 0)
+#   rows n_comp+n_ds+1 ..    per-axis search metric, order == expr_keys
+# ══════════════════════════════════════════════════════════════════════════
+class RunCtx:
+    """Shared per-run setup: config + accelerator + the default arch."""
+    def __init__(self, config, accelerator, device_map, dtype, group_size,
+                 default_arch, n_block):
+        self.config = config
+        self.accelerator = accelerator
+        self.device_map = device_map
+        self.dtype = dtype
+        self.group_size = group_size
+        self.default_arch = default_arch
+        self.n_block = n_block
+
+
+def init_run(args):
+    set_seed(args.seed)
+    with open(args.config, 'r') as f:
+        config = json.load(f)[args.model_name]
+    accelerator, device_map = init_accelerator(args.gpu_id, config)
+    dtype = process_dtype(args.dtype)
+
+    group_size = {'w': args.w_group_size, 'k': args.k_group_size,
+                  'v': args.v_group_size}
+    n_block = config['n_block']
+    w_linears = config['linear']
+    default_w_bits = max(args.w_bits) if args.w_bits else 16
+    default_k_bits = max(args.k_bits) if args.k_bits else 4
+    default_v_bits = max(args.v_bits) if args.v_bits else 4
+    k_gs = args.k_group_size if isinstance(args.k_group_size, int) else min(args.k_group_size)
+    v_gs = args.v_group_size if isinstance(args.v_group_size, int) else min(args.v_group_size)
+    default_arch = {
+        'q': {
+            'w': {linear: [default_w_bits] * n_block for linear in w_linears},
+            'k': [[default_k_bits, k_gs]] * n_block,
+            'v': [[default_v_bits, v_gs]] * n_block,
+        },
+        'p': {'k': [0] * n_block, 'v': [0] * n_block},
+    }
+    return RunCtx(config, accelerator, device_map, dtype, group_size,
+                  default_arch, n_block)
+
+
+def _adapt_to_n_block(value, n):
+    """Truncate/pad per-layer lists so a source-model subnet fits target
+    n_block. Structural workaround only — choices were tuned for the source
+    model's sensitivity, not the target's (load_expr warns)."""
+    if isinstance(value, dict):
+        return {k: _adapt_to_n_block(v, n) for k, v in value.items()}
+    if isinstance(value, list):
+        if len(value) == 0 or not isinstance(value[0], (int, float, list)):
+            return value
+        if len(value) == n:
+            return value
+        if len(value) > n:
+            return value[:n]
+        return list(value) + [value[-1]] * (n - len(value))
+    return value
+
+
+def _first_list_len(s):
+    if isinstance(s, dict):
+        for vv in s.values():
+            r = _first_list_len(vv)
+            if r is not None:
+                return r
+    elif isinstance(s, list) and s and not isinstance(s[0], dict):
+        return len(s)
+    return None
+
+
+def load_expr(expr_path, comp_obj_key, config, group_size, n_block, expr_front):
+    from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
+    with open(expr_path, 'r') as f:
+        result_json = json.load(f)
+    archive = result_json['archive'] + result_json['candidates']
+    raw_subnets = [v[0] for v in archive]
+    if raw_subnets:
+        src_n = _first_list_len(raw_subnets[0])
+        if src_n is not None and src_n != n_block:
+            print(f"[load_expr] WARNING: {os.path.basename(expr_path)} subnets have "
+                  f"{src_n} layers but target config has {n_block}; auto-truncating/"
+                  f"padding. Per-layer choices were tuned for the source model's "
+                  f"sensitivity, not the target's — NOT comparable to a native search.")
+        raw_subnets = [_adapt_to_n_block(s, n_block) for s in raw_subnets]
+    subnets_arr = np.array(raw_subnets)
+    metric_vals = [v[1] for v in archive]
+    comp_vals = [get_net_info(n, config, group_size)[comp_obj_key]
+                 for n in subnets_arr]
+    sort_idx = np.argsort(metric_vals)
+    F = np.column_stack((metric_vals, comp_vals))[sort_idx]
+    subnets_arr = subnets_arr[sort_idx]
+    if expr_front:
+        front = NonDominatedSorting().do(F, only_non_dominated_front=True)
+        F = F[front]
+        subnets_arr = subnets_arr[front]
+    return subnets_arr, F
+
+
+def build_expr_map(args, ctx):
+    """Load each provided --*_expr archive. Returns ordered {key: (sv, fv)}."""
+    expr_map = {}
+    spec = [('w', args.w_expr, 'wbits'),
+            ('kv', args.kv_expr, 'kvbits'),
+            ('kvdim', args.kvdim_expr, 'kvdim'),
+            ('eff_kv', args.eff_kv_expr, 'eff_kvbits')]
+    for key, path, comp_key in spec:
+        if path:
+            expr_map[key] = load_expr(path, comp_key, ctx.config, ctx.group_size,
+                                      ctx.n_block, args.expr_front)
+    assert len(expr_map) >= 1, ("At least one of --w_expr, --kv_expr, "
+                                "--kvdim_expr, --eff_kv_expr must be provided")
+    return expr_map
+
+
+class NDCombo:
+    """The vectorised combo space: per-axis subnet/metric arrays + comp_obj ND
+    arrays + the additive combined-metric ND array (args scales)."""
+    def __init__(self, expr_keys, esm, efm, nd_shape, new_metric_nd,
+                 comp_nd_list, metric_1d):
+        self.expr_keys = expr_keys
+        self.esm = esm          # {key: subnet array}
+        self.efm = efm          # {key: (metric, comp) F array}
+        self.nd_shape = nd_shape
+        self.new_metric_nd = new_metric_nd      # additive, args scales
+        self.comp_nd_list = comp_nd_list
+        self.metric_1d = metric_1d              # [per-axis raw metric], order==expr_keys
+
+    @property
+    def n_total(self):
+        return int(np.prod(self.nd_shape))
+
+
+def build_nd(args, ctx, expr_map):
+    """Vectorised combo builder (port of post_search_split.py).
+
+    new_metric_nd uses the args scales (additive); post_search overrides the
+    ranking with a fitted surrogate, sample_surrogate uses it for candidate
+    ordering / quantile axes.
+    """
+    expr_keys = list(expr_map.keys())
+    scales = {'w': args.w_scale, 'kv': args.kv_scale,
+              'kvdim': args.kvdim_scale, 'eff_kv': args.eff_kv_scale}
+    _esm = {k: sv for k, (sv, fv) in expr_map.items()}
+    _efm = {k: fv for k, (sv, fv) in expr_map.items()}
+    nd_shape = tuple(len(_esm[k]) for k in expr_keys)
+    n_dims = len(nd_shape)
+    # Guard: build_nd materialises full nd_shape arrays (new_metric_nd + comp).
+    # An archive loaded without --expr_front keeps every archive+candidate point
+    # per axis, so the Cartesian product explodes (e.g. 10450×2828×4173 ≈ 1.2e11
+    # → 919 GiB float64). Fail fast with an actionable message instead.
+    _n_total = 1
+    for _s in nd_shape:
+        _n_total *= int(_s)
+    _MAX_COMBO = 5e8
+    if _n_total > _MAX_COMBO:
+        raise SystemExit(
+            f"[build_nd] combo space too large: nd_shape={nd_shape} "
+            f"(n_total={_n_total:.3e} > {_MAX_COMBO:.0e}); "
+            f"new_metric_nd alone would need ~{_n_total * 8 / 2**30:.0f} GiB. "
+            f"Per-axis sizes {dict(zip(expr_keys, nd_shape))} suggest the expr "
+            f"archives were loaded WITHOUT Pareto filtering — pass --expr_front "
+            f"(stage-1 sample_surrogate uses it, so stage-2 must too), or "
+            f"tighten --comp_obj_min/--comp_obj_max.")
+    config, group_size, default_arch = ctx.config, ctx.group_size, ctx.default_arch
+
+    def _bcast_1d(arr, ax):
+        shape = [1] * n_dims
+        shape[ax] = len(arr)
+        return np.broadcast_to(arr.reshape(shape), nd_shape)
+
+    def _bcast_2d(arr, ax0, ax1):
+        shape = [1] * n_dims
+        shape[ax0] = arr.shape[0]
+        shape[ax1] = arr.shape[1]
+        return np.broadcast_to(arr.reshape(shape), nd_shape)
+
+    metric_1d = [_efm[k][:, 0] for k in expr_keys]
+    metric_1d_used = [np.sqrt(m) if args.sqrt else m for m in metric_1d]
+    scale_vals = [scales[k] for k in expr_keys]
+    new_metric_nd = sum(s * a for s, a in
+                        zip(scale_vals, np.ix_(*metric_1d_used)))
+
+    comp_nd_list = []
+    for obj in args.comp_obj:
+        if obj == 'wbits':
+            ax = expr_keys.index('w')
+            v = np.array([get_net_info(sv, config, group_size)['wbits']
+                          for sv in _esm['w']])
+            comp_nd_list.append(_bcast_1d(v, ax))
+        elif obj in ('kvbits', 'kbits', 'vbits'):
+            kv_key = 'eff_kv' if 'eff_kv' in expr_keys else 'kv'
+            ax = expr_keys.index(kv_key)
+            v = np.array([get_net_info(sv, config, group_size)[obj]
+                          for sv in _esm[kv_key]])
+            comp_nd_list.append(_bcast_1d(v, ax))
+        elif obj in ('kvdim', 'kdim', 'vdim'):
+            kv_key = 'eff_kv' if 'eff_kv' in expr_keys else 'kvdim'
+            ax = expr_keys.index(kv_key)
+            v = np.array([get_net_info(sv, config, group_size)[obj]
+                          for sv in _esm[kv_key]])
+            comp_nd_list.append(_bcast_1d(v, ax))
+        elif obj in ('eff_kvbits', 'eff_kbits', 'eff_vbits'):
+            t_map = {'eff_kvbits': 'kv', 'eff_kbits': 'k', 'eff_vbits': 'v'}
+            t = t_map[obj]
+            if 'eff_kv' in expr_keys:
+                ax = expr_keys.index('eff_kv')
+                v = np.array([get_net_info(sv, config, group_size)[obj]
+                              for sv in _esm['eff_kv']])
+                comp_nd_list.append(_bcast_1d(v, ax))
+            else:
+                assert 'kv' in expr_keys and 'kvdim' in expr_keys, \
+                    f"'{obj}' requires eff_kv_expr or both kv_expr and kvdim_expr"
+                vals_2d = compute_eff_kvbits_batch(_esm['kv'], _esm['kvdim'],
+                                                   config, target=t)
+                comp_nd_list.append(_bcast_2d(vals_2d, expr_keys.index('kv'),
+                                              expr_keys.index('kvdim')))
+        elif obj == 'memory':
+            if 'w' in expr_keys:
+                w_mem = np.array([compute_weight_memory(sv, config, group_size)
+                                  for sv in _esm['w']])
+                mem_nd = _bcast_1d(w_mem, expr_keys.index('w')).astype(np.float64)
+            else:
+                mem_nd = np.full(nd_shape,
+                                 compute_weight_memory(default_arch, config,
+                                                       group_size),
+                                 dtype=np.float64)
+            if 'eff_kv' in expr_keys:
+                kv_cache = np.array([compute_cache_memory_single(sv, config,
+                                                                 args.n_token)
+                                     for sv in _esm['eff_kv']])
+                mem_nd = mem_nd + _bcast_1d(kv_cache, expr_keys.index('eff_kv'))
+            elif 'kv' in expr_keys and 'kvdim' in expr_keys:
+                kv_2d = compute_cache_memory_batch(_esm['kv'], _esm['kvdim'],
+                                                   config, args.n_token)
+                mem_nd = mem_nd + _bcast_2d(kv_2d, expr_keys.index('kv'),
+                                            expr_keys.index('kvdim'))
+            elif 'kv' in expr_keys:
+                kv_1d = compute_cache_memory_batch(_esm['kv'], None, config,
+                                                   args.n_token)
+                mem_nd = mem_nd + _bcast_1d(kv_1d, expr_keys.index('kv'))
+            elif 'kvdim' in expr_keys:
+                kv_1d = compute_cache_memory_batch([default_arch], _esm['kvdim'],
+                                                   config, args.n_token)[0]
+                mem_nd = mem_nd + _bcast_1d(kv_1d, expr_keys.index('kvdim'))
+            comp_nd_list.append(mem_nd)
+        else:
+            raise ValueError(
+                f"comp_obj='{obj}' not supported for vectorized computation. "
+                f"Supported: wbits, kvbits, kbits, vbits, kvdim, kdim, vdim, "
+                f"eff_kvbits, eff_kbits, eff_vbits, memory")
+
+    return NDCombo(expr_keys, _esm, _efm, nd_shape, new_metric_nd,
+                   comp_nd_list, metric_1d)
+
+
+def comp_key_order(config, group_size):
+    """get_net_info key order — the complexity rows of results.csv."""
+    return list(get_net_info({}, config, group_size=-1, n_token=0).keys())
+
+
+def configure_model_cache(args, model, *, use_cache):
+    """Toggle KV-cache residual length / quant_kv_output on the sampled model.
+
+    use_cache=True  → benchmarks / strided / prefill_prompt (needs past_kv)
+    use_cache=False → single-shot loss with quantised KV output
+    """
+    res_len = args.residual_length if use_cache else 0
+    if 'kivi' in args.kv_method:
+        model.config.kivi_config.residual_length = res_len
+    elif 'hqq' in args.kv_method:
+        model.generation_config.cache_config = res_len
+    model.config.quant_kv_output = not use_cache
+    model.config.use_cache = use_cache
+
+
+def evaluate_metric(args, arch, model, evaluator, accelerator):
+    """Run the calibration-set metric (loss/JSD/ppl) for one architecture."""
+    use_cache = args.stride is not None or args.prefill_prompt
+    configure_model_cache(args, model, use_cache=use_cache)
+    return evaluator.eval(arch=arch, metric=args.metric, model=model,
+                          accelerator=accelerator, loss_func=args.loss_func,
+                          stride=args.stride,
+                          prefill_prompt=args.prefill_prompt)[0]

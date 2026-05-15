@@ -2,10 +2,8 @@ DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-# ── Stage 2: fit surrogate from results.csv → pick final arch → benchmark ──
-# Pairs with scripts/sample_surrogate.sh (stage 1). SAMPLE_PATH must
-# point at a results.csv it wrote; the expr archives / model / config MUST
-# match the ones used in stage 1.
+# ── Stage 1: sample architectures + write surrogate-training results.csv ──
+# Output results.csv feeds scripts/post_search.sh (--sample_path).
 
 MODEL_PATH=/SSD/huggingface/meta-llama
 MODEL_NAME=Llama-3.1-8B-Instruct
@@ -46,30 +44,10 @@ done
 QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 
 SEED=0
-
-# ── COMP_OBJ range (the deployment budget) ──
-COMP_OBJ=(memory)
-COMP_OBJ_VAL=(6271016960)
 N_TOKEN=16384
-COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
-
-MIN_COMP_OBJ_LIST=()
-MAX_COMP_OBJ_LIST=()
-for IDX in "${!COMP_OBJ[@]}"; do
-    MIN_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} - ${COMP_OBJ_THRESHOLD_LIST[$IDX]}" | bc) )
-    MAX_COMP_OBJ_LIST+=( $(echo "scale=3; ${COMP_OBJ_VAL[$IDX]} + ${COMP_OBJ_THRESHOLD_LIST[$IDX]}" | bc) )
-done
-COMP_OBJ_TEXT=$(IFS="_" ; echo "${COMP_OBJ[*]}")
-COMP_OBJ=$(IFS=" " ; echo "${COMP_OBJ[*]}")
-MIN_COMP_OBJ=$(IFS=" " ; echo "${MIN_COMP_OBJ_LIST[*]}")
-MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
-MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
-MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
-
-PREFER="metric#0.0"
-N=1
 
 DATASETS="wikitext2"
+DATASETS_TEXT="wikitext2"
 METRIC="loss"
 LOSS_FUNC="jsd"
 
@@ -77,6 +55,7 @@ N_SAMPLE=128
 SEQLEN=2048
 MIN_SEQLEN=2048
 DATA_BATCH_SIZE=1
+
 STRIDE=128
 PREFILL_PROMPT=True
 LAST_TOKENS=512
@@ -86,32 +65,52 @@ SLIDING_WINDOW=64
 ALPHA=2
 BETA=-2
 
-# ── per-axis search archives — MUST match stage 1 ──
+# ── per-axis search archives ──
+# Qwen2.5-7B-Instruct
 # W_EXPR=save/search/think/2605112127_Qwen2.5-7B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
 # KV_EXPR=save/search/think/2605112126_Qwen2.5-7B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
 # KVDIM_EXPR=save/search/think/2605112128_Qwen2.5-7B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
-# SAMPLE_PATH=save/result/260513/2605130706_Qwen2.5-7B-Instruct_memory_5957466112.00_6584567808.00_hqq_kivi_wikitext2_1_kv_scale_w_expr_kvdim_expr_qs_metric_w159_metric_kvdim159_rs41/results.csv
 
-# Llama-3.1-8B-Instruct
+# Llama-3.1-8B-Instruct (uncomment + set MODEL_* / CONFIG above)
 W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
 KV_EXPR=save/search/think/2605112033_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_100.stats
 KVDIM_EXPR=save/search/think/2605112036_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
-SAMPLE_PATH=save/result/260513/2605132157_Llama-3.1-8B-Instruct__0_0_awq_kivi_wikitext2_1_kv_scale_0seed_w_expr_kv_expr_kvdim_expr_qs_metric_w05595_metric_kv05595_metric_kvdim05595_rs23/results.csv
 
-# predictor.factory: rbf | gp | mlp | carts | as   (v5: rbf+tps best)
-SURROGATE=rbf
-RBF_KERNEL=tps
+# ── sampling design ──
+RANDOM_SAMPLE=23
+QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.01,0.5,0.99"
+SAMPLING_METHOD=coverage_nsga2_marginal
+COVERAGE_COORD=rank
+COVERAGE_PER_AXIS_AGG=max
 
 W_SCALE=1
 KV_SCALE=1
 KVDIM_SCALE=1
 EFF_KVDIM_SCALE=1
 
-LONGBENCH_CONFIG=utils/longbench_config
-MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}
-PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
-
-SAVE=save/post_search/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${SURROGATE}
+SAVE=save/result/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample
+[ -n "${W_EXPR}" ]      && SAVE+="_w_expr"
+[ -n "${KV_EXPR}" ]     && SAVE+="_kv_expr"
+[ -n "${KVDIM_EXPR}" ]  && SAVE+="_kvdim_expr"
+[ -n "${EFF_KV_EXPR}" ] && SAVE+="_eff_kv_expr"
+if [ -n "${QUANTILE_SAMPLE}" ]; then
+    QS_TEXT=""
+    for entry in ${QUANTILE_SAMPLE}; do
+        metric="${entry%%#*}"; quantiles="${entry#*#}"
+        short_q="${quantiles//0./}"; short_q="${short_q//,/}"
+        QS_TEXT+="_${metric%bits}${short_q}"
+    done
+    SAVE+="_qs${QS_TEXT}"
+fi
+if [ -n "${RANDOM_SAMPLE}" ] && [ "${RANDOM_SAMPLE}" -gt 0 ]; then
+    SAVE+="_rs${RANDOM_SAMPLE}"
+    case "${SAMPLING_METHOD}" in
+        random)                  SAVE+="_r" ;;
+        coverage_nsga2_joint)    SAVE+="_j${COVERAGE_COORD:0:1}" ;;
+        coverage_nsga2_marginal) SAVE+="_m${COVERAGE_COORD:0:1}${COVERAGE_PER_AXIS_AGG:0:1}" ;;
+    esac
+fi
+echo "RESULTS CSV -> ${SAVE}/results.csv"
 
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
@@ -132,7 +131,6 @@ ARGS="--gpu_id ${DEVICES} \
 --metric ${METRIC} \
 --loss_func ${LOSS_FUNC} \
 --seed ${SEED} \
--n ${N} \
 --save ${SAVE} \
 --w_scale ${W_SCALE} \
 --kv_scale ${KV_SCALE} \
@@ -143,12 +141,11 @@ ARGS="--gpu_id ${DEVICES} \
 --min_seqlen ${MIN_SEQLEN} \
 --n_sample ${N_SAMPLE} \
 --data_batch_size ${DATA_BATCH_SIZE} \
---sample_path ${SAMPLE_PATH} \
---surrogate ${SURROGATE} \
---rbf_kernel ${RBF_KERNEL} \
---comp_obj ${COMP_OBJ} \
---comp_obj_min ${MIN_COMP_OBJ} \
---comp_obj_max ${MAX_COMP_OBJ}"
+--random_sample ${RANDOM_SAMPLE} \
+--quantile_sample ${QUANTILE_SAMPLE} \
+--sampling_method ${SAMPLING_METHOD} \
+--coverage_coord ${COVERAGE_COORD} \
+--coverage_per_axis_agg ${COVERAGE_PER_AXIS_AGG}"
 
 for g in "${K_GROUP_SIZE[@]}"; do ARGS+=" --k_group_size ${g} "; done
 for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
@@ -164,13 +161,5 @@ fi
 [ -n "${KVDIM_EXPR}" ]  && ARGS+=" --kvdim_expr ${KVDIM_EXPR}"
 [ -n "${EFF_KV_EXPR}" ] && ARGS+=" --eff_kv_expr ${EFF_KV_EXPR}"
 
-# ── optional benchmarks (uncomment as needed) ──
-# ARGS+=" --zeroshot --tasks coqa truthfulqa gsm8k --lm_eval_batch_size 32"
-# ARGS+=" --minilongbench --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG}"
-# ARGS+=" --pass_key_file ${PASS_KEY_FILE}"
-
-
 N_PROC=1
-CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} post_search.py ${ARGS}
-
-# --prefer ${PREFER}
+CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} sample_surrogate.py ${ARGS}

@@ -98,40 +98,6 @@ SEED=0
 COMP_OBJ_VAL=(6271016960)
 N_TOKEN=16384
 
-# COMP_OBJ_VAL=(5862072320)
-# # COMP_OBJ_VAL=(5666250752)
-# COMP_OBJ_VAL=(5649473536) # LLama 3.1 8B
-# # # # COMP_OBJ_VAL=(5006434304) # LLama 3.1 8B
-# # # # COMP_OBJ_VAL=(4989657088) # LLama 3.1 8B
-# # # # COMP_OBJ_VAL=(4793835520) # LLama 3.1 8B
-# # # # COMP_OBJ_VAL=(4777058304) # LLama 3.1 8B
-# # # COMP_OBJ_VAL=(4134019072) # LLama 3.1 8B
-# N_TOKEN=1024
-
-# COMP_OBJ=(kvbits memory)
-# COMP_OBJ_VAL=(2.25 8264884224)
-# N_TOKEN=131072
-
-# COMP_OBJ_VAL=(10194001920)
-# COMP_OBJ_VAL=(9534185472)
-# COMP_OBJ_VAL=(9321586688)
-# COMP_OBJ_VAL=(8661770240)
-# COMP_OBJ_VAL=(8259117056)
-# COMP_OBJ_VAL=(8046518272)
-# COMP_OBJ_VAL=(7386701824)
-# COMP_OBJ_VAL=(7174103040)
-# # N_TOKEN=1024
-
-
-# # COMP_OBJ_VAL=(25170550784)
-# # COMP_OBJ_VAL=(42137821184)
-# # COMP_OBJ_VAL=(24957952000)
-# # COMP_OBJ_VAL=(41478004736)
-# # COMP_OBJ_VAL=(24298135552)
-# # COMP_OBJ_VAL=(41265405952)
-# COMP_OBJ_VAL=(24085536768)
-# # COMP_OBJ_VAL=(40605589504)
-# N_TOKEN=1048576
 
 # COMP_OBJ_THRESHOLD=$(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc)
 # Loosened from 0.001 (±0.1%) to 0.05 (±5%) so QUANTILE_SAMPLE picks span the
@@ -251,22 +217,15 @@ BETA=-2
 
 # EXPR_FOLDER=save/search/quant
 
-# W_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_200.stats
-# KV_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_100.stats
-# KVDIM_EXPR=save/search/think/..._kvdim_.../iter_N.stats
+# L512 S128
+# W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
+# KV_EXPR=save/search/think/2605112033_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_100.stats
+# KVDIM_EXPR=save/search/think/2605112036_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
 
-W_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_200.stats
-KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603271708_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x3gs0kdim0vdim_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
-KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
-# EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603280405_Llama-3.1-8B-Instruct_eff_kvbits_w4kv234_hqq_kivi_i200n50_w128kv3264128x3_k0_16_32_48_64v0_r128_chto_0.1-5_jsd_wik_128s2048l16384t_rbf_s512/iter_200.stats
-
-# W_EXPR=
-# KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240700_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv24bits_w128kv3264128x2gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
-# KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240659_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_200_n_iter_50_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
-# EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603270923_Llama-3.1-8B-Instruct_eff_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0.1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_10.stats
-
-# W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_200.stats
-# KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
+# L512 S128
+W_EXPR=save/search/think/2605112127_Qwen2.5-7B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
+KV_EXPR=save/search/think/2605112126_Qwen2.5-7B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
+KVDIM_EXPR=save/search/think/2605112128_Qwen2.5-7B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
 
 # RANDOM_SAMPLE=1000
 # RANDOM_SAMPLE=200
@@ -279,17 +238,10 @@ QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.0
 # QUANTILE_SAMPLE="wbits#0.1,0.5,0.9 kvdim#0.1,0.5,0.9"
 # QUANTILE_SAMPLE="metric_w#0.1,0.5,0.9 metric_kvdim#0.1,0.5,0.9"
 
-# How to draw the RANDOM_SAMPLE extras (only matters when QUANTILE_SAMPLE is also set).
-# - random                   : uniform random (legacy default)
-# - coverage_nsga2_joint     : KDTree covering-radius / mean — joint coverage
-# - coverage_nsga2_marginal  : per-axis std-of-gaps, aggregated by COVERAGE_PER_AXIS_AGG
 SAMPLING_METHOD=coverage_nsga2_marginal
 # SAMPLING_METHOD=random
 # SAMPLING_METHOD=coverage_nsga2_joint
 
-# Coordinate space for coverage_nsga2_* fitness.
-# - z    : per-axis loss-value normalised; concentrates picks in long-tail
-# - rank : per-axis rank / (n_axis-1) ∈ [0,1]; distribution-invariant per axis
 COVERAGE_COORD=rank
 # COVERAGE_COORD=z
 
@@ -520,3 +472,58 @@ fi
 N_PROC=1
 # N_PROC=2
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} post_search_split.py ${ARGS}
+
+
+
+# W_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_200.stats
+# KV_EXPR=save/search/quant/2601141301_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf/iter_100.stats
+# KVDIM_EXPR=save/search/think/..._kvdim_.../iter_N.stats
+
+# W_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_200.stats
+# KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603271708_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x3gs0kdim0vdim_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
+# KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603251553_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_512stride/iter_150.stats
+# EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603280405_Llama-3.1-8B-Instruct_eff_kvbits_w4kv234_hqq_kivi_i200n50_w128kv3264128x3_k0_16_32_48_64v0_r128_chto_0.1-5_jsd_wik_128s2048l16384t_rbf_s512/iter_200.stats
+
+# W_EXPR=
+# KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240700_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv24bits_w128kv3264128x2gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
+# KVDIM_EXPR=/NAS/SJ/actquant/search/save/search/think/2603240659_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_200_n_iter_50_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_200.stats
+# EFF_KV_EXPR=/NAS/SJ/actquant/search/save/search/think/2603270923_Llama-3.1-8B-Instruct_eff_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0.1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_32sample_2048seq_16384token_rbf_512stride/iter_10.stats
+
+# W_EXPR=save/search/quant/2508271327_Llama-3.1-8B-Instruct_w_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234k4v4bits_w128kvgs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_200.stats
+# KV_EXPR=save/search/quant/2508271349_Llama-3.1-8B-Instruct_kv_loss_w_hqq_kv_kivi_iter_100_n_iter_30_w4k234v234bits_w128k3264128x3v3264128x3gs_128res_len_k_channel_v_token_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0min_0token_rbf_256trunc_64sw/iter_100.stats
+
+
+# COMP_OBJ_VAL=(5862072320)
+# # COMP_OBJ_VAL=(5666250752)
+# COMP_OBJ_VAL=(5649473536) # LLama 3.1 8B
+# # # # COMP_OBJ_VAL=(5006434304) # LLama 3.1 8B
+# # # # COMP_OBJ_VAL=(4989657088) # LLama 3.1 8B
+# # # # COMP_OBJ_VAL=(4793835520) # LLama 3.1 8B
+# # # # COMP_OBJ_VAL=(4777058304) # LLama 3.1 8B
+# # # COMP_OBJ_VAL=(4134019072) # LLama 3.1 8B
+# N_TOKEN=1024
+
+# COMP_OBJ=(kvbits memory)
+# COMP_OBJ_VAL=(2.25 8264884224)
+# N_TOKEN=131072
+
+# COMP_OBJ_VAL=(10194001920)
+# COMP_OBJ_VAL=(9534185472)
+# COMP_OBJ_VAL=(9321586688)
+# COMP_OBJ_VAL=(8661770240)
+# COMP_OBJ_VAL=(8259117056)
+# COMP_OBJ_VAL=(8046518272)
+# COMP_OBJ_VAL=(7386701824)
+# COMP_OBJ_VAL=(7174103040)
+# # N_TOKEN=1024
+
+
+# # COMP_OBJ_VAL=(25170550784)
+# # COMP_OBJ_VAL=(42137821184)
+# # COMP_OBJ_VAL=(24957952000)
+# # COMP_OBJ_VAL=(41478004736)
+# # COMP_OBJ_VAL=(24298135552)
+# # COMP_OBJ_VAL=(41265405952)
+# COMP_OBJ_VAL=(24085536768)
+# # COMP_OBJ_VAL=(40605589504)
+# N_TOKEN=1048576

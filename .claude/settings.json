@@ -25,7 +25,16 @@
       "Bash(nvidia-smi --query-gpu=index,name,memory.free,memory.total --format=csv,noheader)",
       "Bash(chmod +x /NAS/SJ/actquant/poc/benchmark_proxy/amq_all_random/amq/results/uniform_per_row_jsd/measure_margin.sh)",
       "Bash(./measure_margin.sh)",
-      "Bash(tee measure_margin.log)"
+      "Bash(tee measure_margin.log)",
+      "Read(//SSD/Woo/hqq/Llama-3.1-8B-Instruct_2bit_128gs_1axis/**)",
+      "Bash(nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader,nounits)",
+      "Bash(python3 amq/evaluation/analyze_rand64_search_trajectory.py)",
+      "Bash(python3 amq/evaluation/analyze_rand64_hv.py)",
+      "Bash(python3 amq/evaluation/analyze_rand64_hv_delta.py)",
+      "Bash(python3 amq/results/search_analysis/analyze_rand64_convergence_indicator.py)",
+      "Bash(python3 -c \"import json, sys; d = json.load\\(sys.stdin\\); print\\(list\\(d.keys\\(\\)\\)[:20]\\); print\\('=== sample ==='\\); k0 = list\\(d.keys\\(\\)\\)[0]; print\\(k0, '->', type\\(d[k0]\\), str\\(d[k0]\\)[:300]\\)\")",
+      "Bash(python3 analyze_bit_jsd_correlation.py)",
+      "Bash(python3 analyze_bit_bit_correlation.py)"
     ],
     "additionalDirectories": [
       "/tmp"

@@ -195,6 +195,7 @@ search_woo/
 # setup.py
 search/outlier
 search/visualize
+search/analysis
 
 */.ninja_deps
 *.o
