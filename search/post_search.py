@@ -38,7 +38,70 @@ from utils.minilongbench import pred_minilongbench, eval_minilongbench
 
 warnings.simplefilter("ignore")
 
-SURROGATES = ('rbf', 'gp', 'mlp', 'carts', 'as')
+SURROGATES = ('rbf', 'gp', 'mlp', 'carts', 'as', 'ard_gp')
+
+
+class _ARDGP:
+    """sklearn GaussianProcessRegressor with an ARD kernel (per-dim
+    lengthscales) — ported from analysis/v5/_common.fit_ard_gp. Not in
+    predictor.factory (its 'gp' is a single-lengthscale Kriging GP).
+    Exposes .fit/.predict so it drops into the get_predictor code path."""
+
+    def __init__(self, kernel='matern32', with_noise=True, n_restarts=10):
+        self.kernel = kernel
+        self.with_noise = with_noise
+        self.n_restarts = n_restarts
+        self._gp = None
+
+    def fit(self, X, y):
+        from sklearn.gaussian_process import GaussianProcessRegressor
+        from sklearn.gaussian_process.kernels import (
+            RBF as SKRBF, ConstantKernel as C, WhiteKernel, Matern,
+            RationalQuadratic)
+        d = X.shape[1]
+        ls0, lsb = [1.0] * d, (1e-4, 1e4)
+        base = C(1.0, (1e-4, 1e2))
+        if self.kernel == 'rbf':
+            core = SKRBF(ls0, lsb)
+        elif self.kernel == 'matern52':
+            core = Matern(ls0, lsb, nu=2.5)
+        elif self.kernel == 'matern32':
+            core = Matern(ls0, lsb, nu=1.5)
+        elif self.kernel == 'rq':
+            core = RationalQuadratic(1.0, 1.0, lsb, (1e-2, 1e2))
+        else:
+            raise ValueError(f"unknown ard_kernel '{self.kernel}'")
+        k = base * core
+        if self.with_noise:
+            k = k + WhiteKernel(1e-5, (1e-9, 1e-2))
+            alpha = 1e-8
+        else:
+            alpha = 1e-10
+        self._gp = GaussianProcessRegressor(
+            kernel=k, normalize_y=True,
+            n_restarts_optimizer=self.n_restarts, alpha=alpha)
+        self._gp.fit(X, y)
+        return self
+
+    def predict(self, X):
+        return self._gp.predict(X)
+
+
+def _make_surrogate(args, X, y, M_valid):
+    """Fit the chosen surrogate. ard_gp is handled here; everything else
+    goes through predictor.factory.get_predictor."""
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if args.surrogate == 'ard_gp':
+        return _ARDGP(kernel=args.ard_kernel,
+                      n_restarts=args.gp_n_restarts).fit(X, y)
+    kw = {}
+    if args.surrogate == 'rbf':
+        lb = np.minimum(X.min(0), M_valid.min(0))
+        ub = np.maximum(X.max(0), M_valid.max(0))
+        kw = dict(kernel=args.rbf_kernel, tail='linear',
+                  lb=lb, ub=np.where(ub > lb, ub, lb + 1e-9))
+    return get_predictor(args.surrogate, X, y, **kw)
 
 
 # ───────────────────────── results.csv reader ─────────────────────────
@@ -257,15 +320,7 @@ def main(args):
                 f"{K} expr axes were provided; they must match "
                 f"(expr_keys={expr_keys}).")
         print(f"[surrogate] training data: N={smp['n_valid']} axes={expr_keys}")
-        kw = {}
-        if args.surrogate == 'rbf':
-            lb = np.minimum(smp['X'].min(0), M_valid.min(0))
-            ub = np.maximum(smp['X'].max(0), M_valid.max(0))
-            kw = dict(kernel=args.rbf_kernel, tail='linear',
-                      lb=lb, ub=np.where(ub > lb, ub, lb + 1e-9))
-        model = get_predictor(args.surrogate,
-                              np.asarray(smp['X'], dtype=float),
-                              np.asarray(smp['y'], dtype=float), **kw)
+        model = _make_surrogate(args, smp['X'], smp['y'], M_valid)
         yp_tr = np.asarray(model.predict(np.asarray(smp['X'], float))).reshape(-1)
         ss_r = float(np.sum((smp['y'] - yp_tr) ** 2))
         ss_t = float(np.sum((smp['y'] - smp['y'].mean()) ** 2))
@@ -412,10 +467,16 @@ def build_parser():
                    help='results.csv from sample_surrogate.py (surrogate '
                         'training data). If omitted, additive metric is used.')
     p.add_argument('--surrogate', type=str, default='rbf', choices=SURROGATES,
-                   help='predictor.factory model: rbf | gp | mlp | carts | as')
+                   help='rbf | gp | mlp | carts | as (predictor.factory) | '
+                        'ard_gp (sklearn ARD-GP, analysis/v5)')
     p.add_argument('--rbf_kernel', type=str, default='tps',
                    choices=['cubic', 'tps', 'linear'],
                    help='RBF kernel when --surrogate rbf (v5: tps best)')
+    p.add_argument('--ard_kernel', type=str, default='matern32',
+                   choices=['rbf', 'matern52', 'matern32', 'rq'],
+                   help='ARD kernel when --surrogate ard_gp (v5: matern32)')
+    p.add_argument('--gp_n_restarts', type=int, default=10,
+                   help='n_restarts_optimizer for --surrogate ard_gp')
     # comp_obj range + final selection
     p.add_argument('--comp_obj', type=str, nargs='+', default=[])
     p.add_argument('--comp_obj_min', type=float, nargs='+', default=[])

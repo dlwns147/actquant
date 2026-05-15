@@ -95,7 +95,15 @@ def compute_bits(arch, config, group_size, target='w', include_pruning=True):
     else:
         raise NotImplementedError
 
-def compute_memory(arch, config, group_size, n_token=0, residual_length=0):
+# ThinK residual: the original ThinK_kivi keeps the newest 32 tokens at full
+# head_dim and only channel-prunes everything older (ThinK_orig/ThinK_kivi
+# example.py uses residual_length=32). This is independent of the KV-quant
+# residual_length and is fixed at 32 ("원본대로").
+THINK_RESIDUAL = 32
+
+
+def compute_memory(arch, config, group_size, n_token=0, residual_length=0,
+                   think_residual=THINK_RESIDUAL):
     # arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
     w_group_size = group_size['w']
     weight_memory = 0
@@ -124,17 +132,50 @@ def compute_memory(arch, config, group_size, n_token=0, residual_length=0):
 
     head_dim = int(config['head_dim'])
     p_arch = arch.get('p', {})
+
+    # Two independent token partitions, counted from the newest token:
+    #   * KV-quant residual: the newest `residual_length` tokens stay fp16
+    #     (16-bit, no scale); older tokens are quantized to `bits` (+scale).
+    #   * ThinK residual: when `prune_dim > 0`, only the newest
+    #     `think_residual` (=32, 원본대로) tokens keep full head_dim; older
+    #     tokens drop `prune_dim` channels — applied to both the quantized and
+    #     the fp16 slab, exactly like ThinK_kivi which prunes only the
+    #     non-residual key/value states.
+    R = max(int(residual_length), 0) if residual_length else 0
     cache_memory = 0
     for target in ['k', 'v']:
         kv_dim = int(config['linear_shape'][config[f'{target}_linear']][0])
         n_kv_heads = kv_dim // head_dim
         prune_list = p_arch.get(target, [0] * len(arch['q'][target]))
         for (bits, gs), prune_dim in zip(arch['q'][target], prune_list):
-            effective_kv_dim = n_kv_heads * (head_dim - prune_dim)
-            layer_mem = effective_kv_dim * bits / 8
-            if bits < 16:
-                layer_mem += (effective_kv_dim / gs) * 4 # scale + zero point
-            cache_memory += layer_mem * n_token
+            n_fp = min(R, n_token)                       # newest: fp16
+            n_q = n_token - n_fp                          # older: quantized
+            if prune_dim > 0:
+                n_full = min(int(think_residual), n_token)  # newest: full dim
+            else:
+                n_full = n_token                            # nothing pruned
+            n_pruned = n_token - n_full                  # older: dim reduced
+
+            # Region token counts (newest→oldest order is preserved because
+            # both partitions keep the newest tokens "more precise"):
+            c_fp_full   = min(n_fp, n_full)
+            c_fp_pruned = max(0, n_fp - n_full)
+            c_q_full    = max(0, n_full - n_fp)
+            c_q_pruned  = n_token - max(n_fp, n_full)
+
+            full_dim   = n_kv_heads * head_dim
+            pruned_dim = n_kv_heads * (head_dim - prune_dim)
+
+            def _q_mem(dim):
+                m = dim * bits / 8
+                if bits < 16:
+                    m += (dim / gs) * 4              # scale + zero point
+                return m
+
+            cache_memory += c_fp_full   * full_dim   * 16 / 8
+            cache_memory += c_fp_pruned * pruned_dim * 16 / 8
+            cache_memory += c_q_full    * _q_mem(full_dim)
+            cache_memory += c_q_pruned  * _q_mem(pruned_dim)
 
     return weight_memory + cache_memory
 

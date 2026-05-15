@@ -19,10 +19,10 @@ CONFIG=config/llama.json
 
 USE_KEY_TOKEN=False
 
-# W_METHOD=hqq
-# W_METHOD_TEXT=hqq
-W_METHOD=awq
-W_METHOD_TEXT=awq
+W_METHOD=hqq
+W_METHOD_TEXT=hqq
+# W_METHOD=awq
+# W_METHOD_TEXT=awq
 W_BITS="2 3 4"
 AXIS=1
 W_GROUP_SIZE=128
@@ -87,29 +87,51 @@ ALPHA=2
 BETA=-2
 
 # ── per-axis search archives — MUST match stage 1 ──
-# W_EXPR=save/search/think/2605112127_Qwen2.5-7B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
-# KV_EXPR=save/search/think/2605112126_Qwen2.5-7B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
-# KVDIM_EXPR=save/search/think/2605112128_Qwen2.5-7B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
-# SAMPLE_PATH=save/result/260513/2605130706_Qwen2.5-7B-Instruct_memory_5957466112.00_6584567808.00_hqq_kivi_wikitext2_1_kv_scale_w_expr_kvdim_expr_qs_metric_w159_metric_kvdim159_rs41/results.csv
-
 # Llama-3.1-8B-Instruct
 W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
 KV_EXPR=save/search/think/2605112033_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_100.stats
 KVDIM_EXPR=save/search/think/2605112036_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
 SAMPLE_PATH=save/result/260513/2605132157_Llama-3.1-8B-Instruct__0_0_awq_kivi_wikitext2_1_kv_scale_0seed_w_expr_kv_expr_kvdim_expr_qs_metric_w05595_metric_kv05595_metric_kvdim05595_rs23/results.csv
 
-# predictor.factory: rbf | gp | mlp | carts | as   (v5: rbf+tps best)
+# W_EXPR=save/search/think/2605112127_Qwen2.5-7B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
+# KV_EXPR=save/search/think/2605112126_Qwen2.5-7B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
+# KVDIM_EXPR=save/search/think/2605112128_Qwen2.5-7B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
+# SAMPLE_PATH=save/result/260513/2605130706_Qwen2.5-7B-Instruct_memory_5957466112.00_6584567808.00_hqq_kivi_wikitext2_1_kv_scale_w_expr_kvdim_expr_qs_metric_w159_metric_kvdim159_rs41/results.csv
+
+for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR SAMPLE_PATH; do
+    VAR_VALUE="${!VAR_NAME}"
+    if [ -n "${VAR_VALUE}" ] && [[ "${VAR_VALUE}" != *"${MODEL_NAME}"* ]]; then
+        echo "ERROR: ${VAR_NAME} does not contain MODEL_NAME (${MODEL_NAME}): ${VAR_VALUE}"
+        exit 1
+    fi
+done
+
 SURROGATE=rbf
+SURROGATE=ard_gp
 RBF_KERNEL=tps
 
-W_SCALE=1
-KV_SCALE=1
-KVDIM_SCALE=1
-EFF_KVDIM_SCALE=1
+# TASKS="piqa winogrande hellaswag arc_challenge arc_easy lambada_openai boolq openbookqa social_iqa"
+# TASKS="coqa gsm8k truthfulqa"
+TASKS="coqa truthfulqa gsm8k"
+LM_EVAL_BATCH_SIZE=1
 
 LONGBENCH_CONFIG=utils/longbench_config
 MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
+
+# RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
+RULER_TASK="niah_single_1"
+RULER_YAML_PATH=utils/ruler_utils
+# RULER_LENGTH=4096
+RULER_LENGTH=16384
+# RULER_LENGTH=65536
+# RULER_LENGTH=128000
+# RULER_LENGTH=131072
+RULER_SAMPLE=5
+# RULER_SAMPLE=50
+RULER_BATCH_SIZE=1
+RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs_${SEED}seed
+
 
 SAVE=save/post_search/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${SURROGATE}
 
@@ -134,15 +156,6 @@ ARGS="--gpu_id ${DEVICES} \
 --seed ${SEED} \
 -n ${N} \
 --save ${SAVE} \
---w_scale ${W_SCALE} \
---kv_scale ${KV_SCALE} \
---kvdim_scale ${KVDIM_SCALE} \
---eff_kv_scale ${EFF_KVDIM_SCALE} \
---datasets ${DATASETS} \
---seqlen ${SEQLEN} \
---min_seqlen ${MIN_SEQLEN} \
---n_sample ${N_SAMPLE} \
---data_batch_size ${DATA_BATCH_SIZE} \
 --sample_path ${SAMPLE_PATH} \
 --surrogate ${SURROGATE} \
 --rbf_kernel ${RBF_KERNEL} \
@@ -164,13 +177,24 @@ fi
 [ -n "${KVDIM_EXPR}" ]  && ARGS+=" --kvdim_expr ${KVDIM_EXPR}"
 [ -n "${EFF_KV_EXPR}" ] && ARGS+=" --eff_kv_expr ${EFF_KV_EXPR}"
 
-# ── optional benchmarks (uncomment as needed) ──
-# ARGS+=" --zeroshot --tasks coqa truthfulqa gsm8k --lm_eval_batch_size 32"
+# ARGS+=" --datasets ${DATASETS} --seqlen ${SEQLEN} --min_seqlen ${MIN_SEQLEN} --n_sample ${N_SAMPLE} --data_batch_size ${DATA_BATCH_SIZE}"
+# ARGS+=" --zeroshot --tasks ${TASKS} --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE}"
+# ARGS+=" --longbench --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG}"
 # ARGS+=" --minilongbench --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG}"
+ARGS+=" --ruler --ruler_task ${RULER_TASK} --ruler_yaml_path ${RULER_YAML_PATH} --ruler_result_path ${RULER_RESULT_PATH} --ruler_batch_size ${RULER_BATCH_SIZE} --ruler_sample ${RULER_SAMPLE} --ruler_length ${RULER_LENGTH}"
 # ARGS+=" --pass_key_file ${PASS_KEY_FILE}"
 
 
 N_PROC=1
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} post_search.py ${ARGS}
+
+# W_SCALE=1
+# KV_SCALE=1
+# KVDIM_SCALE=1
+# EFF_KVDIM_SCALE=1
+# --w_scale ${W_SCALE} \
+# --kv_scale ${KV_SCALE} \
+# --kvdim_scale ${KVDIM_SCALE} \
+# --eff_kv_scale ${EFF_KVDIM_SCALE} \
 
 # --prefer ${PREFER}

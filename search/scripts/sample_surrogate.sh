@@ -76,6 +76,14 @@ W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_ki
 KV_EXPR=save/search/think/2605112033_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_100.stats
 KVDIM_EXPR=save/search/think/2605112036_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
 
+for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR; do
+    VAR_VALUE="${!VAR_NAME}"
+    if [ -n "${VAR_VALUE}" ] && [[ "${VAR_VALUE}" != *"${MODEL_NAME}"* ]]; then
+        echo "ERROR: ${VAR_NAME} does not contain MODEL_NAME (${MODEL_NAME}): ${VAR_VALUE}"
+        exit 1
+    fi
+done
+
 # ── sampling design ──
 RANDOM_SAMPLE=23
 QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.01,0.5,0.99"
@@ -83,12 +91,12 @@ SAMPLING_METHOD=coverage_nsga2_marginal
 COVERAGE_COORD=rank
 COVERAGE_PER_AXIS_AGG=max
 
-W_SCALE=1
-KV_SCALE=1
-KVDIM_SCALE=1
-EFF_KVDIM_SCALE=1
+# W_SCALE=1
+# KV_SCALE=1
+# KVDIM_SCALE=1
+# EFF_KVDIM_SCALE=1
 
-SAVE=save/result/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample
+SAVE=save/result/sample/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample_${SEED}seed
 [ -n "${W_EXPR}" ]      && SAVE+="_w_expr"
 [ -n "${KV_EXPR}" ]     && SAVE+="_kv_expr"
 [ -n "${KVDIM_EXPR}" ]  && SAVE+="_kvdim_expr"
@@ -132,10 +140,6 @@ ARGS="--gpu_id ${DEVICES} \
 --loss_func ${LOSS_FUNC} \
 --seed ${SEED} \
 --save ${SAVE} \
---w_scale ${W_SCALE} \
---kv_scale ${KV_SCALE} \
---kvdim_scale ${KVDIM_SCALE} \
---eff_kv_scale ${EFF_KVDIM_SCALE} \
 --datasets ${DATASETS} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
@@ -163,3 +167,8 @@ fi
 
 N_PROC=1
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} sample_surrogate.py ${ARGS}
+
+# --w_scale ${W_SCALE} \
+# --kv_scale ${KV_SCALE} \
+# --kvdim_scale ${KVDIM_SCALE} \
+# --eff_kv_scale ${EFF_KVDIM_SCALE} \
