@@ -102,10 +102,12 @@ def main(args):
                     K=args.random_sample, fitness=fit_mode,
                     coord=args.coverage_coord,
                     per_axis_agg=args.coverage_per_axis_agg,
+                    pareto_select=args.coverage_pareto_select,
                     seed=args.seed, verbose=False)
                 print(f'[coverage_nsga2 fitness={fit_mode} '
                       f'coord={args.coverage_coord} '
-                      f'per_axis_agg={args.coverage_per_axis_agg}] adding '
+                      f'per_axis_agg={args.coverage_per_axis_agg} '
+                      f'pareto_select={args.coverage_pareto_select}] adding '
                       f'{len(I_extra)} coverage-optimised samples (excluding '
                       f'{len(I_quant)} quantile-selected; '
                       f'pool={len(valid_nd_idx) - len(I_quant)})')
@@ -115,11 +117,22 @@ def main(args):
         print(f'[total] {len(I)} architectures to evaluate '
               f'({len(I_quant)} quantile + {len(I_extra)} random)')
         sel_mode = 'quantile+random' if args.random_sample else 'quantile'
+        # Describe the extras-drawing technique (the actual "sampling method").
+        if not (args.random_sample and args.random_sample > 0):
+            samp_desc = 'quantile-only (no extras)'
+        elif args.sampling_method == 'random':
+            samp_desc = 'random'
+        else:
+            samp_desc = (f"{args.sampling_method} ("
+                         f"coord={args.coverage_coord}, "
+                         f"per_axis_agg={args.coverage_per_axis_agg}, "
+                         f"pareto_select={args.coverage_pareto_select})")
 
     elif args.random_sample is not None:
         # select_valid_nd_idx already pre-sampled (or narrowed to the filter).
         I = list(range(len(valid_nd_idx)))
         sel_mode = 'random'
+        samp_desc = 'random (no quantile anchors)'
 
     else:
         raise SystemExit(
@@ -127,7 +140,8 @@ def main(args):
             "and/or --random_sample. prefer / high_tradeoff / top-n selection "
             "lives in post_search.py.")
 
-    print(f'[selection] mode={sel_mode}  |I|={len(I)}  '
+    print(f'[sampling_method] {samp_desc}')
+    print(f'[selection] mode={sel_mode}  method={samp_desc}  |I|={len(I)}  '
           f'|candidates|={len(valid_nd_idx)}  (n_total={nd.n_total})')
 
     # ─────────────────────── evaluate + write results.csv ───────────────────────
@@ -251,14 +265,22 @@ def build_parser():
     p.add_argument('--sampling_method', type=str,
                    default='coverage_nsga2_marginal',
                    choices=['random', 'coverage_nsga2_joint',
-                            'coverage_nsga2_marginal'],
+                            'coverage_nsga2_marginal',
+                            'coverage_nsga2_combined'],
                    help='default = sampling_design FINAL DEFAULT (N4: '
                         'marginal + --coverage_coord rank + '
-                        '--coverage_per_axis_agg max)')
+                        '--coverage_per_axis_agg max). coverage_nsga2_combined '
+                        '= 2-obj (cov_rad, std_max); use with '
+                        '--coverage_pareto_select knee for both-low.')
     p.add_argument('--coverage_coord', type=str, default='rank',
                    choices=['z', 'rank'])
     p.add_argument('--coverage_per_axis_agg', type=str, default='max',
                    choices=['max', 'sum', 'pareto'])
+    p.add_argument('--coverage_pareto_select', type=str, default='auto',
+                   choices=['auto', 'strategy3', 'knee'],
+                   help="multi-obj front -> final K. 'auto' = knee for "
+                        "combined, strategy3 otherwise. 'knee' picks the "
+                        "balanced (both-low) Pareto solution.")
     # long-ppl key-token options (consumed by the evaluator)
     p.add_argument('--use_key_token', action='store_true')
     p.add_argument('--trunc_len', type=int, default=512)

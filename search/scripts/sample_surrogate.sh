@@ -87,9 +87,11 @@ done
 # ── sampling design ──
 RANDOM_SAMPLE=23
 QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.01,0.5,0.99"
-SAMPLING_METHOD=coverage_nsga2_marginal
+# SAMPLING_METHOD=coverage_nsga2_marginal
+SAMPLING_METHOD=coverage_nsga2_combined   # 2-obj (cov_rad, std_max)
 COVERAGE_COORD=rank
 COVERAGE_PER_AXIS_AGG=max
+COVERAGE_PARETO_SELECT=knee
 
 # W_SCALE=1
 # KV_SCALE=1
@@ -116,6 +118,7 @@ if [ -n "${RANDOM_SAMPLE}" ] && [ "${RANDOM_SAMPLE}" -gt 0 ]; then
         random)                  SAVE+="_r" ;;
         coverage_nsga2_joint)    SAVE+="_j${COVERAGE_COORD:0:1}" ;;
         coverage_nsga2_marginal) SAVE+="_m${COVERAGE_COORD:0:1}${COVERAGE_PER_AXIS_AGG:0:1}" ;;
+        coverage_nsga2_combined) SAVE+="_c${COVERAGE_COORD:0:1}${COVERAGE_PARETO_SELECT:0:1}" ;;
     esac
 fi
 echo "RESULTS CSV -> ${SAVE}/results.csv"
@@ -149,7 +152,8 @@ ARGS="--gpu_id ${DEVICES} \
 --quantile_sample ${QUANTILE_SAMPLE} \
 --sampling_method ${SAMPLING_METHOD} \
 --coverage_coord ${COVERAGE_COORD} \
---coverage_per_axis_agg ${COVERAGE_PER_AXIS_AGG}"
+--coverage_per_axis_agg ${COVERAGE_PER_AXIS_AGG} \
+--coverage_pareto_select ${COVERAGE_PARETO_SELECT}"
 
 for g in "${K_GROUP_SIZE[@]}"; do ARGS+=" --k_group_size ${g} "; done
 for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done

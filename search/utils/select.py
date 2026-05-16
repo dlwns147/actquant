@@ -315,6 +315,7 @@ def coverage_subset_nsga2_extras(valid_nd_idx, efm, expr_keys,
                                   fitness='joint',
                                   coord='rank',
                                   per_axis_agg='max',
+                                  pareto_select='auto',
                                   proxy_size=3000,
                                   pop=80, n_gen=80, seed=0, verbose=False):
     """Generate K extras (indices into valid_nd_idx) that maximise pool
@@ -352,6 +353,12 @@ def coverage_subset_nsga2_extras(valid_nd_idx, efm, expr_keys,
       'marginal' — per-axis std-of-consecutive-gaps; aggregator chosen by
                    `per_axis_agg`. Vectorised across population (no Python
                    loop over chromosomes). No KDTree / proxy needed.
+      'combined' — 2-obj NSGA2 minimising (covering radius, max-axis
+                   std-of-gaps) jointly. cov_rad rewards reaching every
+                   region (extent); std_max rewards uniform per-axis spacing.
+                   They are orthogonal and conflict under a skewed (long-tail)
+                   pool z-distribution, so the Pareto front trades reach vs
+                   uniformity. Final K via Strategy-3 greedy union.
 
     per_axis_agg (only used when fitness='marginal'; default 'max'):
       'max'    — single-obj GA on max_k std_k (Tchebycheff). DEFAULT.
@@ -362,6 +369,17 @@ def coverage_subset_nsga2_extras(valid_nd_idx, efm, expr_keys,
       'pareto' — n_axes-obj NSGA2 over (std_axis_0, …, std_axis_{n-1}).
                  Original multi-objective behaviour; final K via Strategy-3
                  greedy union.
+
+    pareto_select (how to collapse a multi-objective Pareto front → final K):
+      'auto'      — DEFAULT. 'knee' when fitness='combined', else 'strategy3'.
+      'strategy3' — union of all Pareto solutions' picks → greedy
+                    worst-proxy-nearest K. cov_rad-driven (biases the final
+                    pick toward the covering-radius end of the front).
+      'knee'      — pick the single Pareto solution at the knee of the front
+                    (argmin of min-max-normalised objective sum). For
+                    'combined' this yields a design that is near-minimal on
+                    BOTH cov_rad and std_max simultaneously. No-op for
+                    single-objective modes (marginal+sum/max).
 
     Args:
         valid_nd_idx : (n_valid, n_dims) int array — each row is a tuple
@@ -397,10 +415,15 @@ def coverage_subset_nsga2_extras(valid_nd_idx, efm, expr_keys,
 
     if coord not in ('z', 'rank'):
         raise ValueError(f"coord must be 'z' or 'rank', got {coord!r}")
-    if fitness not in ('joint', 'marginal'):
-        raise ValueError(f"fitness must be 'joint' or 'marginal', got {fitness!r}")
+    if fitness not in ('joint', 'marginal', 'combined'):
+        raise ValueError(f"fitness must be 'joint'|'marginal'|'combined', got {fitness!r}")
     if fitness == 'marginal' and per_axis_agg not in ('pareto', 'sum', 'max'):
         raise ValueError(f"per_axis_agg must be 'pareto'|'sum'|'max', got {per_axis_agg!r}")
+    if pareto_select not in ('auto', 'strategy3', 'knee'):
+        raise ValueError(f"pareto_select must be 'auto'|'strategy3'|'knee', "
+                         f"got {pareto_select!r}")
+    if pareto_select == 'auto':
+        pareto_select = 'knee' if fitness == 'combined' else 'strategy3'
 
     n_axes  = valid_nd_idx.shape[1]
     n_valid = len(valid_nd_idx)
@@ -432,21 +455,19 @@ def coverage_subset_nsga2_extras(valid_nd_idx, efm, expr_keys,
     PEN_DUP = 5.0   # discourage within-chromosome / vs-anchor duplicates
 
     # ── Pre-compute (constant across generations) ──
-    # Anchor → proxy distance (used as baseline for joint mode)
-    if fitness == 'joint':
+    # Anchor → proxy distance (cov_rad baseline) — needed by joint & combined
+    if fitness in ('joint', 'combined'):
         # cdist returns (n_anchor, n_proxy) — trivial to broadcast-min later.
         d_anchor_proxy = (cdist(anchor_norm, proxy_norm)
                           if len(anchor_norm) > 0
                           else np.full((1, len(proxy_norm)), np.inf))
         anchor_proxy_min = d_anchor_proxy.min(axis=0)   # (n_proxy,)
-    # Anchor sorted per axis (constant) — used by marginal vectorisation
-    if fitness == 'marginal':
-        anchor_sorted_per_axis = np.sort(anchor_norm, axis=0) \
-                                 if len(anchor_norm) > 0 \
-                                 else np.zeros((0, n_axes), dtype=np.float64)
 
-    # n_obj: 2 (joint) | n_axes (marginal+pareto) | 1 (marginal+sum/max)
+    # n_obj: joint→2(cov_rad,mean) | combined→2(cov_rad,std_max)
+    #        marginal+pareto→n_axes | marginal+sum/max→1
     if fitness == 'joint':
+        n_obj_eff = 2
+    elif fitness == 'combined':
         n_obj_eff = 2
     elif per_axis_agg == 'pareto':
         n_obj_eff = n_axes
@@ -473,18 +494,35 @@ def coverage_subset_nsga2_extras(valid_nd_idx, efm, expr_keys,
                 anchor_hit = np.zeros(n_pop, dtype=int)
             penalty = PEN_DUP * (n_within + anchor_hit) / K     # (n_pop,)
 
-            if fitness == 'joint':
+            if fitness in ('joint', 'combined'):
                 # picks_norm: (n_pop, K, n_axes) — gather pool_norm[X_int]
                 picks_norm = pool_norm[X_int]
                 # For each chrom: cdist(picks, proxy) → min over picks-axis
-                # Loop is over n_pop; each cdist call is (K, n_proxy).
-                # Faster than per-chrom KDTree build.
                 d_min = np.zeros((n_pop, len(proxy_norm)), dtype=np.float64)
                 for i in range(n_pop):
                     d_pp = cdist(picks_norm[i], proxy_norm)     # (K, n_proxy)
                     d_min[i] = np.minimum(anchor_proxy_min, d_pp.min(axis=0))
-                F = np.column_stack([d_min.max(axis=1) + penalty,
-                                     d_min.mean(axis=1) + penalty])
+                cov_rad = d_min.max(axis=1)                      # (n_pop,)
+                if fitness == 'joint':
+                    F = np.column_stack([cov_rad + penalty,
+                                         d_min.mean(axis=1) + penalty])
+                else:  # 'combined' — obj2 = max-axis std-of-gaps
+                    n_anchor = len(anchor_norm)
+                    std_max = np.zeros(n_pop, dtype=np.float64)
+                    F_ax = np.zeros((n_pop, n_axes), dtype=np.float64)
+                    for k in range(n_axes):
+                        pk = pool_norm[X_int, k]
+                        if n_anchor > 0:
+                            ak = np.broadcast_to(anchor_norm[:, k],
+                                                 (n_pop, n_anchor))
+                            Sk = np.concatenate([ak, pk], axis=1)
+                        else:
+                            Sk = pk
+                        Sk.sort(axis=1)
+                        F_ax[:, k] = np.std(np.diff(Sk, axis=1), axis=1)
+                    std_max = F_ax.max(axis=1)
+                    F = np.column_stack([cov_rad + penalty,
+                                         std_max + penalty])
             else:
                 # marginal: per-axis std-of-gaps, vectorised across (n_pop, K)
                 # for each axis k: gather pool_norm[picks, k] → (n_pop, K),
@@ -571,6 +609,26 @@ def coverage_subset_nsga2_extras(valid_nd_idx, efm, expr_keys,
                      eliminate_duplicates=True)
     res = minimize(SubsetCoverageProblem(), algo, ('n_gen', n_gen),
                    seed=int(seed), verbose=verbose)
+
+    # ── Knee selection: pick ONE Pareto solution at the front knee ──
+    # (argmin of min-max-normalised objective sum). Only meaningful for a
+    # multi-objective front with >1 solution; single-obj GA has res.X 1-D.
+    if (pareto_select == 'knee' and res.X.ndim > 1 and res.X.shape[0] > 1
+            and res.F.ndim == 2 and res.F.shape[1] > 1):
+        Frng = (res.F.max(0) - res.F.min(0)).clip(1e-9)
+        Fn   = (res.F - res.F.min(0)) / Frng
+        i_knee = int(Fn.sum(axis=1).argmin())
+        knee_picks = res.X[i_knee].astype(int)
+        # Clean: drop within-chrom dups + anchor collisions (GA penalises
+        # these so the knee solution is normally already clean).
+        seen = set(anchor_set); cleaned = []
+        for p in knee_picks:
+            p = int(p)
+            if p not in seen:
+                seen.add(p); cleaned.append(p)
+        if len(cleaned) >= K:
+            return sorted(cleaned[:K])
+        # Rare shortfall → fall through to Strategy-3 (fills remaining).
 
     # Strategy-3: union of all (Pareto / final-pop) solutions' picks → greedy K.
     # For single-obj GA, res.X is 1-D (best chrom). For NSGA2, res.X is

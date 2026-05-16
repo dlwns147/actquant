@@ -35,6 +35,7 @@ MODEL_NAME=Llama-3.1-8B-Instruct
 # MODEL_NAME=Mistral-7B-v0.3
 # MODEL_NAME=Mistral-7B-Instruct-v0.3
 # MODEL_NAME=Mixtral-8x7B-v0.1
+# MODEL_NAME=Mistral-Small-3.1-24B-Instruct-2503
 
 # MODEL_PATH=meta-llama
 # # MODEL_NAME=Llama-3.2-1B-Instruct
@@ -47,5 +48,8 @@ MODEL_NAME=Llama-3.1-8B-Instruct
 # MODEL_PATH=facebook
 # MODEL_NAME=opt-1.3b
 
+MODEL_PATH=google
+MODEL_NAME=gemma-3-12b-it
+# MODEL_NAME=gemma-3-27b-it
 
 python download_hf.py --model_path ${MODEL_PATH} --model_name ${MODEL_NAME}

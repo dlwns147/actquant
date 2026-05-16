@@ -34,7 +34,8 @@
       "Bash(python3 amq/results/search_analysis/analyze_rand64_convergence_indicator.py)",
       "Bash(python3 -c \"import json, sys; d = json.load\\(sys.stdin\\); print\\(list\\(d.keys\\(\\)\\)[:20]\\); print\\('=== sample ==='\\); k0 = list\\(d.keys\\(\\)\\)[0]; print\\(k0, '->', type\\(d[k0]\\), str\\(d[k0]\\)[:300]\\)\")",
       "Bash(python3 analyze_bit_jsd_correlation.py)",
-      "Bash(python3 analyze_bit_bit_correlation.py)"
+      "Bash(python3 analyze_bit_bit_correlation.py)",
+      "Bash(python3 plot_spec_categories.py)"
     ],
     "additionalDirectories": [
       "/tmp"
