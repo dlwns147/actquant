@@ -281,6 +281,15 @@ def main(args):
 
     expr_map = build_expr_map(args, ctx)
     nd = build_nd(args, ctx, expr_map)
+    print(f"[post_search] expr_front={args.expr_front} → "
+          f"{'lazy comp_obj-pruned (no NDS, full archives)' if getattr(nd, 'lazy', False) else 'dense'} "
+          f"path  (n_total={nd.n_total:.3e})")
+    if getattr(nd, 'lazy', False) and not args.sample_path:
+        raise SystemExit(
+            "[post_search] lazy mode (no --expr_front, huge product) sets the "
+            "combined metric to NaN and relies on the surrogate to rank — but "
+            "--sample_path was not given (additive fallback would be all-NaN). "
+            "Provide --sample_path, or pass --expr_front.")
     expr_keys, _esm, _efm = nd.expr_keys, nd.esm, nd.efm
     K = len(expr_keys)
 
@@ -331,6 +340,16 @@ def main(args):
               f"rho={rho:.4f} tau={tau:.4f}")
         pred = np.asarray(model.predict(M_valid)).reshape(-1).astype(float)
         F[:, 0] = pred
+        # tripwire: lazy mode leaves F[:,0]=NaN until this overwrite; any NaN
+        # in the prediction (surrogate failure / leaked sentinel) must abort
+        # rather than silently produce a garbage ranking.
+        n_nan = int(np.isnan(F[:, 0]).sum())
+        if n_nan:
+            raise SystemExit(
+                f"[post_search] {n_nan}/{len(F)} predicted metrics are NaN "
+                f"after surrogate override (surrogate={args.surrogate}). "
+                f"Refusing to rank on NaN — check the surrogate fit / "
+                f"M_valid columns / sample CSV.")
     else:
         print("[surrogate] --sample_path not given → additive "
               "args-scale combined metric")

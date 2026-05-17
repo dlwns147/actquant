@@ -14,7 +14,7 @@ Glossary:
 import itertools
 import numpy as np
 
-from utils.func import get_net_info
+from utils.func import get_net_info, _LazyComp
 
 
 # ───────────────────────── arch construction ─────────────────────────
@@ -145,6 +145,214 @@ def draw_random(n_draw, n_pool, exclude=(), rng=None):
 
 # ───────────────────── candidate-set construction ─────────────────────
 
+# ───────────── lazy (no --expr_front) comp_obj-first pruning ─────────────
+# Every comp_obj is low-rank (single-axis 1D / eff_kvbits 2D / additive
+# memory = w-1D + cache-2D). With a comp_obj window the feasible set is
+# enumerated EXACTLY here without any nd_shape array, returning the same
+# (valid_nd_idx, F) the dense path would — except F[:,0] is NaN (a surrogate
+# must overwrite it; post_search asserts none survives). Candidates are
+# sorted by the first comp_obj value ascending (post_search re-ranks by the
+# surrogate anyway, so this is just a deterministic, useful order).
+
+_LAZY_MAX_FEASIBLE = 5e7   # cap on the POST-filter set, not the full product
+
+
+def _interval(v, lo, hi):
+    return (np.asarray(v) >= lo) & (np.asarray(v) <= hi)
+
+
+def _memory_block(spec, lo, hi):
+    """(group_axes, allowed idx-tuples) for an additive memory window."""
+    kv = spec['kv']
+    if kv['kind'] == 'scalar':
+        kv_vals = np.array([kv['vals']], np.float64)
+        kv_idx = np.zeros((1, 0), np.int64)
+        kv_axes = []
+    elif kv['kind'] == '1d':
+        kv_vals = np.asarray(kv['vals'], np.float64)
+        kv_idx = np.arange(len(kv_vals), dtype=np.int64)[:, None]
+        kv_axes = [kv['axis']]
+    else:
+        kv_vals = np.asarray(kv['vals'], np.float64).ravel()
+        n0, n1 = np.asarray(kv['vals']).shape
+        gj, gk = np.meshgrid(np.arange(n0), np.arange(n1), indexing='ij')
+        kv_idx = np.stack([gj.ravel(), gk.ravel()], 1).astype(np.int64)
+        kv_axes = list(spec['kv']['axes'])
+    if spec['w_axis'] is None:
+        sel = _interval(kv_vals + spec['w_const'], lo, hi)
+        return kv_axes, kv_idx[sel]
+    w_mem = np.asarray(spec['w_mem'], np.float64)
+    order = np.argsort(kv_vals, kind='stable')
+    kv_sorted = kv_vals[order]
+    group = [spec['w_axis']] + kv_axes
+    # Pass 1: count feasible rows via searchsorted only (O(Nw·logNkv), no
+    # allocation) and abort BEFORE materialising — a loose memory window on
+    # full archives is billions of rows (~100s of GiB) and must fail fast.
+    L = np.searchsorted(kv_sorted, lo - w_mem, side='left')
+    R = np.searchsorted(kv_sorted, hi - w_mem, side='right')
+    counts = np.maximum(R - L, 0)
+    total = int(counts.sum())
+    if total > _LAZY_MAX_FEASIBLE:
+        raise SystemExit(
+            f"[lazy] feasible {total:.3e} > {_LAZY_MAX_FEASIBLE:.0e} (memory window admits "
+            f"{total:.3e} (w,kv) pairs of the full no-NDS product). The "
+            f"--comp_obj_min/--comp_obj_max window is far too loose for "
+            f"unfiltered archives — tighten it (e.g. ±0.1% not ±5%), or pass "
+            f"--expr_front to Pareto-filter the per-axis archives first.")
+    if total == 0:
+        return group, np.empty((0, len(group)), np.int64)
+    # Pass 2: now safe to materialise (≤ cap rows)
+    pieces = []
+    for wi in range(len(w_mem)):
+        l, r = int(L[wi]), int(R[wi])
+        if r <= l:
+            continue
+        sel = order[l:r]
+        blk = np.empty((len(sel), 1 + kv_idx.shape[1]), np.int64)
+        blk[:, 0] = wi
+        if kv_idx.shape[1]:
+            blk[:, 1:] = kv_idx[sel]
+        pieces.append(blk)
+    return group, np.concatenate(pieces, 0)
+
+
+def _join_groups(g1, t1, g2, t2):
+    """Inner-join two (axes, idx-tuple) constraint sets on shared axes."""
+    shared = [a for a in g1 if a in g2]
+    if not shared:
+        g = list(g1) + list(g2)
+        return g, np.concatenate(
+            [np.repeat(t1, len(t2), 0), np.tile(t2, (len(t1), 1))], 1)
+    from collections import defaultdict
+    c1 = [g1.index(a) for a in shared]
+    c2 = [g2.index(a) for a in shared]
+    mm = defaultdict(list)
+    for i, r in enumerate(t1):
+        mm[tuple(r[c1].tolist())].append(i)
+    extra2 = [j for j in range(len(g2)) if g2[j] not in shared]
+    g = list(g1) + [g2[j] for j in extra2]
+    rows = [np.concatenate([t1[i], r2[extra2]])
+            for r2 in t2 for i in mm.get(tuple(r2[c2].tolist()), ())]
+    if not rows:
+        return g, np.empty((0, len(g)), np.int64)
+    return g, np.stack(rows, 0).astype(np.int64)
+
+
+def _lazy_feasible(lc, comp_obj_min, comp_obj_max, random_sample,
+                   has_quantile, has_prefer, rng, verbose):
+    if not comp_obj_min:
+        raise SystemExit("[lazy] no --expr_front but no comp_obj range — the "
+                          "full no-NDS product is unbounded. Pass "
+                          "--comp_obj/--comp_obj_min/--comp_obj_max.")
+    n_dims = len(lc.expr_keys)
+    sizes = list(lc.nd_shape)
+    allowed = [np.ones(n, bool) for n in sizes]
+    blocks = []
+    for spec, lo, hi in zip(lc.comp_specs, comp_obj_min, comp_obj_max):
+        if spec['kind'] == '1d':
+            allowed[spec['axis']] &= _interval(spec['vals'], lo, hi)
+        elif spec['kind'] == '2d':
+            a0, a1 = spec['axes']
+            M = _interval(spec['vals'], lo, hi)
+            blocks.append(([a0, a1], np.argwhere(M).astype(np.int64)))
+        else:  # memory
+            blocks.append(_memory_block(spec, lo, hi))
+
+    surv = [np.where(a)[0] for a in allowed]
+    if any(len(s) == 0 for s in surv) or any(len(b[1]) == 0 for b in blocks):
+        if verbose:
+            print('range_idx : 0')
+        return np.empty((0, n_dims), np.int64)
+
+    if not blocks:
+        prod = 1
+        for s in surv:
+            prod *= len(s)
+        if prod > _LAZY_MAX_FEASIBLE:
+            raise SystemExit(
+                f"[lazy] feasible {prod:.3e} > {_LAZY_MAX_FEASIBLE:.0e}; "
+                f"tighten --comp_obj_min/--comp_obj_max "
+                f"(per-axis survivors {[len(s) for s in surv]}).")
+        mesh = np.meshgrid(*surv, indexing='ij')
+        nd_idx = np.stack([m.ravel() for m in mesh], 1).astype(np.int64)
+    else:
+        group, tup = blocks[0]
+        for g2, t2 in blocks[1:]:
+            group, tup = _join_groups(group, tup, g2, t2)
+            if len(tup) == 0:
+                if verbose:
+                    print('range_idx : 0')
+                return np.empty((0, n_dims), np.int64)
+        # Intersect block tuples with single-axis survivors — ONLY for axes
+        # that actually carry a single-axis constraint. comp_obj=[memory]
+        # has no single-axis spec → every `allowed` is all-True → skip
+        # entirely (removes a useless O(len(tup)) python membership loop on
+        # the multi-million-row memory block). Mixed cases (e.g.
+        # comp_obj=[memory,kvbits]) hit only the constrained columns, with a
+        # vectorised np.isin instead of a python `in set` loop. Pure
+        # single-axis comp_obj (wbits/kvbits/kvdim) never reaches here — it
+        # has no blocks and takes the separable Cartesian branch above.
+        constrained = [col for col, axx in enumerate(group)
+                       if not allowed[axx].all()]
+        if constrained:
+            keep = np.ones(len(tup), bool)
+            for col in constrained:
+                keep &= np.isin(tup[:, col], surv[group[col]])
+            tup = tup[keep]
+        if len(tup) == 0:
+            if verbose:
+                print('range_idx : 0')
+            return np.empty((0, n_dims), np.int64)
+        free = [a for a in range(n_dims) if a not in group]
+        free_surv = [surv[a] for a in free]
+        n_free = 1
+        for s in free_surv:
+            n_free *= len(s)
+        total = len(tup) * n_free
+        if total > _LAZY_MAX_FEASIBLE:
+            raise SystemExit(
+                f"[lazy] feasible {total:.3e} > {_LAZY_MAX_FEASIBLE:.0e}; "
+                f"tighten --comp_obj_min/--comp_obj_max "
+                f"(block={len(tup)}, free={n_free}).")
+        nd_idx = np.empty((total, n_dims), np.int64)
+        fmesh = (np.stack([m.ravel() for m in
+                           np.meshgrid(*free_surv, indexing='ij')], 1)
+                 if free else np.zeros((1, 0), np.int64))
+        row = 0
+        for t in tup:
+            seg = nd_idx[row:row + n_free]
+            seg[:, group] = t
+            for ci, axx in enumerate(free):
+                seg[:, axx] = fmesh[:, ci]
+            row += n_free
+
+    if verbose:
+        print(f'range_idx : {len(nd_idx)}')
+    # deterministic, useful order: by the first comp_obj value ascending
+    key = lc.comp_values(lc.comp_specs[0], nd_idx)
+    nd_idx = nd_idx[np.argsort(key, kind='stable')]
+    only_random = (random_sample is not None and not has_quantile
+                   and not has_prefer)
+    if only_random and len(nd_idx) > random_sample:
+        nd_idx = nd_idx[np.sort(rng.choice(len(nd_idx), size=random_sample,
+                                           replace=False))]
+    return nd_idx
+
+
+def _lazy_assemble_F(lc, valid_nd_idx):
+    """assemble_F for the lazy path: F[:,0]=NaN (surrogate must overwrite)."""
+    if len(valid_nd_idx) == 0:
+        return np.empty((0, 1 + 2 * len(lc.expr_keys) + len(lc.comp_specs)),
+                        np.float64)
+    parts = [np.full((len(valid_nd_idx), 1), np.nan, np.float64),
+             np.column_stack([lc.efm[k][valid_nd_idx[:, i]]
+                              for i, k in enumerate(lc.expr_keys)])]
+    if lc.comp_specs:
+        parts.append(np.column_stack(
+            [lc.comp_values(s, valid_nd_idx) for s in lc.comp_specs]))
+    return np.column_stack(parts)
+
+
 def select_valid_nd_idx(nd_shape, new_metric_nd, comp_nd_list,
                         comp_obj_min, comp_obj_max,
                         random_sample, has_quantile, has_prefer,
@@ -158,6 +366,11 @@ def select_valid_nd_idx(nd_shape, new_metric_nd, comp_nd_list,
     """
     if rng is None:
         rng = np.random
+    # lazy (no --expr_front): comp_obj-first sparse pruning, no nd_shape array
+    if isinstance(comp_nd_list, _LazyComp):
+        return _lazy_feasible(comp_nd_list, comp_obj_min, comp_obj_max,
+                              random_sample, has_quantile, has_prefer,
+                              rng, verbose)
     has_filter = len(comp_obj_min) > 0
     only_random = (random_sample is not None and not has_quantile and not has_prefer)
     n_total = int(np.prod(nd_shape))
@@ -191,6 +404,8 @@ def select_valid_nd_idx(nd_shape, new_metric_nd, comp_nd_list,
 
 def assemble_F(valid_nd_idx, expr_keys, efm, comp_nd_list, new_metric_nd):
     """Build F = [combined_metric | per-component metrics | comp_obj_vals]."""
+    if isinstance(comp_nd_list, _LazyComp):
+        return _lazy_assemble_F(comp_nd_list, valid_nd_idx)
     vt = tuple(valid_nd_idx.T)
     parts = [new_metric_nd[vt].reshape(-1, 1),
              np.column_stack([efm[k][valid_nd_idx[:, i]]

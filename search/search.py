@@ -19,7 +19,7 @@ from pymoo.operators.crossover.binx import BinomialCrossover
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.operators.mutation.pm import PolynomialMutation
 
-from search_space.llama import LlamaGroupSizeSearchSpace # LlamaSearchSpace
+from search_space.llama_think import LlamaThinKSearchSpace
 from predictor.factory import get_predictor
 from utils.func import get_net_info, init_accelerator, set_seed, get_correlation
 from utils.ga import MySampling, BinaryCrossover, MyMutation, IntPolynomialMutation, MyTwoPointCrossover, MyUniformCrossover, IntegerFromFloatMutation, IntMutation
@@ -28,7 +28,7 @@ from lm_eval.tasks import TaskManager, get_task_dict
 import warnings
 warnings.simplefilter("ignore")
 
-class Search:
+class SearchThink:
     def __init__(self, config, accelerator, device_map, kwargs):
         self.args = deepcopy(kwargs)
         self.config = config
@@ -37,20 +37,15 @@ class Search:
         self.save_path = kwargs.pop('save', 'save')  # path to save results
         self.result_file = kwargs.pop('result_file', 'results.txt')  # path to save results
         self.resume = kwargs.pop('resume', None)  # resume search from a checkpoint
-        # self.sec_obj = kwargs.pop('sec_obj', 'bits')  # second objective to optimize simultaneously
         self.iterations = kwargs.pop('iterations', 30)  # number of iterations to run search
         self.n_doe = kwargs.pop('n_doe', 100)  # number of architectures to train before fit surrogate model
         self.n_iter = kwargs.pop('n_iter', 8)  # number of architectures to train in each iteration
         self.predictor = kwargs.pop('predictor', 'rbf')  # which surrogate model to fit
-        # self.n_gpus = kwargs.pop('n_gpus', 1)  # number of available gpus
-        # self.gpu = kwargs.pop('gpu', 1)  # required number of gpus per evaluation job
         self.dataset = kwargs.pop('dataset', 'wikitext2')  # which dataset to run search on
-        # self.latency = self.sec_obj if "cpu" in self.sec_obj or "gpu" in self.sec_obj else None
         self.loss_func = kwargs.pop('loss_func', 'jsd')
 
         self.method = {'w': kwargs.pop('w_method', ['fp16']), 'kv': kwargs.pop('kv_method', 'kivi')}
         self.quant_model_paths = kwargs.pop('quant_model_paths', [])
-        # self.quant_model_bits = kwargs.pop('quant_model_bits', [])
 
         model_path = kwargs.pop('model_path', 'meta-llama')
         model_name = kwargs.pop('model_name', 'Llama-2-7b-hf')
@@ -75,18 +70,20 @@ class Search:
 
         w_bits = kwargs.pop('w_bits', [])
         assert len(w_bits) == len(self.quant_model_paths)
-        # w_bits = kwargs.pop('wbits', [2, 3, 4])
-        # a_bits = kwargs.pop('abits', [2, 4, 8, 16])
         k_bits = kwargs.pop('k_bits', [])
         v_bits = kwargs.pop('v_bits', [])
         bits = {'w': w_bits, 'k': k_bits, 'v': v_bits}
         self.bits = bits
 
         w_group_size = kwargs.pop('w_group_size', 128)
-        # a_group_size = kwargs.pop('wbits', [2, 3, 4])
         k_group_size = kwargs.pop('k_group_size', [[128]])
         v_group_size = kwargs.pop('v_group_size', [[128]])
         self.group_size = {'w': w_group_size, 'k': k_group_size, 'v': v_group_size}
+
+        # Pruning dim options: 0 = no pruning, head_dim//2 = prune 50%
+        # K and V grids are configured independently.
+        self.k_pruning_dim = kwargs.pop('k_pruning_dim', None)
+        self.v_pruning_dim = kwargs.pop('v_pruning_dim', None)
 
         self.residual_length = kwargs.pop('residual_length', 128)
         self.verbosity = kwargs.pop('verbosity', 'FATAL')
@@ -96,14 +93,15 @@ class Search:
         self.comp_obj = kwargs.pop('comp_obj', ['wbits', 'kvbits'])  # second objective to optimize simultaneously
         self.comp_obj_min = kwargs.pop('comp_obj_min', [min(w_bits), min(k_bits)])
         self.comp_obj_max = kwargs.pop('comp_obj_max', [max(w_bits), max(k_bits)])        
-        # assert len(self.sec_obj_range) == 2, "len(sec_obj_range) should be 2"
         assert len(self.comp_obj) == len(self.comp_obj_min) and len(self.comp_obj_min) == len(self.comp_obj_max)
-        # self.layer_prune_range = kwargs.pop('layer_prune_range', [1, 1])
                 
         self.n_token = kwargs.pop('n_token', 0)
         if 'memory' in self.comp_obj:
             assert self.n_token > 0, "n_token should be bigger than 0 when using memory objective."
             
+        self.stride = kwargs.pop('stride', 0)
+        self.prefill_prompt = kwargs.pop('prefill_prompt', False)
+        self.last_tokens = kwargs.pop('last_tokens', None)
         self.use_key_token = kwargs.pop('use_key_token', False)
         self.trunc_len = kwargs.pop('trunc_len', 512)
         self.sliding_window = kwargs.pop('sliding_window', 128)
@@ -119,12 +117,11 @@ class Search:
         
         if self.sensitivity_result_path:
             for target in pass_module.keys():
-                # if any([target in obj for obj in self.comp_obj]):
-                    with open(os.path.join(self.sensitivity_result_path, f'{target}.csv'), 'r') as f:
-                        module_list, sensitivity = list(csv.reader(f))
-                        sensitivity = list(map(float, sensitivity))
-                        total_module[target] = list(map(int, module_list)) if target in ['k', 'v'] else module_list
-                        total_sensitivity[target] = sensitivity
+                with open(os.path.join(self.sensitivity_result_path, f'{target}.csv'), 'r') as f:
+                    module_list, sensitivity = list(csv.reader(f))
+                    sensitivity = list(map(float, sensitivity))
+                    total_module[target] = list(map(int, module_list)) if target in ['k', 'v'] else module_list
+                    total_sensitivity[target] = sensitivity
             total_sensitivity_list = np.nan_to_num(np.concatenate(list(total_sensitivity.values())), nan=float('inf'))
             upper_bound = np.median(total_sensitivity_list) * kwargs.pop('sensitivity_threshold', 2)
             print(f'upper_bound: {upper_bound}')
@@ -132,12 +129,11 @@ class Search:
 
             start = 0
             for target in pass_module.keys():
-                # if any([target in obj for obj in self.comp_obj]):
-                    end = start + len(total_module[target])
-                    for idx in pass_idx_list:
-                        if start <= idx and idx < end:
-                            pass_module[target].append(total_module[target][idx - start])
-                    start = end
+                end = start + len(total_module[target])
+                for idx in pass_idx_list:
+                    if start <= idx and idx < end:
+                        pass_module[target].append(total_module[target][idx - start])
+                start = end
 
         self.pass_module = pass_module
         self.args['pass_module'] = pass_module
@@ -148,7 +144,6 @@ class Search:
             accelerator=accelerator,
             model_id=model_id,
             method=self.method,
-            # quant_model_bits=self.quant_model_bits,
             quant_model_paths=self.quant_model_paths,
             outlier=torch.load(outlier_path) if outlier_path else None,
             seqlen=kwargs.pop('seqlen', 2048),
@@ -161,7 +156,6 @@ class Search:
             bits=bits,
             group_size=self.group_size,
             residual_length=self.residual_length,
-            # use_flash=kwargs.pop('use_flash', False),
             quant_kv_output=kwargs.pop('quant_kv_output', True),
             k_quant_scheme=kwargs.pop('k_quant_scheme', 'channel'),
             v_quant_scheme=kwargs.pop('v_quant_scheme', 'token'),
@@ -172,14 +166,15 @@ class Search:
             task_manager=self.task_manager,
             task_dict=self.task_dict,
             verbosity=self.verbosity,
+            last_tokens=self.last_tokens,
             use_key_token=self.use_key_token,
             trunc_len=self.trunc_len,
             sliding_window=self.sliding_window,
             alpha=self.alpha,
             beta=self.beta,
-            key_token_path=self.key_token_path
+            key_token_path=self.key_token_path,
         )
-        self.search_space = LlamaGroupSizeSearchSpace(
+        self.search_space = LlamaThinKSearchSpace(
             bits=self.bits,
             group_size=self.group_size,
             pass_module=self.pass_module,
@@ -190,6 +185,8 @@ class Search:
             n_token=self.n_token,
             outlier_bits=outlier_bits,
             only_outlier_bits=kwargs.pop('only_outlier_bits', False),
+            k_pruning_dim=self.k_pruning_dim,
+            v_pruning_dim=self.v_pruning_dim,
         )
         self.ga_pop_size = kwargs.pop('ga_pop_size', 40)
         self.subset_pop_size = kwargs.pop('subset_pop_size', 100)
@@ -209,7 +206,6 @@ class Search:
             archive, start_it = self._resume_from_dir()
 
         else:
-            # the following lines corresponding to Algo 1 line 1-7 in the paper
             archive = []
 
             # Design Of Experiment
@@ -235,7 +231,6 @@ class Search:
 
         if accelerator.is_main_process:
             # reference point (nadir point) for calculating hypervolume
-            # ref_pt = np.array([np.max([x[1] for x in archive]), np.max([x[2] for x in archive])])
             ref_pt = np.array([np.max([x[i] for x in archive]) for i in range(1, len(self.comp_obj) + 2)])
             accelerator.print(f'data preparation time : {time() - total_start:.2f}s')
         accelerator.wait_for_everyone()
@@ -247,13 +242,11 @@ class Search:
                 iter_start = time()
 
                 # construct accuracy predictor surrogate model from archive
-                # Algo 1 line 9 / Fig. 3(a) in the paper
                 predictor_start = time()
                 metric_predictor, a_metric_pred = self._fit_predictor(archive, device=accelerator.device)
                 predictor_time = time() - predictor_start
 
                 # search for the next set of candidates for high-fidelity evaluation (lower level)
-                # Algo 1 line 10-11 / Fig. 3(b)-(d) in the paper
                 next_start = time()
                 candidates, c_metric_pred = self._next(archive, metric_predictor, self.n_iter)
                 next_time = time() - next_start
@@ -263,7 +256,6 @@ class Search:
             candidates = accelerator.gather_for_metrics(candidates, use_gather_object=True)
 
             # high-fidelity evaluation (lower level)
-            # Algo 1 line 13-14 / Fig. 3(e) in the paper
             c_metric, complexity = self._evaluate(archs=candidates, accelerator=accelerator)
 
             if accelerator.is_main_process:
@@ -272,19 +264,22 @@ class Search:
                     np.vstack((a_metric_pred, c_metric_pred)), np.array([x[1] for x in archive] + c_metric))
 
                 # add to archive
-                # Algo 1 line 15 / Fig. 3(e) in the paper
                 for a, m, c in zip(candidates, c_metric, complexity):
                     archive.append([a, m, *c])
 
                 # calculate hypervolume
                 hv = self._calc_hv(
                     ref_pt, np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)]))
-                    # ref_pt, np.column_stack(([x[1] for x in archive], [x[2] for x in archive]))) 
 
                 iter_time = time() - iter_start
+                coverage = self._front_coverage(archive)
                 # print iteration-wise statistics
                 accelerator.print(f"Iter {it}: hv = {hv:.2f}, iter time : {(time() - iter_start):.2f}s, predictor_time : {predictor_time:.2f}, next_time : {next_time:.2f}")
-                accelerator.print(f"fitting {self.predictor}: RMSE = {rmse:.4f}, Spearman's Rho = {rho:.4f}, Kendall’s Tau = {tau:.4f}")
+                accelerator.print(f"fitting {self.predictor}: RMSE = {rmse:.4f}, Spearman's Rho = {rho:.4f}, Kendall's Tau = {tau:.4f}")
+                for obj, c in coverage.items():
+                    accelerator.print(f"  {obj} front-coverage : {c['coverage']*100:.1f}%  "
+                                      f"front=[{c['front_min']:.3f}, {c['front_max']:.3f}] / "
+                                      f"full=[{c['full_min']:.3f}, {c['full_max']:.3f}]")
                 accelerator.print(f'iteration time : {iter_time:.2f}s')
 
                 # dump the statistics
@@ -295,34 +290,41 @@ class Search:
                                 'surrogate': {
                                     'model': self.predictor, 'name': metric_predictor.name,
                                     'winner': metric_predictor.winner if self.predictor == 'as' else metric_predictor.name,
-                                    'rmse': rmse, 'rho': rho, 'tau': tau, 'total_time': iter_time}, 'iteration' : it}, handle)
+                                    'rmse': rmse, 'rho': rho, 'tau': tau, 'total_time': iter_time}, 'coverage': coverage, 'iteration' : it}, handle)
                     if self.debug:
                         import matplotlib.pyplot as plt
                         n_obj = len(self.comp_obj)
                         comp_np = np.array(complexity)
-                        # fig, axes = plt.subplots(nrows=1, ncols=n_obj + 1, figsize=(5 * (n_obj + 1), 5))
                         fig, axes = plt.subplots(nrows=1, ncols=n_obj, figsize=(5 * n_obj, 5))
                         if not isinstance(axes, np.ndarray):
                             axes = [axes]
+                        arch_F = np.column_stack([[x[k] for x in archive] for k in range(1, n_obj + 2)])
+                        nd_idx = NonDominatedSorting().do(arch_F, only_non_dominated_front=True)
                         for i in range(n_obj):
+                            obj = self.comp_obj[i]
                             comp = np.array([x[i+2] for x in archive])  # comp obj
                             perf = np.array([x[1] for x in archive])  # performance
                             axes[i].scatter(comp, perf, s=5, facecolors='none', edgecolors='b', label='archive')
-                            comp = comp_np[:, i]
-                            perf = np.array(c_metric)
-                            axes[i].scatter(comp, perf, s=10, color='r', label='candidates evaluated')
-                            perf = c_metric_pred[:, 0]
-                            axes[i].scatter(comp, perf, s=10, facecolors='none', edgecolors='g', label='candidates predicted')
+                            # 1st Pareto front as a connected line (shows saturation vs full range)
+                            fc, fp = comp[nd_idx], perf[nd_idx]
+                            order = np.argsort(fc)
+                            axes[i].plot(fc[order], fp[order], '-', color='k', lw=1.5,
+                                         marker='o', ms=3, label='pareto front')
+                            comp_c = comp_np[:, i]
+                            axes[i].scatter(comp_c, np.array(c_metric), s=10, color='r', label='candidates evaluated')
+                            axes[i].scatter(comp_c, c_metric_pred[:, 0], s=10, facecolors='none', edgecolors='g', label='candidates predicted')
+                            # fix x-axis to the achievable full range so every iter is comparable
+                            fmin, fmax = coverage[obj]['full_min'], coverage[obj]['full_max']
+                            pad = 0.02 * (fmax - fmin)
+                            axes[i].set_xlim(fmin - pad, fmax + pad)
+                            axes[i].axvline(fmin, color='0.6', ls='--', lw=1)
+                            axes[i].axvline(fmax, color='0.6', ls='--', lw=1)
                             axes[i].legend(loc="upper right")
-                            axes[i].set_xlabel(f'f{i+2}')
-                            axes[i].grid(c='0.8') 
+                            axes[i].set_xlabel(f'f{i+2} ({obj})')
+                            axes[i].set_title(f"{obj}: front-coverage {coverage[obj]['coverage']*100:.1f}% "
+                                              f"of [{fmin:.2f}, {fmax:.2f}]")
+                            axes[i].grid(c='0.8')
                         axes[0].set_ylabel('f1')
-                        # axes[-1].scatter(np.array([x[2] for x in archive]), np.array([x[3] for x in archive]), s=5, facecolors='none', edgecolors='b', label='archive')
-                        # axes[-1].scatter(np.array(complexity)[:, 0], np.array(complexity)[:, 1], s=10, color='r', label='candidates')
-                        # axes[-1].legend(loc="upper right")
-                        # axes[-1].set_xlabel('f2')
-                        # axes[-1].set_ylabel('f3')
-                        # axes[-1].grid(c='0.8') 
                         fig.tight_layout() 
                         plt.savefig(os.path.join(self.save_path, 'iter_{}.png'.format(it)))
             accelerator.wait_for_everyone()
@@ -335,7 +337,6 @@ class Search:
             for k, v in self.args.items():
                 sentences.append(f"{k}: {v}\n")
             sentences.append(f'Total time: {total_time_elapsed:.2f}s')
-            # sentences.append("\n")
 
             with open(os.path.join(self.save_path, self.result_file), 'w') as f:
                 for sentence in sentences:
@@ -355,71 +356,58 @@ class Search:
         return archive, it + 1
 
     def _evaluate(self, archs, accelerator):
-        metric_list, complexity_list = [], [] # {obj: [] for obj in self.comp_obj}
+        metric_list, complexity_list = [], []
         for arch in tqdm(archs, desc='Eval Arch'):
-            metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func)
+            metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func, stride=self.stride, prefill_prompt=self.prefill_prompt)
             metric_list.append(min(self.max_value, np.nan_to_num(list(metric.values())[0], nan=self.max_value)))
             complexity_list.append([complexity[obj] for obj in self.comp_obj])
 
         return metric_list, complexity_list
 
     def _fit_predictor(self, archive, device='cpu'):
-        # inputs = np.array([self.search_space.encode(x[0]) for x in archive])
         inputs = np.array([self.search_space.encode_predictor(x[0]) for x in archive])
         targets = np.array([x[1] for x in archive])
-        # assert len(inputs) > len(inputs[0]), "# of training samples have to be > # of dimensions"
 
         kwargs = {}
         if self.predictor == 'rbf':
             n_block = self.config['n_block']
             n_linear = self.config['n_linear']
-            lb = np.zeros((n_linear + 2, n_block))
-            ub = np.ones((n_linear + 2, n_block))
-            
+            lb = np.zeros((n_linear + 4, n_block))  # +4 for k, v, k_prune, v_prune
+            ub = np.ones((n_linear + 4, n_block))
+
             for linear_idx, linear in enumerate(self.config['linear']):
-                ub[linear_idx] = len(getattr(self.search_space, f"{linear.split('.')[-1]}_option")) - 1            
-            ub[n_linear] = len(self.search_space.k_option) - 1
+                ub[linear_idx] = len(getattr(self.search_space, f"{linear.split('.')[-1]}_option")) - 1
+            ub[n_linear]     = len(self.search_space.k_option) - 1
             ub[n_linear + 1] = len(self.search_space.v_option) - 1
-            
+            ub[n_linear + 2] = len(self.search_space.k_pruning_dim_option) - 1
+            ub[n_linear + 3] = len(self.search_space.v_pruning_dim_option) - 1
+
             lb = np.delete(lb.flatten(), self.search_space.pass_idx_list, axis=-1)
             ub = np.delete(ub.flatten(), self.search_space.pass_idx_list, axis=-1)
 
             kwargs = {'lb': lb, 'ub': ub}
-            # print(f'lb : {lb.shape}, ub : {ub.shape}')
 
         metric_predictor = get_predictor(self.predictor, inputs, targets, device=device, **kwargs)
-        # metric_predictor = get_predictor(self.predictor, inputs, targets, device=device)
 
         return metric_predictor, metric_predictor.predict(inputs)
     
     def _next(self, archive, predictor, K):
         """ searching for next K candidate for high-fidelity evaluation (lower level) """
 
-        # the following lines corresponding to Algo 1 line 10 / Fig. 3(b) in the paper
         # get non-dominated architectures from archive
-        # F = np.column_stack(([x[1] for x in archive], [x[2] for x in archive]))
         F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
         front = NonDominatedSorting().do(F, only_non_dominated_front=True)
         # non-dominated arch bit-strings
         nd_X = np.array([self.search_space.encode(x[0]) for x in archive])[front]
 
         # initiate a multi-objective solver to optimize the problem
-        method = NSGA2(pop_size=self.ga_pop_size, sampling=nd_X,  # initialize with current nd archs
-            # crossover=TwoPointCrossover(prob=0.9),
+        method = NSGA2(pop_size=self.ga_pop_size, sampling=nd_X,
             crossover=BinomialCrossover(prob=self.crossover_prob, n_offsprings=1),
-            # crossover=BinomialCrossover(prob=0.9, n_offsprings=1),
-            # crossover=BinomialCrossover(prob=1.0, n_offsprings=1),
-            # crossover=BinomialCrossover(prob=0.9, n_offsprings=2),
-            # crossover=MyTwoPointCrossover(prob=0.9, n_offsprings=1),
-            # mutation=IntPolynomialMutation(eta=1.0),
-            # mutation=IntegerFromFloatMutation(clazz=PolynomialMutation, eta=1.0, prob=self.mut_prob),
             mutation=IntMutation(prob=self.mut_prob),
-            # mutation=PolynomialMutation(prob=self.mut_prob, eta=1.0),
-            # mutation=IntPolynomialMutation(prob=self.mut_prob, eta=1.0),
             eliminate_duplicates=True)
         
         # initialize the candidate finding optimization problem
-        problem = AuxiliarySingleLevelProblem(self.search_space, predictor, self.config, self.comp_obj, self.comp_obj_max, self.comp_obj_min, self.group_size, self.n_token)
+        problem = AuxiliarySingleLevelProblemThink(self.search_space, predictor, self.config, self.comp_obj, self.comp_obj_max, self.comp_obj_min, self.group_size, self.n_token)
         
         # kick-off the search
         res = minimize(problem, method, termination=('n_gen', 20), save_history=True, verbose=True)
@@ -430,13 +418,9 @@ class Search:
         print(f'not_duplicate : {sum(not_duplicate)}')
 
         pop = res.pop[not_duplicate]
-        # the following lines corresponding to Algo 1 line 11 / Fig. 3(c)-(d) in the paper
-        # form a subset selection problem to short list K from pop_size
-        # indices = self._subset_selection(res.pop[not_duplicate], F[front, 1], K, self.subset_pop_size)
         if sum(not_duplicate) >= K:
             indices = self._subset_selection(pop, F[front, 1:], K, self.subset_pop_size)
             pop = pop[indices]
-        # pop = res.pop[not_duplicate]
 
         candidates = []
         for x in pop.get("X"):
@@ -444,15 +428,10 @@ class Search:
 
         # decode integer bit-string to config and also return predicted top1_err
         return candidates, predictor.predict(self.search_space.decode_encode_predictor(pop.get("X")))
-        # return candidates, predictor.predict(pop.get("X"))
 
-    # @staticmethod
     def _subset_selection(self, pop, nd_F, K, pop_size):
-        # candidates = np.array([get_net_info(self.search_space.decode(x), self.config, self.latency_table)[self.sec_obj] for x in pop.get("X")])
-        # problem = SubsetProblem(candidates, nd_F, K)
         problem = SubsetProblem(pop.get("F")[:, 1:], nd_F, K, len(self.comp_obj))
         algorithm = GA(
-        # algorithm = NSGA2(
             pop_size=pop_size, sampling=MySampling(), crossover=BinaryCrossover(),
             mutation=MyMutation(), eliminate_duplicates=True)
 
@@ -472,14 +451,57 @@ class Search:
             hv = hv / np.prod(ref_point)
         return hv
 
+    def _objective_full_range(self):
+        """Achievable [min, max] per comp_obj, computed from the uniform
+        boundary corners (same enumeration as search_space.initialize()).
+        Used to fix the plot x-axis and to report Pareto-front coverage over
+        the full range rather than the auto-scaled archive range."""
+        if getattr(self, '_obj_range', None) is not None:
+            return self._obj_range
+        ss = self.search_space
+        first_linear = self.config['linear'][0].split('.')[-1]
+        w_opts = getattr(ss, f'{first_linear}_option')
+        vals = {obj: [] for obj in self.comp_obj}
+        for w_o in w_opts:
+            for k_o in ss.k_option:
+                for v_o in ss.v_option:
+                    for kp in ss.k_pruning_dim_option:
+                        for vp in ss.v_pruning_dim_option:
+                            arch = ss.sample(
+                                w=[[w_o] for _ in self.config['linear']],
+                                k=[k_o], v=[v_o], k_dim=[kp], v_dim=[vp])[0]
+                            info = get_net_info(arch, self.config, self.group_size, n_token=self.n_token)
+                            for obj in self.comp_obj:
+                                vals[obj].append(info[obj])
+        self._obj_range = {obj: (float(min(v)), float(max(v))) for obj, v in vals.items()}
+        return self._obj_range
 
-class AuxiliarySingleLevelProblem(Problem):
-    """ The optimization problem for finding the next N candidate architectures """
+    def _front_coverage(self, archive):
+        """Per-comp_obj fraction of the achievable objective range spanned by
+        the non-dominated (1st Pareto) front of the current archive."""
+        F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
+        nd = NonDominatedSorting().do(F, only_non_dominated_front=True)
+        full = self._objective_full_range()
+        cov = {}
+        for j, obj in enumerate(self.comp_obj):
+            fmin, fmax = full[obj]
+            col = F[nd, 1 + j]
+            span = (col.max() - col.min())
+            denom = (fmax - fmin)
+            cov[obj] = {
+                'front_min': float(col.min()), 'front_max': float(col.max()),
+                'full_min': fmin, 'full_max': fmax,
+                'coverage': float(span / denom) if denom > 0 else 1.0}
+        return cov
+
+
+class AuxiliarySingleLevelProblemThink(Problem):
+    """ The optimization problem for finding the next N candidate architectures with pruning ratio """
 
     def __init__(self, search_space, predictor, config, comp_obj, comp_obj_max, comp_obj_min, group_size, n_token):
         n_block, n_linear = search_space.n_block, search_space.n_linear
         n_comp_obj = len(search_space.comp_obj)
-        super().__init__(n_var=n_block * (n_linear + 2), n_obj=n_comp_obj + 1, n_constr=2 * n_comp_obj, type_var=int)
+        super().__init__(n_var=n_block * (n_linear + 4), n_obj=n_comp_obj + 1, n_constr=2 * n_comp_obj, type_var=int)  # +4 for k, v, k_prune, v_prune
 
         self.ss = search_space
         self.predictor = predictor
@@ -489,22 +511,25 @@ class AuxiliarySingleLevelProblem(Problem):
         self.config = config
         self.group_size = group_size
         self.n_token = n_token
-        self.xl = np.zeros((n_linear + 2, n_block))
-        self.xu = np.ones((n_linear + 2, n_block))
-        
+        self.xl = np.zeros((n_linear + 4, n_block))
+        self.xu = np.ones((n_linear + 4, n_block))
+
         for linear_idx, linear in enumerate(config['linear']):
             self.xu[linear_idx] = len(getattr(search_space, f"{linear.split('.')[-1]}_option")) - 1
-        self.xu[n_linear] = len(search_space.k_option) - 1
+        self.xu[n_linear]     = len(search_space.k_option) - 1
         self.xu[n_linear + 1] = len(search_space.v_option) - 1
-        
+        self.xu[n_linear + 2] = len(search_space.k_pruning_dim_option) - 1
+        self.xu[n_linear + 3] = len(search_space.v_pruning_dim_option) - 1
+
         for pass_w_linear in search_space.pass_module['w']:
             blk, linear = pass_w_linear.split('.', 1)
-            linear_idx =  config['linear'].index(linear)
+            linear_idx = config['linear'].index(linear)
             self.xl[linear_idx, int(blk)] = len(getattr(search_space, f"{linear.split('.')[-1]}_option")) - 1
         for pass_k_layer in search_space.pass_module['k']:
             self.xl[n_linear, pass_k_layer] = len(search_space.k_option) - 1
         for pass_v_layer in search_space.pass_module['v']:
             self.xl[n_linear + 1, pass_v_layer] = len(search_space.v_option) - 1
+        # k_prune / v_prune have no pass_module
 
         self.xl = self.xl.flatten()
         self.xu = self.xu.flatten()
@@ -514,13 +539,11 @@ class AuxiliarySingleLevelProblem(Problem):
         g = np.full((x.shape[0], self.n_constr), np.nan)
 
         metrics = self.predictor.predict(self.ss.decode_encode_predictor(x))[:, 0]
-        # metrics = self.predictor.predict(x)[:, 0]
 
         for i, (_x, metric) in enumerate(zip(x, metrics)):
             arch = self.ss.decode(_x)
             info = get_net_info(arch, self.config, self.group_size, n_token=self.n_token)
             f[i, 0] = metric
-            # f[i, 1] = info[self.ss.sec_obj]
             for j in range(len(self.comp_obj)):
                 f[i, 1 + j] = info[self.comp_obj[j]]
                 if self.comp_obj_min[j] != 0:
@@ -531,11 +554,6 @@ class AuxiliarySingleLevelProblem(Problem):
                     g[i, 2 * j + 1] = info[self.comp_obj[j]] / self.comp_obj_max[j] - 1
                 else:
                     g[i, 2 * j + 1] = 0.0
-
-            # g[i, 0] = 1 - info[self.ss.sec_obj] / self.ss.sec_obj_range[0]
-            # g[i, 1] = info[self.ss.sec_obj] / self.ss.sec_obj_range[1] - 1
-            # g[i, 2 * (len(self.ss.comp_obj))] = 1 - info['sparsity'] / self.ss.layer_prune_range[0]
-            # g[i, 2 * (len(self.ss.comp_obj)) + 1] = info['sparsity'] / self.ss.layer_prune_range[1] - 1
 
         out["F"] = f
         out["G"] = g
@@ -550,26 +568,12 @@ class SubsetProblem(Problem):
         self.n_max = K
 
     def _evaluate(self, x, out, *args, **kwargs):
-        # f = np.full((x.shape[0], self.n_obj), np.nan)
         f = np.full((x.shape[0], 1), np.nan)
         g = np.full((x.shape[0], 1), np.nan)
 
-        # import pdb; pdb.set_trace()
         for i, _x in enumerate(x):
-            # append selected candidates to archive then sort
-            # for j in range(self.n_obj):
-            #     tmp = np.sort(np.concatenate((self.archive[:, j], self.candidates[_x][:, j])))
-            #     f[i, j] = np.std(np.diff(tmp))
-
             tmp = np.sort(np.concatenate((self.archive, self.candidates[_x])), axis=0)
             f[i, 0] = np.std(np.diff(tmp, axis=0))
-            # f[i, 0] = np.std(np.diff(tmp, axis=0), axis=0).sum()
-            # f[i, 0] = np.std(np.diff(tmp, axis=0), axis=0).max()
-
-            # tmp = np.sort(np.concatenate((self.archive, self.candidates[_x])))
-            # f[i, 0] = np.std(np.diff(tmp))
-
-            # we penalize if the number of selected candidates is not exactly K
             g[i, 0] = (self.n_max - np.sum(_x)) ** 2
 
         out["F"] = f
@@ -582,7 +586,7 @@ def main(args):
         config = json.load(f)[args.model_name]
     accelerator, device_map = init_accelerator(args.gpu_id, config)
     accelerator.print(args)
-    engine = Search(config=config, accelerator=accelerator, device_map=device_map, kwargs=vars(args))
+    engine = SearchThink(config=config, accelerator=accelerator, device_map=device_map, kwargs=vars(args))
     engine.search(accelerator)
     return
 
@@ -603,8 +607,6 @@ if __name__ == '__main__':
                         help='which accuracy predictor model to fit (rbf/gp/cart/mlp/as)')
     parser.add_argument('--gpu_id', type=str, default='0',
                         help='id of available gpus')
-    # parser.add_argument('--n_gpu', type=int, default=1,
-    #                     help='number of gpus per process')
     parser.add_argument('--model_path', type=str, default='',
                         help='file path to supernet weights')
     parser.add_argument('--model_name', type=str, default='',
@@ -614,7 +616,7 @@ if __name__ == '__main__':
     
     parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
                         help='')
-    parser.add_argument('--kv_method', type=str, default='kivi', choices=['hqq', 'kivi'],
+    parser.add_argument('--kv_method', type=str, nargs='+', default=['kivi'], choices=['fp16', 'hqq', 'kivi', 'think'],
                         help='')
     
     parser.add_argument('--w_bits', type=int, nargs='+', default=[], 
@@ -633,7 +635,6 @@ if __name__ == '__main__':
     
     parser.add_argument('--residual_length', type=int, default=128, 
                         help='')
-    # parser.add_argument('--use_flash', action='store_true', help='')
 
     parser.add_argument('--quant_kv_output', action='store_true', help='')
     parser.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'], 
@@ -641,20 +642,21 @@ if __name__ == '__main__':
     parser.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
     
-    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'memory'], 
+    parser.add_argument('--comp_obj', type=str, nargs='+', default=['wbits', 'kvbits'], choices=['wbits', 'kvbits', 'kbits', 'vbits', 'memory', 'kvdim', 'kdim', 'vdim', 'eff_kvbits', 'eff_kbits', 'eff_vbits'],
                         help='complexity objectives to optimize simultaneously')
     parser.add_argument('--comp_obj_min', type=float, nargs='+', default=[2, 2], 
                         help='')
     parser.add_argument('--comp_obj_max', type=float, nargs='+', default=[4, 4], 
                         help='')
     
-    # parser.add_argument('--pass_w_linear', type=str, nargs='+', default=[], 
-    #                     help='')
-    # parser.add_argument('--pass_k_layer', type=int, nargs='+', default=[], 
-    #                     help='')
-    # parser.add_argument('--pass_v_layer', type=int, nargs='+', default=[], 
-    #                     help='')
-    
+    parser.add_argument('--k_pruning_dim', type=int, nargs='+', default=None,
+                        help='K pruning dim options (integer # of head_dim channels to prune), '
+                             'e.g. --k_pruning_dim 0 13 26 38 51 64 for head_dim=128. '
+                             'Default: derived from head_dim in config.')
+    parser.add_argument('--v_pruning_dim', type=int, nargs='+', default=None,
+                        help='V pruning dim options (integer # of head_dim channels to prune), '
+                             'e.g. --v_pruning_dim 0 13 26 38 51 64 for head_dim=128. '
+                             'Default: derived from head_dim in config.')
     
     parser.add_argument('--dataset', type=str, default='wikitext2',
                         help='dataset name')
@@ -699,9 +701,6 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--loss_func', type=str, default='cross_entropy',
                         help='')
-    # parser.add_argument('--layer_prune_range', type=float, nargs='+', default=[1, 1], 
-    #                     help='')
-    # parser.add_argument('--use_linear_group', action='store_true', help='')
     parser.add_argument('--base_outlier_bits', type=int, nargs='+', default=[], 
                         help='')
     parser.add_argument('--outlier_path', type=str, default='',
@@ -720,6 +719,13 @@ if __name__ == '__main__':
                         help='target sequence length for memory calculation')
 
     
+    parser.add_argument('--stride', type=int, default=0,
+                        help='chunk size for stride-aware eval with use_cache=True (0 = single forward pass)')
+    parser.add_argument('--last_tokens', type=int, default=None,
+                        help='If set, loss is computed only on the last N tokens per sample.')
+    parser.add_argument('--prefill_prompt', action='store_true',
+                        help='If set (with --last_tokens > 0), prefill the prompt in one forward '
+                             'and stride only the answer span (matches real-decode KV state).')
     parser.add_argument('--use_key_token', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
     parser.add_argument('--trunc_len', type=int, default=512, 
                         help='truncation length for long PPL/JSD calculation')
@@ -736,4 +742,3 @@ if __name__ == '__main__':
     
     cfgs = parser.parse_args()
     main(cfgs)
-

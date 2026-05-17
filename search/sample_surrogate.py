@@ -41,6 +41,9 @@ def main(args):
 
     expr_map = build_expr_map(args, ctx)
     nd = build_nd(args, ctx, expr_map)
+    print(f"[sample_surrogate] expr_front={args.expr_front} → "
+          f"{'lazy comp_obj-pruned (no NDS, full archives)' if getattr(nd, 'lazy', False) else 'dense'} "
+          f"path  (n_total={nd.n_total:.3e})")
     expr_keys, _esm, _efm = nd.expr_keys, nd.esm, nd.efm
 
     # Parse --quantile_sample. Abort if a quantile metric's axis isn't searched:

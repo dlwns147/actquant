@@ -48,10 +48,17 @@ QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 SEED=0
 
 # ── COMP_OBJ range (the deployment budget) ──
-COMP_OBJ=(memory)
-COMP_OBJ_VAL=(6271016960)
+# COMP_OBJ=(memory)
+# COMP_OBJ_VAL=(6271016960)
+# # COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
+# COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.0001)" | bc))
+
+COMP_OBJ=(wbits kvbits kvdim)
+COMP_OBJ_VAL=(3 3.25 102)
+# COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
+COMP_OBJ_THRESHOLD_LIST=(0.005 0.005 0.05)
+
 N_TOKEN=16384
-COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
 
 MIN_COMP_OBJ_LIST=()
 MAX_COMP_OBJ_LIST=()

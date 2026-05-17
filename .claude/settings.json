@@ -35,7 +35,11 @@
       "Bash(python3 -c \"import json, sys; d = json.load\\(sys.stdin\\); print\\(list\\(d.keys\\(\\)\\)[:20]\\); print\\('=== sample ==='\\); k0 = list\\(d.keys\\(\\)\\)[0]; print\\(k0, '->', type\\(d[k0]\\), str\\(d[k0]\\)[:300]\\)\")",
       "Bash(python3 analyze_bit_jsd_correlation.py)",
       "Bash(python3 analyze_bit_bit_correlation.py)",
-      "Bash(python3 plot_spec_categories.py)"
+      "Bash(python3 plot_spec_categories.py)",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\), f\\) for f in ['amq/utils/args.py','amq/search/optimizer.py','amq/evaluation/evaluator_jsd_stratified.py']]; print\\('ast ok'\\)\")",
+      "Bash(bash -n scripts/amq_search.sh)",
+      "Bash(python plot_compare_loss_jsd_spec_lambda_sweep.py)",
+      "Bash(python plot_compare_loss_jsd_disco_variants.py)"
     ],
     "additionalDirectories": [
       "/tmp"

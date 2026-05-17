@@ -20,7 +20,7 @@ def pair_bits_gs(bits_list, gs_list, name):
     return list(zip(bits_list, gs_list))
 
 def compute_one(args, config, n_block, w_bits, w_group_size, k_bits, v_bits,
-                k_group_size, v_group_size, k_dim, v_dim, n_token):
+                k_group_size, v_group_size, k_prune_dim, v_prune_dim, n_token):
     arch = {
         'q': {
             'w': {l: [w_bits] * n_block for l in config['linear']},
@@ -28,8 +28,8 @@ def compute_one(args, config, n_block, w_bits, w_group_size, k_bits, v_bits,
             'v': [[v_bits, v_group_size]] * n_block,
         },
         'p': {
-            'k': [k_dim] * n_block,
-            'v': [v_dim] * n_block,
+            'k': [k_prune_dim] * n_block,
+            'v': [v_prune_dim] * n_block,
         }
     }
     group_size = {'w': w_group_size, 'k': k_group_size, 'v': v_group_size}
@@ -38,17 +38,17 @@ def compute_one(args, config, n_block, w_bits, w_group_size, k_bits, v_bits,
     return arch, complexity
 
 def normalize_kv_args(args):
-    """--kv_bits/--kv_group_size/--kv_dim apply one unified setting to both K
-    and V. Any of them sets the matching k_*/v_* lists; returns True when KV
-    should be treated as a single axis (V mirrors K)."""
+    """--kv_bits/--kv_group_size/--kv_prune_dim apply one unified setting to
+    both K and V. Any of them sets the matching k_*/v_* lists; returns True
+    when KV should be treated as a single axis (V mirrors K)."""
     if args.kv_bits is not None:
         args.k_bits = args.v_bits = args.kv_bits
     if args.kv_group_size is not None:
         args.k_group_size = args.v_group_size = args.kv_group_size
-    if args.kv_dim is not None:
-        args.k_dim = args.v_dim = args.kv_dim
+    if args.kv_prune_dim is not None:
+        args.k_prune_dim = args.v_prune_dim = args.kv_prune_dim
     return any(v is not None for v in
-               (args.kv_bits, args.kv_group_size, args.kv_dim))
+               (args.kv_bits, args.kv_group_size, args.kv_prune_dim))
 
 def compute_mem(args):
     unify_kv = normalize_kv_args(args)
@@ -71,7 +71,7 @@ def compute_mem(args):
         combos = (
             (wp, kp, kp, kd, kd, nt)
             for nt, wp, kp, kd in product(
-                args.n_token, w_pairs, k_pairs, args.k_dim)
+                args.n_token, w_pairs, k_pairs, args.k_prune_dim)
         )
     else:
         v_pairs = pair_bits_gs(args.v_bits, args.v_group_size, 'v')
@@ -79,21 +79,22 @@ def compute_mem(args):
             (wp, kp, vp, kd, vd, nt)
             for nt, wp, kp, vp, kd, vd in product(
                 args.n_token, w_pairs, k_pairs, v_pairs,
-                args.k_dim, args.v_dim)
+                args.k_prune_dim, args.v_prune_dim)
         )
 
     results = []
-    for (w_bits, w_gs), (k_bits, k_gs), (v_bits, v_gs), k_dim, v_dim, n_token in combos:
+    for (w_bits, w_gs), (k_bits, k_gs), (v_bits, v_gs), k_prune_dim, v_prune_dim, n_token in combos:
         arch, complexity = compute_one(
             args, config, n_block, w_bits, w_gs, k_bits, v_bits,
-            k_gs, v_gs, k_dim, v_dim, n_token)
+            k_gs, v_gs, k_prune_dim, v_prune_dim, n_token)
         mem = complexity['memory']
 
         cfg = {
             'w_bits': w_bits, 'w_group_size': w_gs,
             'k_bits': k_bits, 'k_group_size': k_gs,
             'v_bits': v_bits, 'v_group_size': v_gs,
-            'k_dim': k_dim, 'v_dim': v_dim, 'n_token': n_token,
+            'k_prune_dim': k_prune_dim, 'v_prune_dim': v_prune_dim,
+            'n_token': n_token,
         }
         results.append({'config': cfg, 'memory': mem, 'complexity': complexity})
 
@@ -176,10 +177,12 @@ if __name__ == '__main__':
                         help='one or more key-cache bit-widths')
     parser.add_argument('--v_bits', type=int, nargs='+', default=[4],
                         help='one or more value-cache bit-widths')
-    parser.add_argument('--k_dim', type=int, nargs='+', default=[0],
-                        help='one or more per-layer K cache pruning dims (0 = no pruning)')
-    parser.add_argument('--v_dim', type=int, nargs='+', default=[0],
-                        help='one or more per-layer V cache pruning dims (0 = no pruning)')
+    parser.add_argument('--k_prune_dim', type=int, nargs='+', default=[0],
+                        help='one or more per-layer K cache prune dims '
+                             '(# head_dim channels removed; 0 = no pruning)')
+    parser.add_argument('--v_prune_dim', type=int, nargs='+', default=[0],
+                        help='one or more per-layer V cache prune dims '
+                             '(# head_dim channels removed; 0 = no pruning)')
     parser.add_argument('--w_group_size', type=int, nargs='+', default=[128],
                         help='one or more weight group sizes, paired 1:1 with --w_bits')
     parser.add_argument('--k_group_size', type=int, nargs='+', default=[128],
@@ -192,9 +195,11 @@ if __name__ == '__main__':
     parser.add_argument('--kv_group_size', type=int, nargs='+', default=None,
                         help='unified KV group sizes, paired 1:1 with --kv_bits; '
                              'sets both --k_group_size and --v_group_size')
-    parser.add_argument('--kv_dim', type=int, nargs='+', default=None,
-                        help='unified KV pruning dims; sets both --k_dim and '
-                             '--v_dim and treats KV as a single axis')
+    parser.add_argument('--kv_prune_dim', type=int, nargs='+', default=None,
+                        help='unified KV prune dims (# head_dim channels '
+                             'removed; 0 = no pruning); sets both '
+                             '--k_prune_dim and --v_prune_dim and treats KV '
+                             'as a single axis')
     parser.add_argument('--residual_length', type=int, default=128,
                         help='')
     parser.add_argument('--config', type=str, default='config/llama.json',

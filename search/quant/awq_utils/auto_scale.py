@@ -7,6 +7,7 @@ from transformers.models.opt.modeling_opt import OPTDecoderLayer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RMSNorm
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralRMSNorm
+from transformers.models.gemma3.modeling_gemma3 import Gemma3DecoderLayer, Gemma3RMSNorm
 from transformers.activations import GELUActivation
 # from model.skip_llama import LlamaDecoderSkipLayer
 
@@ -44,6 +45,33 @@ def scale_ln_fcs(ln, fcs, scales, eps=1e-7):
     ln.weight.div_(scales + eps)
     if hasattr(ln, "bias") and ln.bias is not None:
         # ln.bias.div_(scales)
+        ln.bias.div_(scales + eps)
+
+    for fc in fcs:
+        fc.weight.mul_(scales.view(1, -1))
+
+    for p in ln.parameters():
+        assert torch.isnan(p).sum() == 0
+    for fc in fcs:
+        for p in fc.parameters():
+            assert torch.isnan(p).sum() == 0
+
+
+@torch.no_grad()
+def scale_ln_fcs_gemma(ln, fcs, scales, eps=1e-7):
+    # Gemma3RMSNorm computes  out = _norm(x) * (1.0 + weight)  (note the +1
+    # offset), unlike Llama/Qwen/Mistral RMSNorm which is  _norm(x) * weight.
+    # To push 1/scale into the norm so that out_new = out / scale, we need
+    #   (1 + w_new) = (1 + w) / scale   ->   w_new = (1 + w) / scale - 1
+    # Using the plain `w /= scale` here is exactly what makes naive AWQ
+    # catastrophically degrade Gemma 3.
+    if not isinstance(fcs, list):
+        fcs = [fcs]
+
+    scales = scales.to(ln.weight.device)
+
+    ln.weight.data = (1.0 + ln.weight.data) / (scales + eps) - 1.0
+    if hasattr(ln, "bias") and ln.bias is not None:
         ln.bias.div_(scales + eps)
 
     for fc in fcs:
@@ -335,6 +363,80 @@ def auto_scale_block(module, module_kwargs, q_config, input_feat, do_owq, module
             )
         )
 
+    elif isinstance(module, Gemma3DecoderLayer):
+        # The captured kwargs are Gemma3DecoderLayer-level (position_embeddings_
+        # global / _local). Gemma3Attention.forward instead wants a single
+        # `position_embeddings`, picked by the decoder layer as local for
+        # sliding-window layers and global otherwise. Remap before inspecting
+        # self_attn directly.
+        attn_kwargs = dict(module_kwargs)
+        peg = attn_kwargs.pop("position_embeddings_global", None)
+        pel = attn_kwargs.pop("position_embeddings_local", None)
+        if peg is not None or pel is not None:
+            attn_kwargs["position_embeddings"] = (
+                pel if module.self_attn.is_sliding else peg
+            )
+        # attention input: input_layernorm -> q/k/v_proj
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.input_layernorm,
+                layers={
+                    'self_attn.q_proj': module.self_attn.q_proj,
+                    'self_attn.k_proj': module.self_attn.k_proj,
+                    'self_attn.v_proj': module.self_attn.v_proj,
+                },
+                inp=input_feat["self_attn.q_proj"],
+                module2inspect=module.self_attn,
+                kwargs=attn_kwargs,
+                module_bit=module_bit,
+                do_owq=do_owq,
+                outlier=outlier,
+            )
+        )
+        # attn out: v_proj -> o_proj (skipped under GQA where shapes differ,
+        # which is the case for gemma-3-12b: v=[2048,h], o=[h,4096])
+        if module.self_attn.v_proj.weight.shape == module.self_attn.o_proj.weight.shape:
+            scales_list.append(
+                _auto_get_scale(
+                    prev_op=module.self_attn.v_proj,
+                    layers={
+                        'self_attn.o_proj': module.self_attn.o_proj,
+                    },
+                    inp=input_feat["self_attn.o_proj"],
+                    module_bit=module_bit,
+                    do_owq=False,
+                )
+            )
+        # fc1: Gemma3 feeds the MLP from pre_feedforward_layernorm
+        # (NOT post_attention_layernorm, which is a post-projection norm here)
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.pre_feedforward_layernorm,
+                layers={
+                    'mlp.gate_proj': module.mlp.gate_proj,
+                    'mlp.up_proj': module.mlp.up_proj,
+                },
+                inp=input_feat["mlp.gate_proj"],
+                module2inspect=module.mlp,
+                module_bit=module_bit,
+                do_owq=do_owq,
+                outlier=outlier,
+            )
+        )
+        # fc2: up_proj -> down_proj
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.mlp.up_proj,
+                layers={
+                    'mlp.down_proj': module.mlp.down_proj,
+                },
+                inp=input_feat["mlp.down_proj"],
+                module_bit=module_bit,
+                do_owq=do_owq,
+                outlier=outlier,
+            )
+        )
+
     else:
         raise NotImplementedError(f"{type(module)} not supported yet!")
 
@@ -349,6 +451,10 @@ def apply_scale(module, scales_list, input_feat_dict=None):
         if isinstance(prev_op, nn.Linear):
             assert len(layers) == 1
             scale_fc_fc(prev_op, layers[0], scales)
+        elif isinstance(prev_op, Gemma3RMSNorm):
+            # must come before the generic RMSNorm branch: Gemma3RMSNorm needs
+            # the (1 + weight) offset handled, see scale_ln_fcs_gemma
+            scale_ln_fcs_gemma(prev_op, layers, scales)
         elif isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm, Qwen2RMSNorm, MistralRMSNorm)):
             scale_ln_fcs(prev_op, layers, scales)
         elif isinstance(prev_op, (nn.GELU, BloomGelu, GELUActivation)):

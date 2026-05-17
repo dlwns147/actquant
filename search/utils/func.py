@@ -645,8 +645,17 @@ def load_expr(expr_path, comp_obj_key, config, group_size, n_block, expr_front):
         raw_subnets = [_adapt_to_n_block(s, n_block) for s in raw_subnets]
     subnets_arr = np.array(raw_subnets)
     metric_vals = [v[1] for v in archive]
-    comp_vals = [get_net_info(n, config, group_size)[comp_obj_key]
-                 for n in subnets_arr]
+    # The comp column F[:,1] is ONLY consumed by the expr_front Pareto sort
+    # below. Both build_nd paths recompute comp themselves (dense: comp_nd_list
+    # from esm; lazy: _build_lazy_comp), and nothing reads efm[:,1] when
+    # --expr_front is off. So skip the per-subnet get_net_info (≈17k calls,
+    # each computing every net_info key incl. compute_memory — the dominant
+    # load_expr cost) unless it's actually needed.
+    if expr_front:
+        comp_vals = [get_net_info(n, config, group_size)[comp_obj_key]
+                     for n in subnets_arr]
+    else:
+        comp_vals = np.zeros(len(metric_vals))   # unused placeholder
     sort_idx = np.argsort(metric_vals)
     F = np.column_stack((metric_vals, comp_vals))[sort_idx]
     subnets_arr = subnets_arr[sort_idx]
@@ -677,7 +686,7 @@ class NDCombo:
     """The vectorised combo space: per-axis subnet/metric arrays + comp_obj ND
     arrays + the additive combined-metric ND array (args scales)."""
     def __init__(self, expr_keys, esm, efm, nd_shape, new_metric_nd,
-                 comp_nd_list, metric_1d):
+                 comp_nd_list, metric_1d, lazy=False):
         self.expr_keys = expr_keys
         self.esm = esm          # {key: subnet array}
         self.efm = efm          # {key: (metric, comp) F array}
@@ -685,10 +694,164 @@ class NDCombo:
         self.new_metric_nd = new_metric_nd      # additive, args scales
         self.comp_nd_list = comp_nd_list
         self.metric_1d = metric_1d              # [per-axis raw metric], order==expr_keys
+        # lazy=True (no --expr_front, huge product): new_metric_nd is None and
+        # comp_nd_list is a _LazyComp; comp_obj filtering happens BEFORE any
+        # nd_shape array is materialised (select_valid_nd_idx / assemble_F
+        # branch on the _LazyComp). The combined-metric column is NaN — a
+        # surrogate must overwrite it (post_search asserts no NaN survives).
+        self.lazy = lazy
 
     @property
     def n_total(self):
         return int(np.prod(self.nd_shape))
+
+
+# Single-axis comp_obj → the axis name it depends on (eff_kv collapses kv+kvdim).
+_SINGLE_AXIS_COMP = {
+    'wbits': 'w',
+    'kvbits': 'kv', 'kbits': 'kv', 'vbits': 'kv',
+    'kvdim': 'kvdim', 'kdim': 'kvdim', 'vdim': 'kvdim',
+}
+
+
+class _LazyComp:
+    """Low-rank comp_obj descriptors for the no--expr_front (huge product)
+    path. Holds, per comp_obj (order == args.comp_obj), the *pre-broadcast*
+    source array build_nd would otherwise broadcast to nd_shape:
+
+        {'kind':'1d','axis':a,'vals':(n_a,)}                  single-axis obj
+        {'kind':'2d','axes':(a,b),'vals':(n_a,n_b)}           eff_kvbits etc.
+        {'kind':'memory','w_axis','w_mem','w_const',          additive memory
+                 'kv':{'kind':'scalar'|'1d'|'2d',...}}
+
+    No nd_shape array is ever built. select_valid_nd_idx / assemble_F detect
+    this type and filter/gather sparsely. __getitem__(i) returns the
+    achievable [lo, hi] for comp_obj i so post_search's 0-candidate
+    diagnostic (`np.asarray(nd.comp_nd_list[i]).min()/.max()`) works
+    unchanged."""
+
+    def __init__(self, expr_keys, efm, comp_specs, comp_obj):
+        self.expr_keys = list(expr_keys)
+        self.efm = efm
+        self.comp_specs = comp_specs
+        self.comp_obj = list(comp_obj)
+        self.nd_shape = tuple(len(efm[k]) for k in self.expr_keys)
+
+    def spec_range(self, spec):
+        if spec['kind'] in ('1d', '2d'):
+            v = np.asarray(spec['vals'], dtype=np.float64)
+            return float(v.min()), float(v.max())
+        kv = np.asarray(spec['kv']['vals'], dtype=np.float64)
+        if spec['w_axis'] is None:
+            return spec['w_const'] + float(kv.min()), \
+                   spec['w_const'] + float(kv.max())
+        w = np.asarray(spec['w_mem'], dtype=np.float64)
+        return float(w.min() + kv.min()), float(w.max() + kv.max())
+
+    def __getitem__(self, i):
+        lo, hi = self.spec_range(self.comp_specs[i])
+        return np.array([lo, hi], dtype=np.float64)
+
+    def comp_values(self, spec, nd_idx):
+        """comp_obj value for each row of nd_idx (M, n_dims)."""
+        if spec['kind'] == '1d':
+            return np.asarray(spec['vals'])[nd_idx[:, spec['axis']]]
+        if spec['kind'] == '2d':
+            a0, a1 = spec['axes']
+            return np.asarray(spec['vals'])[nd_idx[:, a0], nd_idx[:, a1]]
+        # memory: w-part (1D or const) + kv-part (scalar/1d/2d), additive
+        v = np.full(len(nd_idx), spec['w_const'], dtype=np.float64)
+        if spec['w_axis'] is not None:
+            v = np.asarray(spec['w_mem'], np.float64)[nd_idx[:, spec['w_axis']]]
+        kv = spec['kv']
+        if kv['kind'] == 'scalar':
+            return v + kv['vals']
+        if kv['kind'] == '1d':
+            return v + np.asarray(kv['vals'], np.float64)[nd_idx[:, kv['axis']]]
+        a0, a1 = kv['axes']
+        return v + np.asarray(kv['vals'], np.float64)[nd_idx[:, a0],
+                                                      nd_idx[:, a1]]
+
+
+def _build_lazy_comp(args, expr_keys, esm, efm, config, group_size,
+                     default_arch):
+    """Build _LazyComp — mirrors build_nd's comp_nd_list dispatch (the obj
+    loop) but keeps the raw pre-broadcast arrays instead of nd_shape views."""
+    def ax(name):
+        return expr_keys.index(name) if name in expr_keys else None
+
+    specs = []
+    for obj in args.comp_obj:
+        if obj in _SINGLE_AXIS_COMP:
+            if obj == 'wbits':
+                axn = 'w'
+            elif obj in ('kvbits', 'kbits', 'vbits'):
+                axn = 'eff_kv' if 'eff_kv' in expr_keys else 'kv'
+            else:
+                axn = 'eff_kv' if 'eff_kv' in expr_keys else 'kvdim'
+            a = ax(axn)
+            if a is None:
+                raise SystemExit(f"[build_nd/lazy] comp_obj '{obj}' needs axis "
+                                 f"'{axn}' but expr_keys={expr_keys}")
+            vals = np.array([get_net_info(sv, config, group_size,
+                                          n_token=args.n_token)[obj]
+                             for sv in esm[axn]], dtype=np.float64)
+            specs.append({'kind': '1d', 'axis': a, 'vals': vals})
+        elif obj in ('eff_kvbits', 'eff_kbits', 'eff_vbits'):
+            t = {'eff_kvbits': 'kv', 'eff_kbits': 'k', 'eff_vbits': 'v'}[obj]
+            if 'eff_kv' in expr_keys:
+                a = ax('eff_kv')
+                vals = np.array([get_net_info(sv, config, group_size,
+                                              n_token=args.n_token)[obj]
+                                 for sv in esm['eff_kv']], dtype=np.float64)
+                specs.append({'kind': '1d', 'axis': a, 'vals': vals})
+            else:
+                if 'kv' not in expr_keys or 'kvdim' not in expr_keys:
+                    raise SystemExit(f"[build_nd/lazy] '{obj}' needs eff_kv_expr "
+                                     f"or both kv_expr and kvdim_expr")
+                vals = compute_eff_kvbits_batch(esm['kv'], esm['kvdim'],
+                                                config, target=t)
+                specs.append({'kind': '2d',
+                              'axes': (ax('kv'), ax('kvdim')), 'vals': vals})
+        elif obj == 'memory':
+            w_ax = ax('w')
+            if w_ax is not None:
+                w_mem = np.array([compute_weight_memory(sv, config, group_size)
+                                  for sv in esm['w']], dtype=np.float64)
+                w_const = 0.0
+            else:
+                w_mem = None
+                w_const = float(compute_weight_memory(default_arch, config,
+                                                      group_size))
+            if 'eff_kv' in expr_keys:
+                kvv = np.array([compute_cache_memory_single(sv, config,
+                                                            args.n_token)
+                                for sv in esm['eff_kv']], dtype=np.float64)
+                kv = {'kind': '1d', 'axis': ax('eff_kv'), 'vals': kvv}
+            elif 'kv' in expr_keys and 'kvdim' in expr_keys:
+                kvv = compute_cache_memory_batch(esm['kv'], esm['kvdim'],
+                                                 config, args.n_token)
+                kv = {'kind': '2d', 'axes': (ax('kv'), ax('kvdim')),
+                      'vals': np.asarray(kvv, np.float64)}
+            elif 'kv' in expr_keys:
+                kvv = compute_cache_memory_batch(esm['kv'], None, config,
+                                                 args.n_token)
+                kv = {'kind': '1d', 'axis': ax('kv'),
+                      'vals': np.asarray(kvv, np.float64)}
+            elif 'kvdim' in expr_keys:
+                kvv = compute_cache_memory_batch([default_arch], esm['kvdim'],
+                                                 config, args.n_token)[0]
+                kv = {'kind': '1d', 'axis': ax('kvdim'),
+                      'vals': np.asarray(kvv, np.float64)}
+            else:
+                kv = {'kind': 'scalar', 'vals': 0.0}
+            specs.append({'kind': 'memory', 'w_axis': w_ax, 'w_mem': w_mem,
+                          'w_const': w_const, 'kv': kv})
+        else:
+            raise SystemExit(
+                f"[build_nd/lazy] comp_obj='{obj}' unsupported. Supported: "
+                f"{sorted(_SINGLE_AXIS_COMP) + ['eff_kvbits','eff_kbits','eff_vbits','memory']}")
+    return _LazyComp(expr_keys, efm, specs, args.comp_obj)
 
 
 def build_nd(args, ctx, expr_map):
@@ -713,16 +876,24 @@ def build_nd(args, ctx, expr_map):
     for _s in nd_shape:
         _n_total *= int(_s)
     _MAX_COMBO = 5e8
-    if _n_total > _MAX_COMBO:
-        raise SystemExit(
-            f"[build_nd] combo space too large: nd_shape={nd_shape} "
-            f"(n_total={_n_total:.3e} > {_MAX_COMBO:.0e}); "
-            f"new_metric_nd alone would need ~{_n_total * 8 / 2**30:.0f} GiB. "
-            f"Per-axis sizes {dict(zip(expr_keys, nd_shape))} suggest the expr "
-            f"archives were loaded WITHOUT Pareto filtering — pass --expr_front "
-            f"(stage-1 sample_surrogate uses it, so stage-2 must too), or "
-            f"tighten --comp_obj_min/--comp_obj_max.")
     config, group_size, default_arch = ctx.config, ctx.group_size, ctx.default_arch
+    if _n_total > _MAX_COMBO:
+        # Huge product (typically --expr_front omitted → full archives, no NDS).
+        if not args.comp_obj:
+            raise SystemExit(
+                f"[build_nd] combo space too large: nd_shape={nd_shape} "
+                f"(n_total={_n_total:.3e} > {_MAX_COMBO:.0e}) and no comp_obj "
+                f"given — the product is unbounded. Pass --comp_obj/"
+                f"--comp_obj_min/--comp_obj_max (comp_obj-first pruning), or "
+                f"--expr_front to Pareto-filter the per-axis archives.")
+        # comp_obj present → lazy comp-pruned mode: NO nd_shape array is built;
+        # comp_obj filtering runs first (select_valid_nd_idx), then the
+        # surrogate predicts on the filtered set. Dense code below is skipped.
+        return NDCombo(
+            expr_keys, _esm, _efm, nd_shape, None,
+            _build_lazy_comp(args, expr_keys, _esm, _efm, config, group_size,
+                             default_arch),
+            [], lazy=True)
 
     def _bcast_1d(arr, ax):
         shape = [1] * n_dims

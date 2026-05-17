@@ -67,6 +67,22 @@ Factory: `get_predictor(type, n_obj, n_var, bounds)`. Supported types: `rbf`, `m
 - `model/kv_cache.py` — `replace_kv_cache()` patches `LlamaAttention` to use quantized KV (HQQ or KIVI backends)
 - KV cache configs: `HQQCache` / `KIVICache` with per-layer group sizes and bit-widths
 
+### KV Pruning Dim Convention (ThinK) — read before touching `p`/`kvdim`
+
+Two **deliberately different** representations of the same per-layer KV channel pruning. Do not "unify" them by flipping a sign — see the warning below.
+
+- **prune dim** = number of `head_dim` channels *removed* (`0` = no pruning). This is the physical knob and the on-disk arch format:
+  - `arch['p']['k'|'v']` storage, consumed directly by the ThinK kernels
+  - search space options `k_pruning_dim_option` / `v_pruning_dim_option`
+  - CLI/script knobs: `search_think.py --k_pruning_dim/--v_pruning_dim`, `search_think.sh K_PRUNING_DIM/V_PRUNING_DIM`, `compute_mem.py --k_prune_dim/--v_prune_dim/--kv_prune_dim`
+  - **Rule: anything named `*prune*` is a removed-channel count.**
+- **kvdim / kdim / vdim** = *retained* dim = `head_dim - prune`, mean over k+v layers (`head_dim` = no pruning). Computed at the single flip point [`utils/func.py`](utils/func.py) `get_net_info` (`net_info['kvdim'|'kdim'|'vdim']`). This is the **complexity objective**, used by `comp_obj`, the `comp_obj_min/max` budget filter (`utils/select.py`), NSGA Pareto sorting, `post_search.py`, `sample_surrogate.py`, `.stats` archives, and dir-name `obj_<min>_<max>` tokens.
+  - **Rule: `kvdim/kdim/vdim` (no `prune`) is a retained-dim count.**
+
+Why retained, not prune, for the objective: it must be monotone-with-quality like `wbits/kvbits/eff_kvbits/memory` (bigger = more capacity) so Pareto direction and the budget range stay consistent across objectives.
+
+> ⚠️ **Never change `get_net_info`'s prune→retained flip or the `arch['p']` convention.** 781+ `.stats` archives store `kvdim` as retained (e.g. [96,128] for Llama-3.1 head_dim=128, step 0.25), and 80+ analysis scripts, all `COMP_OBJ_MIN/MAX` in scripts, and dir-name semantics depend on it. The dual representation is correct; only naming was ever the confusion (now `compute_mem` uses `*_prune_dim`).
+
 ### Config Files (`config/`)
 
 JSON files (e.g., `config/llama.json`) store model metadata: layer count, linear layer shapes, model numel, vocab size, head dimensions. Required at runtime; currently supports Llama-2 (7B/13B/70B), Meta-Llama-3-8B, Llama-3.1-8B-Instruct, Mistral, Qwen2.

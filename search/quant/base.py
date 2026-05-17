@@ -134,11 +134,23 @@ class BASE:
 
         model_config = AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
         # model_config.use_cache = use_cache
-        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, 
+        if getattr(model_config, "model_type", "") == "gemma3" and hasattr(model_config, "text_config"):
+            # Gemma3 is registered as Gemma3ForConditionalGeneration (multimodal,
+            # incl. vision tower) in AutoModelForCausalLM. Load the text decoder
+            # only so AWQ never touches / loads the SigLIP vision tower.
+            from transformers import Gemma3ForCausalLM
+            self.model = Gemma3ForCausalLM.from_pretrained(self.model_name,
                                                 torch_dtype=dtype,
                                                 device_map=device_map,
                                                 low_cpu_mem_usage=True,
-                                                trust_remote_code=True, 
+                                                config=model_config.text_config,
+                                                )
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(self.model_name,
+                                                torch_dtype=dtype,
+                                                device_map=device_map,
+                                                low_cpu_mem_usage=True,
+                                                trust_remote_code=True,
                                                 config=model_config,
                                                 )
         # self.model.use_cache = False
