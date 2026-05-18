@@ -1,6 +1,10 @@
 from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaDecoderLayer
 from transformers.models.mistral.modeling_mistral import MistralForCausalLM, MistralDecoderLayer
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM, Qwen2DecoderLayer
+try:
+    from transformers.models.gemma3.modeling_gemma3 import Gemma3ForCausalLM
+except ImportError:  # transformers without Gemma3 support
+    Gemma3ForCausalLM = None
 from .KIVICache import KIVICacheConfig
 from .generation import convert_generation
 # from utils.data import get_tokenizer
@@ -53,6 +57,9 @@ def replace_kv_cache(model,
         if isinstance(model, Qwen2ForCausalLM):
             from .qwen2_kivi import convert_model_kivi
             convert_model_kivi(model)
+        elif Gemma3ForCausalLM is not None and isinstance(model, Gemma3ForCausalLM):
+            from .gemma3_kivi import convert_model_kivi
+            convert_model_kivi(model)
         elif isinstance(model, LlamaForCausalLM):
             from .llama_kivi import convert_model_kivi
             convert_model_kivi(model)
@@ -63,6 +70,13 @@ def replace_kv_cache(model,
             raise NotImplementedError(f"Unsupported model: {model.__class__}")
         # model.config.use_cache = use_cache
         model.config.quant_kv_output = quant_kv_output
+        # Gemma3 ships cache_implementation="hybrid"; that routes
+        # _prepare_cache_for_generation to build a HybridCache instead of the
+        # KIVI cache. Clear it so generation falls into the KIVI branch (Llama/
+        # Qwen/Mistral already leave this None).
+        model.config.cache_implementation = None
+        if getattr(model, "generation_config", None) is not None:
+            model.generation_config.cache_implementation = None
         convert_generation(model.config)
 
         # tokenizer = get_tokenizer(self.model_id)

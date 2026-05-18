@@ -39,7 +39,11 @@
       "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\), f\\) for f in ['amq/utils/args.py','amq/search/optimizer.py','amq/evaluation/evaluator_jsd_stratified.py']]; print\\('ast ok'\\)\")",
       "Bash(bash -n scripts/amq_search.sh)",
       "Bash(python plot_compare_loss_jsd_spec_lambda_sweep.py)",
-      "Bash(python plot_compare_loss_jsd_disco_variants.py)"
+      "Bash(python plot_compare_loss_jsd_disco_variants.py)",
+      "Bash(python plot_compare_5way.py)",
+      "Bash(python plot_compare_sample_mode_baselines.py)",
+      "Bash(python plot_compare_loss_jsd_vs_spec_single.py)",
+      "Bash(python plot_compare_4panel.py)"
     ],
     "additionalDirectories": [
       "/tmp"

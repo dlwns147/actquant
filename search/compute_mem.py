@@ -52,22 +52,23 @@ def normalize_kv_args(args):
 
 def compute_mem(args):
     unify_kv = normalize_kv_args(args)
-    print(args)
     with open(args.config, 'r') as f:
         config = json.load(f)[args.model_name]
 
     n_block = config['n_block']
 
     # Group sizes pair one-to-one with their bit lists (broadcast if length 1);
-    # everything else takes the cartesian product so a single invocation
-    # replaces the bash nested loops.
+    # everything else (including prune dim) takes the cartesian product so a
+    # single invocation replaces the bash nested loops.
     w_pairs = pair_bits_gs(args.w_bits, args.w_group_size, 'w')
     k_pairs = pair_bits_gs(args.k_bits, args.k_group_size, 'k')
 
     # n_token is the first (outermost) product axis so it varies slowest.
     if unify_kv:
         # Unify K and V into one KV axis: V mirrors K exactly (same bits,
-        # group size and pruning dim).
+        # group size and pruning dim). kv_bits<->kv_group_size pair one-to-one
+        # (k_pairs, via pair_bits_gs); kv_prune_dim stays an INDEPENDENT axis
+        # taking the cartesian product with k_pairs.
         combos = (
             (wp, kp, kp, kd, kd, nt)
             for nt, wp, kp, kd in product(
@@ -84,7 +85,7 @@ def compute_mem(args):
 
     results = []
     for (w_bits, w_gs), (k_bits, k_gs), (v_bits, v_gs), k_prune_dim, v_prune_dim, n_token in combos:
-        arch, complexity = compute_one(
+        _, complexity = compute_one(
             args, config, n_block, w_bits, w_gs, k_bits, v_bits,
             k_gs, v_gs, k_prune_dim, v_prune_dim, n_token)
         mem = complexity['memory']
@@ -98,18 +99,6 @@ def compute_mem(args):
         }
         results.append({'config': cfg, 'memory': mem, 'complexity': complexity})
 
-        print('=' * 80)
-        for k, v in arch['q'].items():
-            print(f'q.{k}: {v}')
-        for k, v in arch['p'].items():
-            print(f'p.{k}: {v}')
-        print(f'complexity: {complexity}')
-        print(f'model: {args.model_path}/{args.model_name}, cfg: {cfg} | '
-              f'MEM: {mem} B = {(mem / 1024):.3f} KB = '
-              f'{(mem / (1024 * 1024)):.3f} MB = '
-              f'{(mem / (1024 * 1024 * 1024)):.3f} GB')
-
-    print('=' * 80)
     print(f'{"summary":-^80}')
     print(f'model: {args.model_path}/{args.model_name} | {len(results)} combinations')
     for r in results:
@@ -129,41 +118,37 @@ def compute_mem(args):
 
 
 def write_csv(args, results):
-    """Transposed (vertical) layout, like sample_surrogate.py's results.csv:
-    one row per field (config key + every get_net_info complexity key),
-    one column per combination. `memory` is reported in bytes only."""
+    """Horizontal layout: a header row of field names (config keys + every
+    get_net_info complexity key), then one row per combination. `memory` is
+    reported in bytes only."""
     cfg_keys = list(results[0]['config'].keys())
     # complexity keys minus those already covered by the config rows
     comp_keys = [k for k in results[0]['complexity'].keys()
                  if k not in cfg_keys]
+    header = cfg_keys + comp_keys
 
     path = args.csv_file
     if args.save:
         os.makedirs(args.save, exist_ok=True)
         path = os.path.join(args.save, args.csv_file)
 
-    # results are ordered with n_token outermost; insert one blank column
+    # results are ordered with n_token outermost; insert one blank row
     # between consecutive n_token groups so each block is visually separated.
     sep_after = {i for i in range(len(results) - 1)
                  if results[i]['config']['n_token']
                  != results[i + 1]['config']['n_token']}
 
-    def cells(getter):
-        out = []
-        for i, r in enumerate(results):
-            out.append(getter(r))
-            if i in sep_after:
-                out.append('')
-        return out
-
     with open(path, 'w', newline='') as f:
         writer = csv.writer(f)
-        for k in cfg_keys:
-            writer.writerow([k] + cells(lambda r, k=k: r['config'][k]))
-        for k in comp_keys:
-            writer.writerow([k] + cells(lambda r, k=k: r['complexity'][k]))
-    print(f'wrote {len(cfg_keys) + len(comp_keys)} rows x '
-          f'{len(results)} combinations -> {path}')
+        writer.writerow(header)
+        for i, r in enumerate(results):
+            row = [r['config'][k] for k in cfg_keys] + \
+                  [r['complexity'][k] for k in comp_keys]
+            writer.writerow(row)
+            if i in sep_after:
+                writer.writerow([])
+    print(f'wrote {len(results)} combinations x '
+          f'{len(header)} columns -> {path}')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -198,8 +183,9 @@ if __name__ == '__main__':
     parser.add_argument('--kv_prune_dim', type=int, nargs='+', default=None,
                         help='unified KV prune dims (# head_dim channels '
                              'removed; 0 = no pruning); sets both '
-                             '--k_prune_dim and --v_prune_dim and treats KV '
-                             'as a single axis')
+                             '--k_prune_dim and --v_prune_dim. Independent '
+                             'axis (cartesian product), not paired with '
+                             '--kv_bits')
     parser.add_argument('--residual_length', type=int, default=128,
                         help='')
     parser.add_argument('--config', type=str, default='config/llama.json',

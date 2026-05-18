@@ -128,7 +128,8 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset
         preds.append({"pred": pred, "answers": json_obj["answers"], "all_classes": json_obj["all_classes"], "length": json_obj["length"]})
     return preds
 
-def pred_longbench(model, tokenizer, save_path, longbench_config, e):
+def pred_longbench(model, tokenizer, save_path, longbench_config, e,
+                   model_name=None):
     # print(args)
     # seed_everything(args.seed)
     # args = parse_args()
@@ -138,7 +139,17 @@ def pred_longbench(model, tokenizer, save_path, longbench_config, e):
     # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # model_name = args.model
 
-    model_name = model.config._name_or_path.split('/')[-1]
+    # NOTE: HQQ's AutoHQQHFModel.from_quantized() loads config via a
+    # config.json *file path*, so model.config._name_or_path ends in
+    # 'config.json' (KeyError on model2maxlen). Prefer the explicit
+    # model_name passed by the caller; only fall back to the config field.
+    if not model_name:
+        model_name = model.config._name_or_path.split('/')[-1]
+    if model_name not in model2maxlen:
+        raise KeyError(
+            f"model_name '{model_name}' not in {longbench_config}/"
+            f"model2maxlen.json (keys: {sorted(model2maxlen)}). "
+            f"Pass the correct --model_name.")
     max_length = model2maxlen[model_name]
     device = model.device
     

@@ -2,7 +2,7 @@ def get_predictor(model, inputs, targets, device='cpu', **kwargs):
 
     if model == 'rbf':
         from predictor.rbf import RBF
-        predictor = RBF(**kwargs)
+        predictor = RBF(device=device, **kwargs)
         predictor.fit(inputs, targets)
 
     elif model == 'carts':
@@ -23,6 +23,13 @@ def get_predictor(model, inputs, targets, device='cpu', **kwargs):
     elif model == 'as':
         from predictor.adaptive_switching import AdaptiveSwitching
         predictor = AdaptiveSwitching()
+        predictor.fit(inputs, targets)
+
+    elif model == 'ard_gp':
+        from predictor.ard_gp import ARDGP
+        predictor = ARDGP(kernel=kwargs.get('ard_kernel', 'matern32'),
+                          n_restarts=kwargs.get('gp_n_restarts', 10),
+                          device=device)
         predictor.fit(inputs, targets)
 
     else:

@@ -27,8 +27,9 @@ from evaluator import LlamaEvaluator
 from predictor.factory import get_predictor
 from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
                         evaluate_metric, configure_model_cache, get_net_info,
-                        clean_up)
-from utils.select import LazyPs, build_arch, assemble_F, select_valid_nd_idx
+                        clean_up, _LazyComp)
+from utils.select import (LazyPs, build_arch, assemble_F, select_valid_nd_idx,
+                          per_axis_metric)
 from utils.eval import eval_zeroshot
 from utils.longbench import pred_longbench, eval_longbench
 from utils.data import get_tokenizer
@@ -41,67 +42,32 @@ warnings.simplefilter("ignore")
 SURROGATES = ('rbf', 'gp', 'mlp', 'carts', 'as', 'ard_gp')
 
 
-class _ARDGP:
-    """sklearn GaussianProcessRegressor with an ARD kernel (per-dim
-    lengthscales) — ported from analysis/v5/_common.fit_ard_gp. Not in
-    predictor.factory (its 'gp' is a single-lengthscale Kriging GP).
-    Exposes .fit/.predict so it drops into the get_predictor code path."""
-
-    def __init__(self, kernel='matern32', with_noise=True, n_restarts=10):
-        self.kernel = kernel
-        self.with_noise = with_noise
-        self.n_restarts = n_restarts
-        self._gp = None
-
-    def fit(self, X, y):
-        from sklearn.gaussian_process import GaussianProcessRegressor
-        from sklearn.gaussian_process.kernels import (
-            RBF as SKRBF, ConstantKernel as C, WhiteKernel, Matern,
-            RationalQuadratic)
-        d = X.shape[1]
-        ls0, lsb = [1.0] * d, (1e-4, 1e4)
-        base = C(1.0, (1e-4, 1e2))
-        if self.kernel == 'rbf':
-            core = SKRBF(ls0, lsb)
-        elif self.kernel == 'matern52':
-            core = Matern(ls0, lsb, nu=2.5)
-        elif self.kernel == 'matern32':
-            core = Matern(ls0, lsb, nu=1.5)
-        elif self.kernel == 'rq':
-            core = RationalQuadratic(1.0, 1.0, lsb, (1e-2, 1e2))
-        else:
-            raise ValueError(f"unknown ard_kernel '{self.kernel}'")
-        k = base * core
-        if self.with_noise:
-            k = k + WhiteKernel(1e-5, (1e-9, 1e-2))
-            alpha = 1e-8
-        else:
-            alpha = 1e-10
-        self._gp = GaussianProcessRegressor(
-            kernel=k, normalize_y=True,
-            n_restarts_optimizer=self.n_restarts, alpha=alpha)
-        self._gp.fit(X, y)
-        return self
-
-    def predict(self, X):
-        return self._gp.predict(X)
+def _resolve_surrogate_device(spec):
+    """'auto' → cuda when visible else cpu; otherwise pass spec through
+    (the rbf/ard_gp predictors fall back to cpu themselves if cuda is
+    requested but unavailable)."""
+    if spec == 'auto':
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
+    return spec
 
 
 def _make_surrogate(args, X, y, M_valid):
-    """Fit the chosen surrogate. ard_gp is handled here; everything else
-    goes through predictor.factory.get_predictor."""
+    """Fit the chosen surrogate via predictor.factory.get_predictor
+    (ard_gp lives in predictor/ard_gp.py). The pure-PyTorch rbf / ard_gp
+    surrogates run on --surrogate_device (GPU/CPU selectable); the other
+    predictors ignore the device kwarg."""
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float)
-    if args.surrogate == 'ard_gp':
-        return _ARDGP(kernel=args.ard_kernel,
-                      n_restarts=args.gp_n_restarts).fit(X, y)
+    device = _resolve_surrogate_device(args.surrogate_device)
     kw = {}
     if args.surrogate == 'rbf':
         lb = np.minimum(X.min(0), M_valid.min(0))
         ub = np.maximum(X.max(0), M_valid.max(0))
         kw = dict(kernel=args.rbf_kernel, tail='linear',
                   lb=lb, ub=np.where(ub > lb, ub, lb + 1e-9))
-    return get_predictor(args.surrogate, X, y, **kw)
+    elif args.surrogate == 'ard_gp':
+        kw = dict(ard_kernel=args.ard_kernel, gp_n_restarts=args.gp_n_restarts)
+    return get_predictor(args.surrogate, X, y, device=device, **kw)
 
 
 # ───────────────────────── results.csv reader ─────────────────────────
@@ -204,7 +170,7 @@ def run_benchmarks(args, model, model_id):
         pred_longbench(model, tokenizer=get_tokenizer(model_id),
                        save_path=args.longbench_result_path,
                        longbench_config=args.longbench_config,
-                       e=args.longbench_e)
+                       e=args.longbench_e, model_name=args.model_name)
         eval_longbench(args.longbench_result_path, args.longbench_e)
         sentences = [f"{k}: {v}\n" for k, v in vars(args).items()]
         sentences += [f'Longbench Time: {time() - t0:.2f}s', "\n"]
@@ -281,105 +247,167 @@ def main(args):
 
     expr_map = build_expr_map(args, ctx)
     nd = build_nd(args, ctx, expr_map)
+    _lazy = getattr(nd, 'lazy', False)
     print(f"[post_search] expr_front={args.expr_front} → "
-          f"{'lazy comp_obj-pruned (no NDS, full archives)' if getattr(nd, 'lazy', False) else 'dense'} "
-          f"path  (n_total={nd.n_total:.3e})")
-    if getattr(nd, 'lazy', False) and not args.sample_path:
-        raise SystemExit(
-            "[post_search] lazy mode (no --expr_front, huge product) sets the "
-            "combined metric to NaN and relies on the surrogate to rank — but "
-            "--sample_path was not given (additive fallback would be all-NaN). "
-            "Provide --sample_path, or pass --expr_front.")
+          f"{'lazy comp_obj-pruned (no NDS, full archives)' if _lazy else 'dense'} "
+          f"path  (n_total={nd.n_total:.3e})  "
+          f"ranking={'surrogate' if args.sample_path else 'no-surrogate (see criterion below)'}")
     expr_keys, _esm, _efm = nd.expr_keys, nd.esm, nd.efm
     K = len(expr_keys)
 
     # ─────────────────────── candidate set under COMP_OBJ ───────────────────────
-    valid_nd_idx = select_valid_nd_idx(
-        nd.nd_shape, nd.new_metric_nd, nd.comp_nd_list,
-        comp_obj_min=args.comp_obj_min, comp_obj_max=args.comp_obj_max,
-        random_sample=None, has_quantile=False, has_prefer=bool(args.prefer))
-    if len(valid_nd_idx) == 0:
-        msg = ["[post_search] no architecture satisfies the COMP_OBJ range — "
-               "0 candidates after filtering."]
-        for i, obj in enumerate(args.comp_obj):
-            nd_i = np.asarray(nd.comp_nd_list[i])
-            msg.append(f"  {obj}: achievable [{nd_i.min():.4g}, {nd_i.max():.4g}]"
-                       f"  requested [{args.comp_obj_min[i]:.4g}, "
-                       f"{args.comp_obj_max[i]:.4g}]")
-        msg.append("Adjust --comp_obj_min/--comp_obj_max (or COMP_OBJ_VAL in "
-                   "the script) into the achievable range. Note: model/config "
-                   f"is {args.model_name} but expr archives may be from another "
-                   "model — cross-model adapts layer count and shifts the "
-                   "achievable memory range.")
-        raise SystemExit("\n".join(msg))
-    F = assemble_F(valid_nd_idx, expr_keys, _efm, nd.comp_nd_list,
-                   nd.new_metric_nd)
-    # per-axis search-metric columns of F (col 0 of each (metric,comp) pair)
-    M_valid = F[:, [1 + 2 * i for i in range(K)]]
+    # Separable per-axis-argmin fast path: no surrogate AND every comp_obj is
+    # single-axis (wbits/kvbits/kvdim …). Those axes are independent and their
+    # per-axis JSDs come from SEPARATE searches against different references —
+    # summing them into one scalar is meaningless. Instead, per comp_obj/axis
+    # pick the lowest-JSD subnet WITHIN that comp_obj's range and combine the
+    # per-axis winners. No Cartesian product (no _LAZY_MAX_FEASIBLE blow-up).
+    # -n N → the N combinations pairing each axis's k-th best (k=0..N-1).
+    def _per_axis_comp(o, i):
+        lc = nd.comp_nd_list
+        if isinstance(lc, _LazyComp):                 # reuse prebuilt piece
+            s = lc.comp_specs[i]
+            return ((s['axis'], np.asarray(s['vals'], float))
+                    if s['kind'] == '1d' else None)
+        return per_axis_metric(o, expr_keys, _esm, ctx.config,
+                               ctx.group_size, args.n_token)
 
-    # ─────────────────────── surrogate → combined metric ───────────────────────
-    if args.sample_path:
-        smp = load_sample_csv(
-            args.sample_path,
-            n_comp=len(comp_key_order(ctx.config, ctx.group_size)),
-            n_axes=K, n_datasets=max(1, len(args.datasets)))
-        if smp['X'].shape[1] != K:
-            raise SystemExit(
-                f"sample CSV has {smp['X'].shape[1]} per-axis columns but "
-                f"{K} expr axes were provided; they must match "
-                f"(expr_keys={expr_keys}).")
-        print(f"[surrogate] training data: N={smp['n_valid']} axes={expr_keys}")
-        model = _make_surrogate(args, smp['X'], smp['y'], M_valid)
-        yp_tr = np.asarray(model.predict(np.asarray(smp['X'], float))).reshape(-1)
-        ss_r = float(np.sum((smp['y'] - yp_tr) ** 2))
-        ss_t = float(np.sum((smp['y'] - smp['y'].mean()) ** 2))
-        r2 = 1.0 - ss_r / max(ss_t, 1e-30)
-        rho, _ = stats.spearmanr(yp_tr, smp['y'])
-        tau, _ = stats.kendalltau(yp_tr, smp['y'])
-        print(f"[surrogate={args.surrogate}] train R2={r2:.4f} "
-              f"rho={rho:.4f} tau={tau:.4f}")
-        pred = np.asarray(model.predict(M_valid)).reshape(-1).astype(float)
-        F[:, 0] = pred
-        # tripwire: lazy mode leaves F[:,0]=NaN until this overwrite; any NaN
-        # in the prediction (surrogate failure / leaked sentinel) must abort
-        # rather than silently produce a garbage ranking.
-        n_nan = int(np.isnan(F[:, 0]).sum())
-        if n_nan:
-            raise SystemExit(
-                f"[post_search] {n_nan}/{len(F)} predicted metrics are NaN "
-                f"after surrogate override (surrogate={args.surrogate}). "
-                f"Refusing to rank on NaN — check the surrogate fit / "
-                f"M_valid columns / sample CSV.")
+    _pa = ([_per_axis_comp(o, i) for i, o in enumerate(args.comp_obj)]
+           if args.comp_obj else [])
+    separable = (not args.sample_path and bool(args.comp_obj)
+                 and all(p is not None for p in _pa))
+
+    if separable:
+        ranked = {}                       # axis -> subnet idx, best→worst JSD
+        for i, o in enumerate(args.comp_obj):
+            ax, comp = _pa[i]
+            lo, hi = args.comp_obj_min[i], args.comp_obj_max[i]
+            m = _efm[expr_keys[ax]][:, 0]
+            feas = np.where((comp >= lo) & (comp <= hi))[0]
+            if len(feas) == 0:
+                raise SystemExit(
+                    f"[post_search] comp_obj '{o}' range [{lo:.4g},{hi:.4g}] "
+                    f"excludes every subnet on axis '{expr_keys[ax]}' "
+                    f"(achievable [{comp.min():.4g},{comp.max():.4g}]). "
+                    f"Widen --comp_obj_min/--comp_obj_max.")
+            ranked[ax] = feas[np.argsort(m[feas], kind='stable')]
+        for a, k in enumerate(expr_keys):             # uncovered axis: global
+            if a not in ranked:                       # lowest JSD, no window
+                ranked[a] = np.argsort(_efm[k][:, 0], kind='stable')
+        n_sel = min(int(args.n), min(len(v) for v in ranked.values()))
+        valid_nd_idx = np.empty((n_sel, K), np.int64)
+        for a in range(K):
+            valid_nd_idx[:, a] = ranked[a][:n_sel]
+        F = assemble_F(valid_nd_idx, expr_keys, _efm, nd.comp_nd_list,
+                       nd.new_metric_nd)
+        pf = F
+        ps = LazyPs(lambda row: build_arch(ctx.default_arch, expr_keys,
+                                           _esm, row), valid_nd_idx)
+        I = list(range(n_sel))
+        sel_mode = 'per-axis-argmin (no surrogate, separable comp_obj)'
+        for i, o in enumerate(args.comp_obj):
+            ax = _pa[i][0]
+            print(f"[post_search] {o}: best within "
+                  f"[{args.comp_obj_min[i]:.4g},{args.comp_obj_max[i]:.4g}] "
+                  f"→ '{expr_keys[ax]}' subnet {valid_nd_idx[0, ax]} "
+                  f"JSD={_efm[expr_keys[ax]][valid_nd_idx[0, ax], 0]:.5f}")
+        print(f"[post_search] no --sample_path + separable comp_obj "
+              f"{args.comp_obj} → per-axis lowest-JSD combination "
+              f"(NO Σ; -n={args.n} → {n_sel} combo(s))")
     else:
-        print("[surrogate] --sample_path not given → additive "
-              "args-scale combined metric")
-        pred = F[:, 0].astype(float)
+        valid_nd_idx = select_valid_nd_idx(
+            nd.nd_shape, nd.new_metric_nd, nd.comp_nd_list,
+            comp_obj_min=args.comp_obj_min, comp_obj_max=args.comp_obj_max,
+            random_sample=None, has_quantile=False, has_prefer=False)
+        if len(valid_nd_idx) == 0:
+            msg = ["[post_search] no architecture satisfies the COMP_OBJ range — "
+                   "0 candidates after filtering."]
+            for i, obj in enumerate(args.comp_obj):
+                nd_i = np.asarray(nd.comp_nd_list[i])
+                msg.append(f"  {obj}: achievable [{nd_i.min():.4g}, {nd_i.max():.4g}]"
+                           f"  requested [{args.comp_obj_min[i]:.4g}, "
+                           f"{args.comp_obj_max[i]:.4g}]")
+            msg.append("Adjust --comp_obj_min/--comp_obj_max (or COMP_OBJ_VAL in "
+                       "the script) into the achievable range. Note: model/config "
+                       f"is {args.model_name} but expr archives may be from another "
+                       "model — cross-model adapts layer count and shifts the "
+                       "achievable memory range.")
+            raise SystemExit("\n".join(msg))
+        F = assemble_F(valid_nd_idx, expr_keys, _efm, nd.comp_nd_list,
+                       nd.new_metric_nd)
+        # per-axis search-metric columns of F (col 0 of each (metric,comp) pair)
+        M_valid = F[:, [1 + 2 * i for i in range(K)]]
 
-    # re-rank candidate set by the (surrogate) prediction, ascending
-    order = np.argsort(pred)
-    F = F[order]
-    valid_nd_idx = valid_nd_idx[order]
-    pf = F
-    ps = LazyPs(lambda row: build_arch(ctx.default_arch, expr_keys, _esm, row),
-                valid_nd_idx)
+        # ─────────────── surrogate → combined metric ───────────────
+        if args.sample_path:
+            smp = load_sample_csv(
+                args.sample_path,
+                n_comp=len(comp_key_order(ctx.config, ctx.group_size)),
+                n_axes=K, n_datasets=max(1, len(args.datasets)))
+            if smp['X'].shape[1] != K:
+                raise SystemExit(
+                    f"sample CSV has {smp['X'].shape[1]} per-axis columns but "
+                    f"{K} expr axes were provided; they must match "
+                    f"(expr_keys={expr_keys}).")
+            print(f"[surrogate] training data: N={smp['n_valid']} axes={expr_keys}")
+            model = _make_surrogate(args, smp['X'], smp['y'], M_valid)
+            yp_tr = np.asarray(model.predict(np.asarray(smp['X'], float))).reshape(-1)
+            ss_r = float(np.sum((smp['y'] - yp_tr) ** 2))
+            ss_t = float(np.sum((smp['y'] - smp['y'].mean()) ** 2))
+            r2 = 1.0 - ss_r / max(ss_t, 1e-30)
+            rho, _ = stats.spearmanr(yp_tr, smp['y'])
+            tau, _ = stats.kendalltau(yp_tr, smp['y'])
+            print(f"[surrogate={args.surrogate}] train R2={r2:.4f} "
+                  f"rho={rho:.4f} tau={tau:.4f}")
+            pred = np.asarray(model.predict(M_valid)).reshape(-1).astype(float)
+            F[:, 0] = pred
+            # tripwire: any NaN in the surrogate prediction (fit failure /
+            # bad M_valid) must abort rather than silently rank on NaN.
+            n_nan = int(np.isnan(F[:, 0]).sum())
+            if n_nan:
+                raise SystemExit(
+                    f"[post_search] {n_nan}/{len(F)} predicted metrics are NaN "
+                    f"after surrogate override (surrogate={args.surrogate}). "
+                    f"Refusing to rank on NaN — check the surrogate fit / "
+                    f"M_valid columns / sample CSV.")
+        elif not args.comp_obj:
+            pred = F[:, 0].astype(float)
+            print("[post_search] no --sample_path, no comp_obj → additive "
+                  "args-scale combined metric")
+        else:
+            # coupled comp_obj (e.g. memory): one budget over all axes →
+            # rank by scale-1 Σ per-axis JSD within the budget.
+            pred = F[:, [1 + 2 * i for i in range(K)]].sum(1).astype(float)
+            print(f"[post_search] no --sample_path, coupled comp_obj "
+                  f"{args.comp_obj} → scale-1 Σ per-axis JSD within budget")
 
-    # ─────────────────────── final architecture selection ───────────────────────
-    if args.prefer:
-        preferences = {}
-        for p in args.prefer:
-            k, v = p.split('#')
-            preferences[k] = float(v)
-        weights = np.fromiter(preferences.values(), dtype=float)
-        I = ASF().do(pf[:, [0, *range(-n_comp_obj, 0)]],
-                     weights).argsort()[:args.n].reshape(args.n)
-        sel_mode = 'prefer'
-    elif args.high_tradeoff:
-        I = NonDominatedSorting().do(pf[:, [0, *range(-n_comp_obj, 0)]],
-                                     only_non_dominated_front=True)
-        sel_mode = 'high_tradeoff'
-    else:
+        order = np.argsort(pred)
+        F = F[order]
+        valid_nd_idx = valid_nd_idx[order]
+        pf = F
+        ps = LazyPs(lambda row: build_arch(ctx.default_arch, expr_keys,
+                                           _esm, row), valid_nd_idx)
         I = list(range(min(args.n, len(valid_nd_idx))))
         sel_mode = f'top-{args.n}'
+
+    # ─────────────────────── final architecture selection ───────────────────────
+    # NOTE: --prefer (ASF) and --high_tradeoff (NonDominatedSorting) final
+    # picks are intentionally DISABLED (shoved aside, do not use). Selection is
+    # the separable per-axis-argmin combo(s) or plain top-n. Re-enable the
+    # block below only if a weighted / non-dominated pick is explicitly needed.
+    # if args.prefer:
+    #     preferences = {}
+    #     for p in args.prefer:
+    #         k, v = p.split('#')
+    #         preferences[k] = float(v)
+    #     weights = np.fromiter(preferences.values(), dtype=float)
+    #     I = ASF().do(pf[:, [0, *range(-n_comp_obj, 0)]],
+    #                  weights).argsort()[:args.n].reshape(args.n)
+    #     sel_mode = 'prefer'
+    # elif args.high_tradeoff:
+    #     I = NonDominatedSorting().do(pf[:, [0, *range(-n_comp_obj, 0)]],
+    #                                  only_non_dominated_front=True)
+    #     sel_mode = 'high_tradeoff'
 
     print(f'[selection] mode={sel_mode}  |I|={len(I)}  '
           f'|candidates|={len(valid_nd_idx)}  (n_total={nd.n_total})')
@@ -496,6 +524,10 @@ def build_parser():
                    help='ARD kernel when --surrogate ard_gp (v5: matern32)')
     p.add_argument('--gp_n_restarts', type=int, default=10,
                    help='n_restarts_optimizer for --surrogate ard_gp')
+    p.add_argument('--surrogate_device', type=str, default='auto',
+                   help="device for the pure-PyTorch rbf / ard_gp surrogate: "
+                        "'auto' (cuda if visible else cpu), 'cpu', 'cuda', "
+                        "'cuda:N'. Other surrogates ignore this.")
     # comp_obj range + final selection
     p.add_argument('--comp_obj', type=str, nargs='+', default=[])
     p.add_argument('--comp_obj_min', type=float, nargs='+', default=[])

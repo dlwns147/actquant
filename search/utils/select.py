@@ -149,10 +149,11 @@ def draw_random(n_draw, n_pool, exclude=(), rng=None):
 # Every comp_obj is low-rank (single-axis 1D / eff_kvbits 2D / additive
 # memory = w-1D + cache-2D). With a comp_obj window the feasible set is
 # enumerated EXACTLY here without any nd_shape array, returning the same
-# (valid_nd_idx, F) the dense path would — except F[:,0] is NaN (a surrogate
-# must overwrite it; post_search asserts none survives). Candidates are
-# sorted by the first comp_obj value ascending (post_search re-ranks by the
-# surrogate anyway, so this is just a deterministic, useful order).
+# (valid_nd_idx, F) the dense path would — F[:,0] is the additive combined
+# metric (Σ scale·JSD), so post_search ranks correctly WITH or WITHOUT a
+# surrogate (surrogate, if given, overwrites it then NaN-checks). Candidates
+# are also sorted by the first comp_obj value ascending (deterministic order;
+# post_search re-ranks by F[:,0] anyway).
 
 _LAZY_MAX_FEASIBLE = 5e7   # cap on the POST-filter set, not the full product
 
@@ -340,11 +341,14 @@ def _lazy_feasible(lc, comp_obj_min, comp_obj_max, random_sample,
 
 
 def _lazy_assemble_F(lc, valid_nd_idx):
-    """assemble_F for the lazy path: F[:,0]=NaN (surrogate must overwrite)."""
+    """assemble_F for the lazy path. F[:,0] = additive combined metric
+    (Σ scale·JSD == dense new_metric_nd) so post_search ranks correctly even
+    WITHOUT a surrogate; when --sample_path is given it is overwritten by the
+    surrogate prediction (and then NaN-checked) exactly like the dense path."""
     if len(valid_nd_idx) == 0:
         return np.empty((0, 1 + 2 * len(lc.expr_keys) + len(lc.comp_specs)),
                         np.float64)
-    parts = [np.full((len(valid_nd_idx), 1), np.nan, np.float64),
+    parts = [lc.combined_metric(valid_nd_idx).reshape(-1, 1),
              np.column_stack([lc.efm[k][valid_nd_idx[:, i]]
                               for i, k in enumerate(lc.expr_keys)])]
     if lc.comp_specs:

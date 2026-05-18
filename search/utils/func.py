@@ -697,8 +697,8 @@ class NDCombo:
         # lazy=True (no --expr_front, huge product): new_metric_nd is None and
         # comp_nd_list is a _LazyComp; comp_obj filtering happens BEFORE any
         # nd_shape array is materialised (select_valid_nd_idx / assemble_F
-        # branch on the _LazyComp). The combined-metric column is NaN — a
-        # surrogate must overwrite it (post_search asserts no NaN survives).
+        # branch on the _LazyComp). F[:,0] is the additive combined metric
+        # (== dense new_metric_nd) so it ranks with OR without a surrogate.
         self.lazy = lazy
 
     @property
@@ -730,12 +730,24 @@ class _LazyComp:
     diagnostic (`np.asarray(nd.comp_nd_list[i]).min()/.max()`) works
     unchanged."""
 
-    def __init__(self, expr_keys, efm, comp_specs, comp_obj):
+    def __init__(self, expr_keys, efm, comp_specs, comp_obj, metric_1d=None):
         self.expr_keys = list(expr_keys)
         self.efm = efm
         self.comp_specs = comp_specs
         self.comp_obj = list(comp_obj)
         self.nd_shape = tuple(len(efm[k]) for k in self.expr_keys)
+        # per-axis scale·(sqrt?) JSD, order==expr_keys; the additive combined
+        # metric (== dense new_metric_nd) so the no-surrogate fallback ranks
+        # correctly. None → treated as zeros (back-compat for unit tests).
+        self.metric_1d = metric_1d
+
+    def combined_metric(self, nd_idx):
+        if not self.metric_1d:
+            return np.zeros(len(nd_idx), dtype=np.float64)
+        out = np.zeros(len(nd_idx), dtype=np.float64)
+        for ax in range(len(self.expr_keys)):
+            out += np.asarray(self.metric_1d[ax], np.float64)[nd_idx[:, ax]]
+        return out
 
     def spec_range(self, spec):
         if spec['kind'] in ('1d', '2d'):
@@ -851,7 +863,18 @@ def _build_lazy_comp(args, expr_keys, esm, efm, config, group_size,
             raise SystemExit(
                 f"[build_nd/lazy] comp_obj='{obj}' unsupported. Supported: "
                 f"{sorted(_SINGLE_AXIS_COMP) + ['eff_kvbits','eff_kbits','eff_vbits','memory']}")
-    return _LazyComp(expr_keys, efm, specs, args.comp_obj)
+    # additive combined metric pieces == dense build_nd (scale applied AFTER
+    # sqrt): used as F[:,0] so post_search's no-surrogate fallback ranks by
+    # Σ scale·JSD, and as a pre-surrogate order otherwise.
+    _sc = {'w': args.w_scale, 'kv': args.kv_scale,
+           'kvdim': args.kvdim_scale, 'eff_kv': args.eff_kv_scale}
+    metric_1d = []
+    for k in expr_keys:
+        m = np.asarray(efm[k][:, 0], np.float64)
+        if args.sqrt:
+            m = np.sqrt(m)
+        metric_1d.append(_sc[k] * m)
+    return _LazyComp(expr_keys, efm, specs, args.comp_obj, metric_1d)
 
 
 def build_nd(args, ctx, expr_map):

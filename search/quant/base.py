@@ -15,26 +15,37 @@ sys.path.append('..')
 def get_awq_calib_dataset(data="pileval", tokenizer=None, n_samples=512, block_size=512):
     if data == "pileval":
         dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
+        dataset = dataset.shuffle(seed=42)
+        samples = []
+        n_run = 0
+        for d in dataset:
+            line = d["text"].strip()
+            line_encoded = tokenizer.encode(line)
+            if len(line_encoded) > 512:
+                continue
+            sample = torch.tensor([line_encoded])
+            if sample.numel() == 0:
+                continue
+            samples.append(sample)
+            n_run += 1
+            if n_run == n_samples:
+                break
+        cat_samples = torch.cat(samples, dim=1)
+    elif data in ("wikitext2", "wikitext"):
+        # AWQ activation calibration on wikitext-2-raw-v1 train (used by the
+        # NAS search pipeline). Concatenate the train split and take the first
+        # n_samples * block_size tokens, mirroring the pileval contract: a
+        # single [1, T] stream that the tail splits into block_size chunks.
+        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        enc = tokenizer("\n\n".join(traindata["text"]), return_tensors="pt").input_ids
+        need = n_samples * block_size
+        if enc.shape[1] < need:
+            raise ValueError(f"wikitext2 train has {enc.shape[1]} tokens < "
+                             f"requested {need} ({n_samples}x{block_size})")
+        cat_samples = enc[:, :need]
     else:
-        raise NotImplementedError
-    dataset = dataset.shuffle(seed=42)
-    samples = []
-    n_run = 0
-    for data in dataset:
-        line = data["text"]
-        line = line.strip()
-        line_encoded = tokenizer.encode(line)
-        if len(line_encoded) > 512:
-            continue
-        sample = torch.tensor([line_encoded])
-        if sample.numel() == 0:
-            continue
-        samples.append(sample)
-        n_run += 1
-        if n_run == n_samples:
-            break
+        raise NotImplementedError(data)
     # now concatenate all samples and split according to block size
-    cat_samples = torch.cat(samples, dim=1)
     n_split = cat_samples.shape[1] // block_size
     print(f" * Split into {n_split} blocks")
     return [
@@ -134,25 +145,38 @@ class BASE:
 
         model_config = AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
         # model_config.use_cache = use_cache
-        if getattr(model_config, "model_type", "") == "gemma3" and hasattr(model_config, "text_config"):
+        is_gemma3 = (getattr(model_config, "model_type", "") == "gemma3"
+                     and hasattr(model_config, "text_config"))
+        if is_gemma3:
             # Gemma3 is registered as Gemma3ForConditionalGeneration (multimodal,
             # incl. vision tower) in AutoModelForCausalLM. Load the text decoder
             # only so AWQ never touches / loads the SigLIP vision tower.
             from transformers import Gemma3ForCausalLM
-            self.model = Gemma3ForCausalLM.from_pretrained(self.model_name,
-                                                torch_dtype=dtype,
-                                                device_map=device_map,
-                                                low_cpu_mem_usage=True,
-                                                config=model_config.text_config,
-                                                )
+            loader, base_kw = Gemma3ForCausalLM, dict(config=model_config.text_config)
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(self.model_name,
-                                                torch_dtype=dtype,
-                                                device_map=device_map,
-                                                low_cpu_mem_usage=True,
-                                                trust_remote_code=True,
-                                                config=model_config,
-                                                )
+            loader = AutoModelForCausalLM
+            base_kw = dict(trust_remote_code=True, config=model_config)
+        base_kw.update(torch_dtype=dtype, device_map=device_map,
+                       low_cpu_mem_usage=True)
+
+        # Default to flash_attention_2 — needed downstream for the KIVI + ThinK
+        # long-context KV path (memory-scalable, sliding-window aware). Fall
+        # back gracefully if flash-attn is unavailable / incompatible (e.g.
+        # fp32 'auto' dtype, or a model without FA2 support).
+        self.model = None
+        for impl in ("flash_attention_2", "sdpa", "eager"):
+            try:
+                self.model = loader.from_pretrained(
+                    self.model_name, attn_implementation=impl, **base_kw)
+                if impl != "flash_attention_2":
+                    print(f"[load_model] flash_attention_2 unavailable; "
+                          f"using attn_implementation='{impl}'")
+                break
+            except (ImportError, ValueError, RuntimeError) as e:
+                print(f"[load_model] attn_implementation='{impl}' failed "
+                      f"({type(e).__name__}: {str(e)[:120]}); trying next")
+        if self.model is None:
+            raise RuntimeError("could not load model with any attn backend")
         # self.model.use_cache = False
         # if use_kivi:
         #     kwargs.get()

@@ -15,7 +15,8 @@ from utils.select import _lazy_feasible, _lazy_assemble_F
 def _lc(expr_keys, sizes, comp_specs):
     efm = {k: np.random.default_rng(len(k)).random((n, 2))
            for k, n in zip(expr_keys, sizes)}
-    lc = _LazyComp(expr_keys, efm, comp_specs, ['o'] * len(comp_specs))
+    m1d = [efm[k][:, 0] for k in expr_keys]          # scale=1 additive metric
+    lc = _LazyComp(expr_keys, efm, comp_specs, ['o'] * len(comp_specs), m1d)
     lc.nd_shape = tuple(sizes)
     return lc
 
@@ -108,7 +109,7 @@ def test_memory_no_w_axis():
     assert len(got) and _same_set(got, exp)
 
 
-def test_sorted_by_first_comp_and_F_has_nan_col():
+def test_sorted_by_first_comp_and_F_additive_col():
     rng = np.random.default_rng(6)
     sizes = (5, 4)
     c0 = rng.random(sizes[0])
@@ -118,7 +119,10 @@ def test_sorted_by_first_comp_and_F_has_nan_col():
     key = c0[got[:, 0]]
     assert np.all(np.diff(key) >= 0)            # ascending by first comp_obj
     F = _lazy_assemble_F(lc, got)
-    assert np.isnan(F[:, 0]).all()              # combined col is the sentinel
+    # F[:,0] == additive combined metric (Σ per-axis JSD), NOT NaN: ranks
+    # correctly even without a surrogate.
+    exp = lc.efm['kv'][got[:, 0], 0] + lc.efm['kvdim'][got[:, 1], 0]
+    assert np.allclose(F[:, 0], exp) and not np.isnan(F[:, 0]).any()
     assert F.shape == (len(got), 1 + 2 * 2 + 1)
 
 
