@@ -1,3 +1,0 @@
-include: apps.yaml
-task: apps_introductory
-process_docs: !function utils.filter_introductory

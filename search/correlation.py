@@ -65,7 +65,9 @@ from tqdm import tqdm
 from evaluator import LlamaEvaluator
 from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
                         configure_model_cache, get_net_info, clean_up)
-from utils.select import (build_arch, select_valid_nd_idx, assemble_F)
+from utils.select import (build_arch, select_valid_nd_idx, assemble_F,
+                          LazyPs, draw_random, quantile_select, axis_of_map,
+                          coverage_subset_nsga2_extras)
 from utils.eval import eval_metric
 from utils.data import get_tokenizer
 from utils.longbench import pred_longbench, eval_longbench
@@ -193,14 +195,91 @@ def cmd_sample(args):
     if args.n_archs is None or args.n_archs <= 0:
         raise SystemExit("[correlation/sample] --n_archs must be > 0")
 
+    # ── Parse --quantile_sample (same syntax as sample_surrogate.py) ──
+    # "metric_w#0.01,0.5,0.99 metric_kv#0.05,0.95" → {key: [q1,q2,...]}.
+    # Quantile anchors hit ARCHS at specific (per-metric) percentiles —
+    # extremes by default, so the correlation regression sees the full range
+    # of each axis instead of a random clump.
+    quantile_specs = {}
+    for spec in (args.quantile_sample or []):
+        k, v = spec.split('#')
+        quantile_specs[k] = [float(q) for q in v.split(',')]
+    if quantile_specs:
+        _axis_map = axis_of_map(expr_keys)
+        _expr_flag = {'w': '--w_expr', 'kv': '--kv_expr',
+                      'kvdim': '--kvdim_expr', 'eff_kv': '--eff_kv_expr'}
+        _missing = [(k, _axis_map.get(k)) for k in quantile_specs
+                    if _axis_map.get(k) is not None
+                    and _axis_map.get(k) not in expr_keys]
+        if _missing:
+            for k, ax in _missing:
+                print(f"[quantile_sample] ERROR: metric '{k}' depends on "
+                      f"axis '{ax}' but {_expr_flag.get(ax, ax)} was not "
+                      f"provided; quantile would collapse to a constant.")
+            raise SystemExit(1)
+
+    # ── Candidate filter (comp_obj range + optional random pre-sample) ──
+    # has_quantile/has_prefer drive select_valid_nd_idx's branching:
+    # without quantile anchors, the random_sample knob pre-samples here;
+    # with quantile anchors, we want the FULL feasible set so the quantile
+    # picks have something to hit (extras drawn below).
     valid_nd_idx = select_valid_nd_idx(
         nd.nd_shape, nd.new_metric_nd, nd.comp_nd_list,
         comp_obj_min=args.comp_obj_min, comp_obj_max=args.comp_obj_max,
-        random_sample=args.n_archs, has_quantile=False, has_prefer=False)
+        random_sample=(args.n_archs if not quantile_specs else None),
+        has_quantile=bool(quantile_specs), has_prefer=False)
     if len(valid_nd_idx) == 0:
         raise SystemExit(
             "[correlation/sample] 0 candidates after comp_obj filter — "
             "widen --comp_obj_min/--comp_obj_max.")
+
+    # ── Pick final indices I (mirrors sample_surrogate.main()) ──
+    if quantile_specs:
+        I_quant, metric_vals = quantile_select(
+            quantile_specs, valid_nd_idx, expr_keys, _esm,
+            ctx.default_arch, ctx.config, ctx.group_size, args.n_token,
+            axis_cache={}, efm=_efm)
+        print(f"[quantile_sample] anchors selected: {len(I_quant)} "
+              f"(out of {len(valid_nd_idx)} candidates)")
+
+        # n_extras = n_archs - len(I_quant), clamped to >= 0
+        n_extras = max(0, int(args.n_archs) - len(I_quant))
+        I_extra = []
+        if n_extras > 0:
+            if args.sampling_method == 'random':
+                I_extra = draw_random(n_extras, len(valid_nd_idx),
+                                      exclude=I_quant)
+                samp_desc = f'random (+{len(I_extra)} extras, '\
+                            f'pool={len(valid_nd_idx) - len(I_quant)})'
+            else:
+                fit_mode = args.sampling_method.replace('coverage_nsga2_', '')
+                I_extra = coverage_subset_nsga2_extras(
+                    valid_nd_idx, _efm, expr_keys, anchor_idx=I_quant,
+                    K=n_extras, fitness=fit_mode,
+                    coord=args.coverage_coord,
+                    per_axis_agg=args.coverage_per_axis_agg,
+                    pareto_select=args.coverage_pareto_select,
+                    seed=args.seed, verbose=False)
+                samp_desc = (f"{args.sampling_method} "
+                             f"(coord={args.coverage_coord}, "
+                             f"per_axis_agg={args.coverage_per_axis_agg}, "
+                             f"pareto_select={args.coverage_pareto_select}) "
+                             f"+{len(I_extra)} extras")
+        else:
+            samp_desc = 'quantile-only (n_extras=0)'
+
+        I_set = sorted(set(I_quant) | set(I_extra))
+        assert len(I_set) == len(I_quant) + len(I_extra), \
+            'quantile and extras must be disjoint'
+        # Reorder valid_nd_idx so row i==I_set[i] (so archs.csv idx == I_set[i])
+        valid_nd_idx = valid_nd_idx[I_set]
+        n_final = len(I_set)
+    else:
+        # Pure random; select_valid_nd_idx already sub-sampled to n_archs.
+        n_final = len(valid_nd_idx)
+        samp_desc = f'random (n_archs={n_final})'
+
+    print(f"[correlation/sample] final |I|={n_final}  method={samp_desc}")
 
     F = assemble_F(valid_nd_idx, expr_keys, _efm, nd.comp_nd_list,
                    nd.new_metric_nd)
@@ -843,6 +922,34 @@ def build_parser():
                         'archs.csv) to sample. NOT to be confused with the '
                         'per-loader n_sample (data examples per metric, set '
                         'inside GROUPS).')
+    # ── quantile + coverage-NSGA2 sampling (mirrors sample_surrogate.py) ──
+    p.add_argument('--quantile_sample', type=str, nargs='+', default=[],
+                   help='(sample) per-metric quantile anchors. Syntax: '
+                        '"metric_w#0.01,0.5,0.99 metric_kv#0.05,0.95". '
+                        'Picks one arch per quantile point; extras (up to '
+                        '--n_archs total) drawn via --sampling_method. '
+                        'Empty → pure random.')
+    p.add_argument('--sampling_method', type=str,
+                   default='coverage_nsga2_combined',
+                   choices=['random', 'coverage_nsga2_joint',
+                            'coverage_nsga2_marginal',
+                            'coverage_nsga2_combined'],
+                   help='(sample) how to draw extras on top of the quantile '
+                        'anchors. Default coverage_nsga2_combined = 2-obj '
+                        'GA (cov_rad, std_max) → balances extent (reach '
+                        'every region) and per-axis uniformity. '
+                        'Ignored when --quantile_sample empty.')
+    p.add_argument('--coverage_coord', type=str, default='rank',
+                   choices=['z', 'rank'],
+                   help='(sample) coverage GA coordinate space.')
+    p.add_argument('--coverage_per_axis_agg', type=str, default='max',
+                   choices=['max', 'sum', 'pareto'],
+                   help='(sample) per-axis std aggregator for '
+                        'coverage_nsga2_marginal.')
+    p.add_argument('--coverage_pareto_select', type=str, default='auto',
+                   choices=['auto', 'strategy3', 'knee'],
+                   help='(sample) how to collapse a multi-obj Pareto front '
+                        'to K picks.')
     # eval mode
     p.add_argument('--archs_csv', type=str, default='',
                    help='(eval / aggregate) path to archs.csv (default: <save>/archs.csv)')

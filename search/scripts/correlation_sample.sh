@@ -48,6 +48,24 @@ N_TOKEN=16384
 # set inside GROUPS in correlation.py.
 N_ARCHS=50
 
+# ── Sampling strategy (mirrors scripts/sample_surrogate.sh) ──
+# Empty QUANTILE_SAMPLE → pure random sampling (cheap; uniform over the
+# feasible set). Populated → pick one arch at each quantile point per
+# metric (anchors), then fill the rest up to N_ARCHS via SAMPLING_METHOD.
+#
+# Recommended for correlation studies: cover the per-axis extremes so the
+# regression sees high-loss / low-loss archs, not a random clump.
+QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.01,0.5,0.99"
+# QUANTILE_SAMPLE=""
+
+# SAMPLING_METHOD: random | coverage_nsga2_{joint,marginal,combined}
+# 'combined' is 2-obj (cov_rad, std_max); paired with COVERAGE_PARETO_SELECT=
+# auto → knee picks the balanced (both-low) Pareto point.
+SAMPLING_METHOD=coverage_nsga2_combined
+COVERAGE_COORD=rank
+COVERAGE_PER_AXIS_AGG=max
+COVERAGE_PARETO_SELECT=auto
+
 # ── per-axis search archives (Llama-3.1-8B-Instruct, same as scripts/sample_surrogate.sh) ──
 W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
 KV_EXPR=save/search/think/2605112033_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_100.stats
@@ -80,7 +98,8 @@ MIN_COMP_OBJ=$(IFS=" " ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
 # ── output dir (eval/aggregate read archs.csv from here) ──
-SAVE=save/correlation/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_n${N_ARCHS}_s${SEED}
+SAMP_TAG=$([ -n "${QUANTILE_SAMPLE}" ] && echo "q$(echo ${SAMPLING_METHOD#coverage_nsga2_} | cut -c1-1)${COVERAGE_COORD:0:1}" || echo "rand")
+SAVE=save/correlation/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_n${N_ARCHS}_${SAMP_TAG}_s${SEED}
 echo "OUTPUT -> ${SAVE}/archs.csv"
 
 ARGS="--mode sample \
@@ -102,7 +121,15 @@ ARGS="--mode sample \
 --seed ${SEED} \
 --n_archs ${N_ARCHS} \
 --save ${SAVE} \
+--sampling_method ${SAMPLING_METHOD} \
+--coverage_coord ${COVERAGE_COORD} \
+--coverage_per_axis_agg ${COVERAGE_PER_AXIS_AGG} \
+--coverage_pareto_select ${COVERAGE_PARETO_SELECT} \
 --expr_front"
+
+if [ -n "${QUANTILE_SAMPLE}" ]; then
+    ARGS+=" --quantile_sample ${QUANTILE_SAMPLE}"
+fi
 
 for g in "${K_GROUP_SIZE[@]}"; do ARGS+=" --k_group_size ${g} "; done
 for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done

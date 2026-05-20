@@ -1,3 +1,0 @@
-include: apps.yaml
-task: apps_competition
-process_docs: !function utils.filter_competition
