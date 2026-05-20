@@ -48,15 +48,16 @@ QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 SEED=0
 
 # ── COMP_OBJ range (the deployment budget) ──
-# COMP_OBJ=(memory)
-# COMP_OBJ_VAL=(6271016960)
-# # COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
-# COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.0001)" | bc))
-
-COMP_OBJ=(wbits kvbits kvdim)
-COMP_OBJ_VAL=(3 3.25 102)
+COMP_OBJ=(memory)
+COMP_OBJ_VAL=(5315764224)
 # COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
-COMP_OBJ_THRESHOLD_LIST=(0.005 0.005 0.05)
+# COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
+COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.0001)" | bc))
+
+# COMP_OBJ=(wbits kvbits kvdim)
+# COMP_OBJ_VAL=(3 3.25 102)
+# # COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
+# COMP_OBJ_THRESHOLD_LIST=(0.005 0.005 0.05)
 
 N_TOKEN=16384
 
@@ -165,14 +166,10 @@ ARGS="--gpu_id ${DEVICES} \
 --seed ${SEED} \
 -n ${N} \
 --save ${SAVE} \
---surrogate ${SURROGATE} \
---surrogate_device ${SURROGATE_DEVICE} \
---rbf_kernel ${RBF_KERNEL} \
 --comp_obj ${COMP_OBJ} \
 --comp_obj_min ${MIN_COMP_OBJ} \
 --comp_obj_max ${MAX_COMP_OBJ}"
 
-# --sample_path ${SAMPLE_PATH} \
 
 # --expr_front \
 
@@ -189,6 +186,7 @@ fi
 [ -n "${KV_EXPR}" ]     && ARGS+=" --kv_expr ${KV_EXPR}"
 [ -n "${KVDIM_EXPR}" ]  && ARGS+=" --kvdim_expr ${KVDIM_EXPR}"
 [ -n "${EFF_KV_EXPR}" ] && ARGS+=" --eff_kv_expr ${EFF_KV_EXPR}"
+[ -n "${SAMPLE_PATH}" ] && ARGS+=" --sample_path ${SAMPLE_PATH} --surrogate ${SURROGATE} --rbf_kernel ${RBF_KERNEL} --surrogate_device ${SURROGATE_DEVICE}"
 
 # ARGS+=" --datasets ${DATASETS} --seqlen ${SEQLEN} --min_seqlen ${MIN_SEQLEN} --n_sample ${N_SAMPLE} --data_batch_size ${DATA_BATCH_SIZE}"
 # ARGS+=" --zeroshot --tasks ${TASKS} --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE}"

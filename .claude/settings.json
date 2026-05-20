@@ -86,7 +86,11 @@
       "Bash(cp -v /NAS/SJ/actquant/poc/benchmark_proxy/lm_eval_vllm/aug_result/meta-llama__Llama-3.1-8B-Instruct/samples_mbpp_aug_2*.jsonl /NAS/SJ/actquant/poc/benchmark_proxy/lm_eval_vllm/results/mbpp_aug/meta-llama__Llama-3.1-8B-Instruct/)",
       "Bash(python /tmp/patch_amq_search.py)",
       "Bash(sed -n '66,108p' /NAS/SJ/actquant/poc/benchmark_proxy/amq_all_random/scripts/amq_search.sh)",
-      "Bash(python plot_sample_mean_histogram.py)"
+      "Bash(python plot_sample_mean_histogram.py)",
+      "Bash(python plot_5way_disco.py)",
+      "Bash(python plot_loss_vs_genperf.py)",
+      "Bash(chmod +x /NAS/SJ/actquant/poc/benchmark_proxy/amq_all_random/scripts/amq_quantization_gen_topk.sh)",
+      "Bash(python plot_topk_compare.py)"
     ],
     "additionalDirectories": [
       "/tmp",
