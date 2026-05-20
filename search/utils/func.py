@@ -1020,7 +1020,10 @@ def configure_model_cache(args, model, *, use_cache):
     use_cache=False → single-shot loss with quantised KV output
     """
     res_len = args.residual_length if use_cache else 0
-    if 'kivi' in args.kv_method:
+    # 'think' is a KIVI variant — model attaches the same kivi_config (see
+    # evaluator.py active_kv = 'kivi' if 'kivi' in m or 'think' in m). Match
+    # that here so residual_length is set when kv_method='think'.
+    if 'kivi' in args.kv_method or 'think' in args.kv_method:
         model.config.kivi_config.residual_length = res_len
     elif 'hqq' in args.kv_method:
         model.generation_config.cache_config = res_len

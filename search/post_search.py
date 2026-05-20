@@ -490,8 +490,10 @@ def build_parser():
     # quant methods / bits
     p.add_argument('--w_method', type=str, nargs='+', default=[],
                    choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'])
-    p.add_argument('--kv_method', type=str, default='kivi',
-                   choices=['fp16', 'hqq', 'kivi'])
+    p.add_argument('--kv_method', type=str, nargs='+', default=['kivi'],
+                   choices=['fp16', 'hqq', 'kivi', 'think'],
+                   help="space-separated list (e.g. 'kivi think'). Matches "
+                        "search.py.")
     p.add_argument('--quant_model_paths', type=str, nargs='+', default=[])
     p.add_argument('--w_bits', type=int, nargs='+', default=[])
     p.add_argument('--k_bits', type=int, nargs='+', default=[2, 4])
