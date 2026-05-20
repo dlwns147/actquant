@@ -196,6 +196,7 @@ search_woo/
 search/outlier
 search/visualize
 search/analysis
+search/test
 
 */.ninja_deps
 *.o

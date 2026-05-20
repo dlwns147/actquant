@@ -1,0 +1,27 @@
+task: apps
+dataset_path: codeparrot/apps
+dataset_name: all
+dataset_kwargs:
+  trust_remote_code: true
+output_type: generate_until
+test_split: test
+num_fewshot: 0
+doc_to_text: !function utils.doc_to_text
+doc_to_target: !function utils.doc_to_target
+generation_kwargs:
+  until:
+    - "\nQUESTION:"
+    - "\n```\n\n"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 1024
+process_results: !function utils.process_results
+metric_list:
+  - metric: strict_acc       # 1.0 iff every test case passes (APPS strict accuracy)
+    aggregation: mean
+    higher_is_better: true
+  - metric: test_case_acc    # mean fraction of test cases passed per problem
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0

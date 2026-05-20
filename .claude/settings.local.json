@@ -64,7 +64,9 @@
       "Bash(python3 amq/evaluation/sample_mean_distribution_same_n.py)",
       "Bash(python3 plot_compare_rand_vs_jsd_n16.py)",
       "Bash(python3 plot_compare_wikitext2_vs_jsd_n16.py)",
-      "Bash(python3 amq/evaluation/sample_mean_distribution_n200.py)"
+      "Bash(python3 amq/evaluation/sample_mean_distribution_n200.py)",
+      "Bash(cd /NAS/SJ/actquant/poc/benchmark_proxy/amq_instruct_pure && rm amq/evaluation/evaluator_stratified.py amq/evaluation/evaluator_vllm.py amq/post_search/gen_eval.py amq/post_search/multi_gpu_gen_eval.py && rm -f amq/evaluation/__pycache__/evaluator_stratified*.pyc amq/evaluation/__pycache__/evaluator_vllm*.pyc amq/post_search/__pycache__/gen_eval*.pyc amq/post_search/__pycache__/multi_gpu_gen_eval*.pyc && ls amq/evaluation/*.py amq/post_search/*.py)",
+      "Bash(python -c ' *)"
     ]
   }
 }

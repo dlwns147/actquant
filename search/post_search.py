@@ -71,12 +71,17 @@ def _make_surrogate(args, X, y, M_valid):
 
 
 # ───────────────────────── results.csv reader ─────────────────────────
-def load_sample_csv(path, n_comp, n_axes, n_datasets=1):
+def load_sample_csv(path, n_comp, n_axes, n_datasets=None):
     """Parse a sample_surrogate results.csv → (X, y, y_combined, n_valid).
 
     X (N, n_axes) per-axis search metric, y (N,) measured metric on the first
     dataset. NaN-metric columns (in-progress runs) are dropped, matching
     analysis/v5/_common.extract_xy.
+
+    n_datasets is auto-detected from the CSV row count
+    (total rows = n_comp + n_datasets + 1 + n_axes) so post_search.py can use
+    a different --datasets set than the one used at sampling time. Pass an
+    explicit value only to override.
     """
     with open(path) as f:
         rows = [r for r in csv.reader(f) if r]
@@ -88,6 +93,18 @@ def load_sample_csv(path, n_comp, n_axes, n_datasets=1):
                 M[i, j] = float(v)
             except ValueError:
                 pass
+    n_rows = M.shape[0]
+    if n_datasets is None:
+        n_datasets = n_rows - n_comp - 1 - n_axes
+        if n_datasets < 1:
+            raise SystemExit(
+                f"[load_sample_csv] CSV at {path} has {n_rows} rows but the "
+                f"layout requires n_comp({n_comp}) + n_datasets(>=1) + 1 "
+                f"combined + n_axes({n_axes}) = at least "
+                f"{n_comp + 2 + n_axes} rows. Either the CSV is truncated or "
+                f"n_comp/n_axes don't match how it was generated.")
+        print(f"[load_sample_csv] auto-detected n_datasets={n_datasets} "
+              f"from CSV rows={n_rows} (n_comp={n_comp}, n_axes={n_axes})")
     y_row = n_comp                    # first --datasets metric
     comb_row = n_comp + n_datasets    # pf column 0 (combined predicted)
     axis0 = comb_row + 1              # per-axis metrics start here
@@ -343,7 +360,7 @@ def main(args):
             smp = load_sample_csv(
                 args.sample_path,
                 n_comp=len(comp_key_order(ctx.config, ctx.group_size)),
-                n_axes=K, n_datasets=max(1, len(args.datasets)))
+                n_axes=K)
             if smp['X'].shape[1] != K:
                 raise SystemExit(
                     f"sample CSV has {smp['X'].shape[1]} per-axis columns but "

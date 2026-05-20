@@ -1,4 +1,5 @@
 import os
+import torch
 import json
 from tqdm import tqdm
 import numpy as np
@@ -17,7 +18,8 @@ from .metrics import (
     code_sim_score,
 )
 
-MINILONGBENCH_DATA_DIR = os.path.join(os.path.dirname(__file__), "minilongbench_data", "data")
+MINILONGBENCH_DATA_DIR = os.path.join(
+    os.path.dirname(__file__), "minilongbench_data", "data")
 
 MINILONGBENCH_DATASETS = [
     "narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh",
@@ -56,7 +58,8 @@ dataset2metric = {
 def build_chat(tokenizer, prompt, model_name):
     if "instruct" in model_name.lower():
         messages = [{"role": "user", "content": prompt}]
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False,
+                                               add_generation_prompt=True)
     elif "longchat" in model_name.lower():
         from fastchat.model import get_conversation_template
         conv = get_conversation_template("vicuna")
@@ -74,18 +77,34 @@ def post_process(response, model_name):
     return response
 
 
-def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset, device, model_name):
+def _prepare_prompt(tokenizer, json_obj, max_length, prompt_format, dataset,
+                    model_name):
+    """Final prompt for one sample (truncate-in-middle + chat template)."""
+    prompt = prompt_format.format(**json_obj)
+    tp = tokenizer(prompt, truncation=False,
+                   return_tensors="pt").input_ids[0]
+    if len(tp) > max_length:
+        half = int(max_length / 2)
+        prompt = (tokenizer.decode(tp[:half], skip_special_tokens=True)
+                  + tokenizer.decode(tp[-half:], skip_special_tokens=True))
+    if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc",
+                       "repobench-p"]:
+        prompt = build_chat(tokenizer, prompt, model_name)
+    return prompt
+
+
+def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
+             dataset, device, model_name):
+    """Per-sample (batch_size=1) generation.
+
+    Length-bucket batching was investigated and removed —
+    see analysis/batching_investigation/."""
     preds = []
     for json_obj in tqdm(data, desc=dataset):
-        prompt = prompt_format.format(**json_obj)
-        tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
-        if len(tokenized_prompt) > max_length:
-            half = int(max_length / 2)
-            prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True) + \
-                     tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
-        if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
-            prompt = build_chat(tokenizer, prompt, model_name)
-        input = tokenizer(prompt, truncation=False, return_tensors="pt").to(device)
+        prompt = _prepare_prompt(tokenizer, json_obj, max_length,
+                                 prompt_format, dataset, model_name)
+        input = tokenizer(prompt, truncation=False,
+                          return_tensors="pt").to(device)
         context_length = input.input_ids.shape[-1]
         if dataset == "samsum":
             output = model.generate(
@@ -95,7 +114,9 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset
                 do_sample=False,
                 temperature=1.0,
                 min_length=context_length + 1,
-                eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
+                eos_token_id=[tokenizer.eos_token_id,
+                              tokenizer.encode("\n",
+                                               add_special_tokens=False)[-1]],
             )[0]
         else:
             output = model.generate(
@@ -105,7 +126,8 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset
                 do_sample=False,
                 temperature=1.0,
             )[0]
-        pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
+        pred = tokenizer.decode(output[context_length:],
+                                skip_special_tokens=True)
         pred = post_process(pred, model_name)
         preds.append({
             "pred": pred,
@@ -116,13 +138,17 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset
     return preds
 
 
-def pred_minilongbench(model, tokenizer, save_path, longbench_config, data_dir=None, model_name=None):
+def pred_minilongbench(model, tokenizer, save_path, longbench_config,
+                       data_dir=None, model_name=None):
     if data_dir is None:
         data_dir = MINILONGBENCH_DATA_DIR
 
-    model2maxlen = json.load(open(os.path.join(longbench_config, "model2maxlen.json"), "r"))
-    dataset2prompt = json.load(open(os.path.join(longbench_config, "dataset2prompt.json"), "r"))
-    dataset2maxlen = json.load(open(os.path.join(longbench_config, "dataset2maxlen.json"), "r"))
+    model2maxlen = json.load(
+        open(os.path.join(longbench_config, "model2maxlen.json"), "r"))
+    dataset2prompt = json.load(
+        open(os.path.join(longbench_config, "dataset2prompt.json"), "r"))
+    dataset2maxlen = json.load(
+        open(os.path.join(longbench_config, "dataset2maxlen.json"), "r"))
 
     if model_name is None:
         name_or_path = model.config._name_or_path
@@ -130,12 +156,14 @@ def pred_minilongbench(model, tokenizer, save_path, longbench_config, data_dir=N
             name_or_path = os.path.dirname(name_or_path)
         model_name = name_or_path.rstrip('/').split('/')[-1]
     if model_name not in model2maxlen:
-        # try to find a matching key by prefix
-        matched = next((k for k in model2maxlen if model_name.startswith(k) or k in model_name), None)
+        matched = next((k for k in model2maxlen
+                        if model_name.startswith(k) or k in model_name), None)
         if matched:
             model_name = matched
         else:
-            raise KeyError(f"model_name '{model_name}' not found in model2maxlen. Available keys: {list(model2maxlen.keys())}")
+            raise KeyError(
+                f"model_name '{model_name}' not found in model2maxlen. "
+                f"Available keys: {list(model2maxlen.keys())}")
     max_length = model2maxlen[model_name]
     device = model.device
 
@@ -145,7 +173,8 @@ def pred_minilongbench(model, tokenizer, save_path, longbench_config, data_dir=N
     for dataset in MINILONGBENCH_DATASETS:
         jsonl_path = os.path.join(data_dir, f"{dataset}.jsonl")
         if not os.path.exists(jsonl_path):
-            print(f"[MiniLongBench] Skipping {dataset}: file not found at {jsonl_path}")
+            print(f"[MiniLongBench] Skipping {dataset}: file not found at "
+                  f"{jsonl_path}")
             continue
 
         data = []
@@ -157,7 +186,8 @@ def pred_minilongbench(model, tokenizer, save_path, longbench_config, data_dir=N
         max_gen = dataset2maxlen[dataset]
         out_path = os.path.join(pred_dir, f"{dataset}.jsonl")
 
-        preds = get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset, device, model_name)
+        preds = get_pred(model, tokenizer, data, max_length, max_gen,
+                         prompt_format, dataset, device, model_name)
         with open(out_path, "w", encoding="utf-8") as f:
             for pred in preds:
                 json.dump(pred, f, ensure_ascii=False)
@@ -171,7 +201,8 @@ def scorer(dataset, predictions, answers, all_classes):
         if dataset in ["trec", "triviaqa", "samsum", "lsht"]:
             prediction = prediction.lstrip('\n').split('\n')[0]
         for ground_truth in ground_truths:
-            score = max(score, dataset2metric[dataset](prediction, ground_truth, all_classes=all_classes))
+            score = max(score, dataset2metric[dataset](
+                prediction, ground_truth, all_classes=all_classes))
         total_score += score
     return round(100 * total_score / len(predictions), 2)
 
@@ -188,7 +219,8 @@ def eval_minilongbench(save_path):
         dataset = filename.split('.')[0]
         predictions, answers = [], []
         all_classes = None
-        with open(os.path.join(pred_dir, filename), "r", encoding="utf-8") as f:
+        with open(os.path.join(pred_dir, filename), "r",
+                  encoding="utf-8") as f:
             for line in f:
                 data = json.loads(line)
                 predictions.append(data["pred"])

@@ -1,0 +1,3 @@
+include: apps.yaml
+task: apps_interview
+process_docs: !function utils.filter_interview
