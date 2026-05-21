@@ -148,6 +148,9 @@ fi
 for g in "${K_GROUP_SIZE[@]}"; do ARGS+=" --k_group_size ${g} "; done
 for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 
+[ -n "${K_PRUNING_DIM}" ] && ARGS+=" --k_pruning_dim ${K_PRUNING_DIM}"
+[ -n "${V_PRUNING_DIM}" ] && ARGS+=" --v_pruning_dim ${V_PRUNING_DIM}"
+
 [ "${W_METHOD}" = "hqq" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS} "
 [ -n "${W_EXPR}" ]     && ARGS+=" --w_expr ${W_EXPR}"
 [ -n "${KV_EXPR}" ]    && ARGS+=" --kv_expr ${KV_EXPR}"

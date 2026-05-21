@@ -64,11 +64,12 @@ from tqdm import tqdm
 
 from evaluator import LlamaEvaluator
 from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
-                        configure_model_cache, get_net_info, clean_up)
+                        configure_model_cache, get_net_info, clean_up,
+                        set_seed, init_accelerator, process_dtype, RunCtx)
 from utils.select import (build_arch, select_valid_nd_idx, assemble_F,
                           LazyPs, draw_random, quantile_select, axis_of_map,
                           coverage_subset_nsga2_extras)
-from utils.eval import eval_metric
+from utils.eval import eval_metric, eval_loss
 from utils.data import get_tokenizer
 from utils.longbench import pred_longbench, eval_longbench
 from utils.ruler import eval_ruler
@@ -156,16 +157,22 @@ METRIC_TASKS = [
     ('needle_nll',        'A', None,
         dict(kind='needle_nll')),
     ('gsm8k_jsd',         'D', 'gsm8k',
-        # custom path: unpad each example (KIVI 4D-mask bug on padded inputs)
-        dict(kind='jsd_custom', unpad=True, stream_dense=False)),
+        # Standard path. The padded-input KIVI bug is now fixed at the
+        # source (quant/kivi_utils/new_pack.py:fake_quant handles 2D
+        # HF padding masks via _kivi_mask_to_bnh11t1).
+        dict(metric='loss', loss_func='jsd',
+             stride=0, prefill_prompt=False, last_tokens=None)),
     ('gov_jsd',           'B', 'gov_report',
-        # custom path: keep dense_logits on CPU, stream per-seq to GPU
-        dict(kind='jsd_custom', unpad=False, stream_dense=True)),
+        # Standard path. _move_all_dense_logits_to_cpu has already replaced
+        # evaluator.dense_logits['gov_report'] with a _LazyGpuList shim, so
+        # the 16 GiB of dense logits no longer sit on GPU.
+        dict(metric='loss', loss_func='jsd',
+             stride=0, prefill_prompt=False, last_tokens=None)),
     ('gov_jsd_s512',      'B', 'gov_report',
-        # full-seq JSD with stride=512 chunked forward + stream_dense
-        # (same Group B as gov_jsd; only differs in forward mode)
-        dict(kind='jsd_custom', unpad=False, stream_dense=True,
-             stride=512, prefill_prompt=False)),
+        # Same Group B + cpu-shim, plus stride=512 chunked forward to
+        # bound peak activation memory at 8K context.
+        dict(metric='loss', loss_func='jsd',
+             stride=512, prefill_prompt=False, last_tokens=None)),
     ('gov_jsd_pp512_s128', 'B_pp', 'gov_report',
         # answer-phase JSD (prefill_prompt + last_tokens=512 + stride=128).
         # dense_logits is tiny under last_tokens=512 → standard path is OK.
@@ -184,7 +191,7 @@ ALL_KEYS = METRIC_KEYS + BENCH_KEYS
 # Sample mode — build combo space, random-sample N archs, write archs.csv
 # ════════════════════════════════════════════════════════════════════════════
 def cmd_sample(args):
-    ctx = init_run(args)
+    ctx = _build_ctx(args)
     expr_map = build_expr_map(args, ctx)
     nd = build_nd(args, ctx, expr_map)
     expr_keys, _esm, _efm = nd.expr_keys, nd.esm, nd.efm
@@ -347,6 +354,68 @@ def _resolve_metric_set(arg):
     return flat
 
 
+class _LazyGpuList:
+    """List-of-lists of tensors held on CPU; per-tensor `__getitem__` moves
+    to GPU lazily. Drop-in for `evaluator.dense_logits[dataset]` so the
+    standard utils.eval.eval_loss path works unchanged:
+
+      `dense_logits_list[batch_idx][seq_idx].contiguous()`
+        → _LazyGpuList[batch_idx]      → _LazyGpuBatch
+        →                  [seq_idx]   → CPU→GPU upload of that one tensor
+
+    Saves ~16 GB GPU for the gov_report group (8 × 8195 × 128k vocab fp16)
+    and ~4 GB for the wikitext2+c4 group — total slack matters because the
+    quant model + 3 HQQ template copies + KV cache + transient JSD compute
+    eat the rest of 48 GB.
+    """
+
+    class _Batch:
+        def __init__(self, seqs, device):
+            self._seqs = seqs
+            self._device = device
+
+        def __getitem__(self, j):
+            t = self._seqs[j]
+            return t.to(self._device, non_blocking=True) if t.device.type == 'cpu' else t
+
+        def __len__(self):
+            return len(self._seqs)
+
+    def __init__(self, batches, device):
+        self._batches = batches
+        self._device = device
+
+    def __getitem__(self, i):
+        return _LazyGpuList._Batch(self._batches[i], self._device)
+
+    def __len__(self):
+        return len(self._batches)
+
+
+def _move_all_dense_logits_to_cpu(evaluator):
+    """For every dataset present in evaluator.dense_logits, replace the
+    GPU-resident list-of-lists with a _LazyGpuList shim backed by CPU
+    tensors. Run once right after _build_evaluator + before any eval_loss
+    call. eval_loss's interface is unchanged (it reads `[bi][si].contiguous()`)."""
+    target_device = evaluator.model.device if evaluator.model is not None else 'cuda'
+    n_moved = 0
+    for dataset, batches in list(evaluator.dense_logits.items()):
+        if batches is None:
+            continue
+        if isinstance(batches, _LazyGpuList):
+            continue   # already wrapped
+        cpu_batches = [[t.detach().to('cpu', copy=False) for t in batch]
+                       for batch in batches]
+        evaluator.dense_logits[dataset] = _LazyGpuList(cpu_batches, target_device)
+        n_moved += sum(len(b) for b in cpu_batches)
+    clean_up()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        free, total = torch.cuda.mem_get_info()
+        print(f"[dense_logits→cpu] moved {n_moved} per-seq tensors to CPU, "
+              f"GPU free={free/1e9:.2f}GB / {total/1e9:.2f}GB")
+
+
 def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
                      loss_func, use_key_token, key_token_path,
                      trunc_len, sliding_window, alpha, beta,
@@ -354,10 +423,15 @@ def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
     """One LlamaEvaluator with the requested data-side config. `last_tokens`
     here is set on the evaluator at init so dense_logits gets pre-masked to
     the last N positions — must match the eval_loss last_tokens used at
-    metric-call time (eval_loss compares len-N logits vs len-N dense)."""
+    metric-call time (eval_loss compares len-N logits vs len-N dense).
+    Dense_logits is moved to CPU right after build (see _move_all_dense_logits_to_cpu)."""
     model_id = f'{args.model_path}/{args.model_name}'
     quant_model_paths = args.quant_model_paths if 'hqq' in args.w_method else []
-    return LlamaEvaluator(
+    # Scalar fallback for replace_kv_cache (per-arch arch['p'] overrides this
+    # at sample() time); pick the first option from the CLI list.
+    kpd = args.k_pruning_dim[0] if args.k_pruning_dim else 0
+    vpd = args.v_pruning_dim[0] if args.v_pruning_dim else 0
+    evaluator = LlamaEvaluator(
         ctx.config, accelerator=ctx.accelerator, model_id=model_id,
         method={'w': args.w_method, 'kv': args.kv_method},
         quant_model_paths=quant_model_paths,
@@ -367,229 +441,86 @@ def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
         group_size=ctx.group_size, residual_length=args.residual_length,
         k_quant_scheme=args.k_quant_scheme, v_quant_scheme=args.v_quant_scheme,
+        k_pruning_dim=kpd, v_pruning_dim=vpd,
         loss_func=loss_func, last_tokens=last_tokens,
         use_key_token=use_key_token, trunc_len=trunc_len,
         sliding_window=sliding_window, alpha=alpha, beta=beta,
         key_token_path=key_token_path)
+    _move_all_dense_logits_to_cpu(evaluator)
+    return evaluator
 
 
-def _run_jsd_custom(args, ctx, evaluator, dataset, *, unpad=False,
-                    stream_dense=False, stride=0, prefill_prompt=False,
-                    ignore_index=-100):
-    """Custom JSD eval — same metric as eval_loss's jsd path, with knobs the
-    stock loop doesn't have:
-
-    - unpad=True: per-example, slice input_ids/attention_mask to the actual
-      length BEFORE forward. Workaround for the KIVI fake_quant bug that
-      crashes (`attention_mask[:, :, -1]` IndexError) when HF builds a 4D
-      mask for inputs containing padding zeros. Used by gsm8k_jsd.
-    - stream_dense=True: keep evaluator.dense_logits on CPU and move only
-      the active per-seq tensor to GPU just before the JSD call. Saves
-      ~16 GiB for gov_report-scale dense_logits (8 × 8195 × 128k vocab fp16).
-    - stride>0 (and not prefill_prompt): chunked forward through the full
-      sequence with past_key_values (use_cache=True). Mirrors eval_loss's
-      stride path. Needed for gov_jsd_s512 so we can both stream dense AND
-      avoid a single 8K-context activation peak.
-    - prefill_prompt=True (uses evaluator.last_tokens): prefill the prompt
-      [0:total-last_tokens] in one forward, then stride through the answer
-      span. Currently NOT needed by any task that uses the custom path
-      (gov_jsd_pp512_s128 uses the standard path because dense_logits is
-      small under last_tokens=512), but supported for symmetry.
-
-    Mirrors eval_loss numerics: total loss = Σ_seq (mean_jsd_per_token ×
-    n_tokens) / Σ_seq n_tokens; mask = (labels != ignore) & (optional
-    last_tokens window).
-    """
-    from utils.eval import get_loss_mask
-    from utils.loss import JSD
-    model = evaluator.model
-    use_cache = stride > 0 or prefill_prompt
-    configure_model_cache(args, model, use_cache=use_cache)
-    loader = evaluator.train_loaders[dataset]
-    dense_list = evaluator.dense_logits.get(dataset)
-    if dense_list is None:
-        raise RuntimeError(f"evaluator has no dense_logits for '{dataset}'")
-    if stream_dense:
-        # Replace the GPU tensors with CPU copies IN-PLACE so the originals
-        # are deref'd and clean_up() actually frees their GPU memory (saves
-        # ~16 GiB for gov_report-scale; without this rebind the GPU copies
-        # stay alive via evaluator.dense_logits[dataset] and forward still
-        # OOMs).
-        new_batches = []
-        for batch in dense_list:
-            new_seqs = []
-            for t in batch:
-                new_seqs.append(t.detach().to('cpu'))
-            new_batches.append(new_seqs)
-        evaluator.dense_logits[dataset] = new_batches
-        dense_list = new_batches
-        del new_batches, new_seqs
-        clean_up()
-        torch.cuda.synchronize()
-        free, total = torch.cuda.mem_get_info()
-        print(f"[jsd_custom/stream] dense_logits → CPU, "
-              f"GPU free={free/1e9:.2f}GB / {total/1e9:.2f}GB")
-    last_tokens = getattr(evaluator, 'last_tokens', None)
-    device = model.device
-    jsd_fn = JSD()
-
-    total_loss = 0.0
-    total_tokens = 0
-    pbar = tqdm(enumerate(loader), total=len(loader),
-                desc=f"jsd_custom/{dataset}")
-    for batch_idx, (inputs, attention_mask, labels) in pbar:
-        inputs = inputs.to(device)
-        attention_mask = attention_mask.to(device) if attention_mask is not None else None
-        for seq_idx in range(inputs.shape[0]):
-            seq_in = inputs[seq_idx:seq_idx + 1]
-            seq_attn = (attention_mask[seq_idx:seq_idx + 1]
-                        if attention_mask is not None else None)
-            seq_lab = labels[seq_idx]
-
-            if unpad and seq_attn is not None:
-                real_len = int(seq_attn.sum().item())
-                if real_len < 2:
-                    continue
-                seq_in = seq_in[:, :real_len]
-                seq_attn = None    # all-ones now → no 4D mask, no KIVI bug
-                seq_lab = seq_lab[:real_len]
-
-            T = seq_in.shape[1]
-            if prefill_prompt and last_tokens is not None and 0 < last_tokens < T:
-                # prefill prompt + stride answer (mirrors eval_loss path 1)
-                prompt_len = T - last_tokens
-                ans_stride = stride if stride and stride > 0 else last_tokens
-                chunks, pkv = [], None
-                p_out = model(seq_in[:, :prompt_len],
-                              attention_mask=(seq_attn[:, :prompt_len] if seq_attn is not None else None),
-                              past_key_values=pkv, use_cache=True)
-                chunks.append(p_out.logits)
-                pkv = p_out.past_key_values
-                for s_pos in range(prompt_len, T, ans_stride):
-                    e_pos = min(s_pos + ans_stride, T)
-                    c_attn = seq_attn[:, :e_pos] if seq_attn is not None else None
-                    c_out = model(seq_in[:, s_pos:e_pos], attention_mask=c_attn,
-                                  past_key_values=pkv, use_cache=True)
-                    chunks.append(c_out.logits)
-                    pkv = c_out.past_key_values
-                lm_logits = torch.cat(chunks, dim=1)
-                del chunks, pkv
-            elif stride and stride > 0:
-                # chunked forward through full sequence (mirrors eval_loss path 2)
-                chunks, pkv = [], None
-                for s_pos in range(0, T, stride):
-                    e_pos = min(s_pos + stride, T)
-                    c_attn = seq_attn[:, :e_pos] if seq_attn is not None else None
-                    c_out = model(seq_in[:, s_pos:e_pos], attention_mask=c_attn,
-                                  past_key_values=pkv, use_cache=True)
-                    chunks.append(c_out.logits)
-                    pkv = c_out.past_key_values
-                lm_logits = torch.cat(chunks, dim=1)
-                del chunks, pkv
-            else:
-                lm_logits = model(seq_in, attention_mask=seq_attn).logits
-            shift_logits = lm_logits[0, :-1].contiguous()       # (T-1, V) on GPU
-            shift_labels = seq_lab[1:].contiguous()
-            del lm_logits
-            mask = get_loss_mask(shift_labels, key_tokens=None,
-                                 last_tokens=last_tokens,
-                                 ignore_index=ignore_index, device=device)
-            n_tok = int(mask.sum().item())
-            if n_tok == 0:
-                continue
-            dense_seq = dense_list[batch_idx][seq_idx].contiguous()
-            if dense_seq.device != device:
-                dense_seq = dense_seq.to(device, non_blocking=True)
-            loss = jsd_fn(shift_logits[mask], dense_seq)
-            total_loss += float(loss.detach().item()) * n_tok
-            total_tokens += n_tok
-            # release per-seq intermediates before the next forward
-            del shift_logits, dense_seq
-        clean_up()
-        pbar.set_postfix(jsd=f"{total_loss / max(total_tokens, 1):.5f}",
-                         toks=total_tokens)
-    return total_loss / max(total_tokens, 1)
-
-
-def _run_needle_nll(args, ctx, model, model_id):
-    """Cheap Needle-in-a-Haystack NLL (RULER-style prompts at ~wikitext
-    cost: --needle_n_sample samples × --needle_seqlen tokens).
-
-    Computes cross-entropy on the answer-needle tokens only — cross_entropy
-    NOT JSD, so no FP dense_logits needed. Returns mean per-token NLL over
-    the answer span.
-
-    `--needle_task` selects the NIAH variant. niah_multikey_2 is the default:
-    the haystack is filled with LOOK-ALIKE distractor needles
-    ("special magic number for <random word> is <random number>") so the
-    model must distinguish the queried key from many fakes. Substantially
-    harder than the repetitive-haystack niah_single_1. Other supported
-    variants: niah_single_1/2/3, niah_multikey_1/3 (all return a single
-    answer; multivalue/multiquery are skipped because their multi-answer
-    format breaks the single-answer NLL path).
+def _build_needle_loader(args, model_id):
+    """Materialise NIAH prompts as a list of (input_ids, attention_mask,
+    labels) batches matching the utils.data loader contract:
+      - input_ids = tokenized(prompt + ' ' + answer), batch=1
+      - attention_mask = all-ones (no padding; each batch is variable length)
+      - labels = input_ids with -100 on the prompt span so eval_loss's
+        get_loss_mask (labels != -100) selects only the answer tokens
+    Returns an iterable with __len__ — drop-in for eval_loss.
     """
     from utils.ruler_utils import niah_utils as _niah
     import random as _random
+
+    if not hasattr(_niah, args.needle_task):
+        raise SystemExit(
+            f"[needle_nll] unknown --needle_task '{args.needle_task}'. "
+            f"Valid: niah_single_1/2/3, niah_multikey_1/2/3.")
     tokenizer = get_tokenizer(model_id)
-    configure_model_cache(args, model, use_cache=False)
-
-    task_name = args.needle_task
-    if not hasattr(_niah, task_name):
-        raise SystemExit(f"[needle_nll] unknown --needle_task '{task_name}'. "
-                         f"Valid: niah_single_1, niah_single_2, niah_single_3, "
-                         f"niah_multikey_1, niah_multikey_2, niah_multikey_3")
-    task_fn = getattr(_niah, task_name)
-
-    seqlen = int(args.needle_seqlen)
-    n_sample = int(args.needle_n_sample)
-    # niah's generate_input_output only seeds the needles SHUFFLE
-    # (random.Random(random_seed).shuffle); the actual magic-number /
-    # word / depth / insertion picks use the *global* random module.
-    # By the time we reach this function the global RNG has been advanced
-    # by LlamaEvaluator init / dataloader / arch sampling and the niah
-    # data would silently differ across archs. Re-seed here so every arch
-    # in a sweep sees IDENTICAL needle prompts — necessary for the eval
-    # to be a clean comparison across the rows of archs.csv.
+    # niah's generate_input_output only seeds the needles SHUFFLE; magic-
+    # number / word / depth picks use the *global* random module which has
+    # been advanced by LlamaEvaluator init by now. Re-seed so every arch
+    # in a sweep sees IDENTICAL needle prompts.
     _random.seed(int(args.seed))
     np.random.seed(int(args.seed))
-    print(f"[needle_nll] generating {n_sample} {task_name} prompts "
-          f"at seqlen={seqlen} (seed={args.seed}) …")
     t0 = time()
-    data = task_fn(model=model_id, max_seq_lengths=[seqlen],
-                   num_samples=n_sample)['test']
-    print(f"[needle_nll] prompt generation took {time() - t0:.1f}s "
-          f"({len(data)} samples)")
+    data = getattr(_niah, args.needle_task)(
+        model=model_id,
+        max_seq_lengths=[int(args.needle_seqlen)],
+        num_samples=int(args.needle_n_sample))['test']
+    print(f"[needle_nll] generated {len(data)} {args.needle_task} prompts "
+          f"in {time() - t0:.1f}s (seed={args.seed})")
 
-    loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
-    total_loss = 0.0
-    total_tokens = 0
-    device = model.device
-    pbar = tqdm(data, desc='needle_nll')
-    for ex in pbar:
+    batches = []
+    for ex in data:
         prompt = ex['input'] + ' ' + ex['gen_prefix']
         answer = ex['outputs'][0] if isinstance(ex['outputs'], list) else ex['outputs']
         enc_prompt = tokenizer(prompt, return_tensors='pt',
                                add_special_tokens=True).input_ids
         enc_full = tokenizer(prompt + ' ' + answer, return_tensors='pt',
                              add_special_tokens=True).input_ids
-        p_len = enc_prompt.shape[1]
-        if enc_full.shape[1] <= p_len:
+        if enc_full.shape[1] <= enc_prompt.shape[1]:
             continue
-        input_ids = enc_full.to(device)
-        labels = input_ids.clone()
-        labels[:, :p_len] = -100
-        with torch.inference_mode():
-            logits = model(input_ids).logits
-        shift_logits = logits[:, :-1].contiguous().view(-1, logits.size(-1))
-        shift_labels = labels[:, 1:].contiguous().view(-1)
-        loss = loss_fn(shift_logits.float(), shift_labels)
-        valid = (shift_labels != -100).sum().item()
-        if valid > 0:
-            total_loss += loss.item()
-            total_tokens += valid
-        pbar.set_postfix(nll=f"{total_loss / max(total_tokens, 1):.4f}",
-                         toks=total_tokens)
-    return total_loss / max(total_tokens, 1)
+        attention_mask = torch.ones_like(enc_full)
+        labels = enc_full.clone()
+        labels[:, :enc_prompt.shape[1]] = -100
+        batches.append((enc_full, attention_mask, labels))
+
+    class _NeedleLoader:
+        def __iter__(self):
+            return iter(batches)
+
+        def __len__(self):
+            return len(batches)
+
+    return _NeedleLoader()
+
+
+def _run_needle_nll(args, ctx, evaluator, model_id):
+    """Cheap NIAH cross-entropy NLL via utils.eval.eval_loss. The loader
+    yields (input_ids, attention_mask, labels) with labels=-100 on prompt
+    tokens, so eval_loss's get_loss_mask naturally restricts CE to the
+    answer span. No bespoke forward / loss loop — same metric math as all
+    other cross_entropy calibration paths."""
+    loader = _build_needle_loader(args, model_id)
+    if len(loader) == 0:
+        raise RuntimeError("[needle_nll] no usable NIAH prompts after tokenisation")
+    configure_model_cache(args, evaluator.model, use_cache=False)
+    return eval_loss(model=evaluator.model, accelerator=ctx.accelerator,
+                     loader=loader, seqlen=int(args.needle_seqlen),
+                     loss_func='cross_entropy', dense_logits_list=None,
+                     key_token_list=None, stride=0, last_tokens=None,
+                     prefill_prompt=False)
 
 
 def _run_calibration_task(args, ctx, evaluator, dataset, eval_kwargs):
@@ -677,7 +608,7 @@ def _run_benchmark_block(args, model, model_id, which):
 # Eval mode — evaluate one arch (by --idx) on the requested metrics
 # ════════════════════════════════════════════════════════════════════════════
 def cmd_eval(args):
-    ctx = init_run(args)
+    ctx = _build_ctx(args)
     archs_csv = (args.archs_csv
                  or os.path.join(args.save or '.', 'archs.csv'))
     if not os.path.exists(archs_csv):
@@ -762,12 +693,7 @@ def cmd_eval(args):
             try:
                 kind = eval_kwargs.get('kind')
                 if kind == 'needle_nll':
-                    value = _run_needle_nll(args, ctx, evaluator.model, model_id)
-                elif kind == 'jsd_custom':
-                    value = _run_jsd_custom(
-                        args, ctx, evaluator, dataset,
-                        unpad=eval_kwargs.get('unpad', False),
-                        stream_dense=eval_kwargs.get('stream_dense', False))
+                    value = _run_needle_nll(args, ctx, evaluator, model_id)
                 else:
                     value = _run_calibration_task(args, ctx, evaluator,
                                                   dataset, eval_kwargs)
@@ -896,11 +822,28 @@ def build_parser():
     p.add_argument('--k_bits', type=int, nargs='+', default=[2, 4])
     p.add_argument('--v_bits', type=int, nargs='+', default=[2, 4])
     p.add_argument('--w_group_size', type=int, default=128)
-    p.add_argument('--k_group_size', type=int, default=128)
-    p.add_argument('--v_group_size', type=int, default=128)
+    # Same parser as search.py — repeated `--k_group_size 32 64 128 …`
+    # builds a list-of-lists where each call is the gs option set for
+    # one bit-width slot (search.py / scripts/search.sh convention).
+    # E.g. K_BITS="2 3 4" + K_GROUP_SIZE=("32 64 128" "32 64 128" "128")
+    # → 2-bit: {32,64,128}, 3-bit: {32,64,128}, 4-bit: {128}.
+    p.add_argument('--k_group_size', type=int, nargs='+', action='append',
+                   default=[])
+    p.add_argument('--v_group_size', type=int, nargs='+', action='append',
+                   default=[])
     p.add_argument('--residual_length', type=int, default=128)
     p.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'])
     p.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'])
+    # ThinK channel-pruning options (pruned-channel count; matches search.py
+    # convention — anything *prune* = removed count). In correlation.py
+    # archs come from --kvdim_expr archives so arch['p'] overrides per-arch;
+    # this list is the scalar fallback used by LlamaEvaluator's
+    # replace_kv_cache call for layers without an override.
+    p.add_argument('--k_pruning_dim', type=int, nargs='+', default=None,
+                   help="K pruning dim options (# of head_dim channels to "
+                        "prune; 0 = no pruning).")
+    p.add_argument('--v_pruning_dim', type=int, nargs='+', default=None,
+                   help="V pruning dim options. See --k_pruning_dim.")
     p.add_argument('--outlier_path', type=str, default='')
     p.add_argument('--n_token', type=int, default=0)
     # expr archives + combined-metric scales (sample mode)
@@ -999,6 +942,49 @@ def build_parser():
     p.add_argument('--save', type=str, default='',
                    help='output dir (archs.csv / sample_meta.json / result_*.json)')
     return p
+
+
+def _build_ctx(args):
+    """Replicates utils.func.init_run but bypasses its `min(args.k_group_size)`
+    fallback, which fails on the list-of-lists shape produced by search.py-
+    style `--k_group_size 32 64 128 --k_group_size 128` (nargs+action='append').
+    We pick the first scalar in the flattened list for default_arch (the
+    per-layer (bits, gs) in arch['q']['k'/'v'][i] overrides this at
+    sample() time, so the choice only matters as a no-op fallback).
+    """
+    set_seed(args.seed)
+    with open(args.config, 'r') as f:
+        config = json.load(f)[args.model_name]
+    accelerator, device_map = init_accelerator(args.gpu_id, config)
+    dtype = process_dtype(args.dtype)
+
+    group_size = {'w': args.w_group_size,
+                  'k': args.k_group_size,
+                  'v': args.v_group_size}
+    n_block = config['n_block']
+    w_linears = config['linear']
+    default_w_bits = max(args.w_bits) if args.w_bits else 16
+    default_k_bits = max(args.k_bits) if args.k_bits else 4
+    default_v_bits = max(args.v_bits) if args.v_bits else 4
+    # Flat-first scalar for default_arch (search.py-style list-of-lists
+    # arrives here; fall back to 128 if --k/v_group_size not supplied).
+    def _first_int(xs):
+        if not xs:
+            return 128
+        v = xs[0]
+        return v[0] if isinstance(v, (list, tuple)) and v else (v if isinstance(v, int) else 128)
+    k_gs = _first_int(args.k_group_size)
+    v_gs = _first_int(args.v_group_size)
+    default_arch = {
+        'q': {
+            'w': {linear: [default_w_bits] * n_block for linear in w_linears},
+            'k': [[default_k_bits, k_gs]] * n_block,
+            'v': [[default_v_bits, v_gs]] * n_block,
+        },
+        'p': {'k': [0] * n_block, 'v': [0] * n_block},
+    }
+    return RunCtx(config, accelerator, device_map, dtype, group_size,
+                  default_arch, n_block)
 
 
 def main():

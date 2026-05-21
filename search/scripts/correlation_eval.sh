@@ -60,6 +60,13 @@ RESIDUAL_LENGTH=128
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
+# ThinK pruning_dim options (# of head_dim channels to prune; 0 = no prune).
+# Each arch's per-layer assignment comes from the kvdim_expr archive →
+# archs.csv → arch['p']; this list is just the scalar fallback for layers
+# without a per-arch override. Match the values used at sampling/search time.
+K_PRUNING_DIM="0 16 32 48 64"
+V_PRUNING_DIM="0 16 32 48 64"
+
 QMODEL_PATHS_LIST=()
 for B in ${W_BITS}; do
     QMODEL_PATHS_LIST+=( "/SSD/hqq/${MODEL_NAME}_${B}bit_${W_GROUP_SIZE}gs_${AXIS}axis_${DTYPE}" )
@@ -127,6 +134,9 @@ ARGS="--mode eval \
 
 for g in "${K_GROUP_SIZE[@]}"; do ARGS+=" --k_group_size ${g} "; done
 for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
+
+[ -n "${K_PRUNING_DIM}" ] && ARGS+=" --k_pruning_dim ${K_PRUNING_DIM}"
+[ -n "${V_PRUNING_DIM}" ] && ARGS+=" --v_pruning_dim ${V_PRUNING_DIM}"
 
 [ "${W_METHOD}" = "hqq" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS} "
 [ -n "${KEY_TOKEN_PATH}" ] && ARGS+=" --key_token_path ${KEY_TOKEN_PATH}"

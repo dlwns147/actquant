@@ -252,6 +252,31 @@ def triton_quantize_and_pack_along_last_dim(data: torch.Tensor, group_size: int,
 	return code.view(B, nh, D, -1), scale.reshape(scale_mn_shape), mn.reshape(scale_mn_shape)
 	
 
+def _kivi_mask_to_bnh11t1(attention_mask: torch.Tensor) -> torch.Tensor:
+	"""Normalise HF's two attention_mask shapes into a [B, 1, T, 1] {0,1}
+	mask suitable for zeroing-out non-real positions in fake_quant's
+	(B, nh, T, D) inputs.
+
+	- 2D `[B, T]`  → HF padding mask, 1=real, 0=pad. Reshape to
+	                  [B, 1, T, 1]; values already in {0,1}.
+	- 4D `[B, 1, T, T]` → HF additive causal mask, 0=attend, very-neg=mask.
+	                  Take the last query's row (`[:, :, -1]` → [B, 1, T])
+	                  and convert: where==0 → 1, else 0; reshape to
+	                  [B, 1, T, 1].
+
+	Done HERE (not by pre-converting the loader to 4D) because passing a
+	4D mask to HF Llama forces SDPA off its memory-efficient backend onto
+	the math backend, which materialises [B, nh, T, T] attention scores
+	and OOMs at 8K context. Keeping the mask 2D for the model and only
+	normalising it inside fake_quant preserves the SDPA fast path.
+	"""
+	if attention_mask.dim() == 2:
+		return attention_mask.to(torch.long)[:, None, :, None]
+	# 4D additive causal — pre-existing behaviour
+	m = attention_mask[:, :, -1].unsqueeze(-1)
+	return torch.where(m == 0, 1, 0)
+
+
 def fake_quant(inp: torch.FloatTensor, group_size: int, bits: int, along='channel', attention_mask=None):
 	if along == 'channel':
 		assert len(inp.shape) == 4
@@ -264,8 +289,7 @@ def fake_quant(inp: torch.FloatTensor, group_size: int, bits: int, along='channe
 		# Quantize
 		max_int = 2 ** bits - 1
 		if attention_mask != None:
-			mask = attention_mask[:, :, -1].unsqueeze(-1)
-			mask = torch.where(mask == 0, 1, 0)
+			mask = _kivi_mask_to_bnh11t1(attention_mask)
 			inp = inp.nan_to_num(nan=0) * mask
 		data = inp.view(new_shape)
 		mn = torch.min(data, dim=-2, keepdim=True)[0]
@@ -286,8 +310,7 @@ def fake_quant(inp: torch.FloatTensor, group_size: int, bits: int, along='channe
 		# Quantize
 		max_int = 2 ** bits - 1
 		if attention_mask != None:
-			mask = attention_mask[:, :, -1].unsqueeze(-1)
-			mask = torch.where(mask == 0, 1, 0)
+			mask = _kivi_mask_to_bnh11t1(attention_mask)
 			inp = inp.nan_to_num(nan=0) * mask
 		data = inp.view(new_shape)
 		mn = torch.min(data, dim=-1, keepdim=True)[0]
