@@ -217,3 +217,4 @@ Makefile
 
 benchmark_proxy/
 longbench_kivi_result/
+!actquant/poc/benchmark_proxy/amq_instruct_pure
