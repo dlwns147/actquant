@@ -450,14 +450,18 @@ def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
     return evaluator
 
 
-def _build_needle_loader(args, model_id):
+def _build_needle_loader(args, model_id, device):
     """Materialise NIAH prompts as a list of (input_ids, attention_mask,
     labels) batches matching the utils.data loader contract:
       - input_ids = tokenized(prompt + ' ' + answer), batch=1
       - attention_mask = all-ones (no padding; each batch is variable length)
       - labels = input_ids with -100 on the prompt span so eval_loss's
         get_loss_mask (labels != -100) selects only the answer tokens
-    Returns an iterable with __len__ — drop-in for eval_loss.
+
+    Tensors are placed on `device` upfront because utils.eval.eval_loss
+    does `model(inputs, attention_mask=attention_mask)` with NO further
+    `.to(device)` (other loaders pass through `accelerator.prepare()` which
+    auto-moves; this custom iterable doesn't, so we move here).
     """
     from utils.ruler_utils import niah_utils as _niah
     import random as _random
@@ -491,10 +495,12 @@ def _build_needle_loader(args, model_id):
                              add_special_tokens=True).input_ids
         if enc_full.shape[1] <= enc_prompt.shape[1]:
             continue
-        attention_mask = torch.ones_like(enc_full)
         labels = enc_full.clone()
         labels[:, :enc_prompt.shape[1]] = -100
-        batches.append((enc_full, attention_mask, labels))
+        attention_mask = torch.ones_like(enc_full)
+        batches.append((enc_full.to(device),
+                        attention_mask.to(device),
+                        labels.to(device)))
 
     class _NeedleLoader:
         def __iter__(self):
@@ -512,7 +518,7 @@ def _run_needle_nll(args, ctx, evaluator, model_id):
     tokens, so eval_loss's get_loss_mask naturally restricts CE to the
     answer span. No bespoke forward / loss loop — same metric math as all
     other cross_entropy calibration paths."""
-    loader = _build_needle_loader(args, model_id)
+    loader = _build_needle_loader(args, model_id, evaluator.model.device)
     if len(loader) == 0:
         raise RuntimeError("[needle_nll] no usable NIAH prompts after tokenisation")
     configure_model_cache(args, evaluator.model, use_cache=False)

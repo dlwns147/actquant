@@ -78,7 +78,7 @@ QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.0
 SAMPLING_METHOD=coverage_nsga2_combined
 COVERAGE_COORD=rank
 COVERAGE_PER_AXIS_AGG=max
-COVERAGE_PARETO_SELECT=auto
+COVERAGE_PARETO_SELECT=knee               # auto | strategy3 | knee
 
 # ── per-axis search archives (Llama-3.1-8B-Instruct, same as scripts/sample_surrogate.sh) ──
 W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
@@ -112,8 +112,23 @@ MIN_COMP_OBJ=$(IFS=" " ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
 # ── output dir (eval/aggregate read archs.csv from here) ──
-SAMP_TAG=$([ -n "${QUANTILE_SAMPLE}" ] && echo "q$(echo ${SAMPLING_METHOD#coverage_nsga2_} | cut -c1-1)${COVERAGE_COORD:0:1}" || echo "rand")
-SAVE=save/correlation/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_n${N_ARCHS}_${SAMP_TAG}_s${SEED}
+SAVE=save/correlation/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_n${N_ARCHS}_s${SEED}
+# Tag the dir with quantile + sampling_method so multiple runs are distinguishable.
+if [ -n "${QUANTILE_SAMPLE}" ]; then
+    QS_TEXT=""
+    for entry in ${QUANTILE_SAMPLE}; do
+        metric="${entry%%#*}"; quantiles="${entry#*#}"
+        short_q="${quantiles//0./}"; short_q="${short_q//,/}"
+        QS_TEXT+="_${metric%bits}${short_q}"
+    done
+    SAVE+="_qs${QS_TEXT}"
+fi
+case "${SAMPLING_METHOD}" in
+    random)                  SAVE+="_r" ;;
+    coverage_nsga2_joint)    SAVE+="_j${COVERAGE_COORD:0:1}" ;;
+    coverage_nsga2_marginal) SAVE+="_m${COVERAGE_COORD:0:1}${COVERAGE_PER_AXIS_AGG:0:1}" ;;
+    coverage_nsga2_combined) SAVE+="_c${COVERAGE_COORD:0:1}${COVERAGE_PARETO_SELECT:0:1}" ;;
+esac
 echo "OUTPUT -> ${SAVE}/archs.csv"
 
 ARGS="--mode sample \
