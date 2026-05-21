@@ -115,6 +115,11 @@ GROUPS = {
         loss_func='jsd', use_key_token=False, last_tokens=512,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
+    'B_lt128': dict(  # gov_report — single-pass JSD on last 128 tokens
+        datasets=['gov_report'], n_sample=8, seqlen=8196, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=128,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
     'D': dict(  # gsm8k — short answer-only loss, JSD
         datasets=['gsm8k'], n_sample=8, seqlen=2048, min_seqlen=0,
         loss_func='jsd', use_key_token=False, last_tokens=None,
@@ -155,7 +160,18 @@ METRIC_TASKS = [
         dict(metric='loss', loss_func='jsd',
              stride=0, prefill_prompt=False, last_tokens=128)),
     ('needle_nll',        'A', None,
-        dict(kind='needle_nll')),
+        dict(kind='needle_nll',
+             stride=0, prefill_prompt=False, last_tokens=None)),
+    ('needle_nll_s512',   'A', None,
+        # chunked forward (use_cache=True path); answer-tokens loss unchanged.
+        dict(kind='needle_nll',
+             stride=512, prefill_prompt=False, last_tokens=None)),
+    ('needle_nll_pp512_s128', 'A', None,
+        # prefill prompt then stride answer in 128-chunks. last_tokens=512
+        # bounds the answer span; label=-100 already restricts loss to the
+        # actual answer tokens (which lie at the very end of the prompt).
+        dict(kind='needle_nll',
+             stride=128, prefill_prompt=True, last_tokens=512)),
     ('gsm8k_jsd',         'D', 'gsm8k',
         # Standard path. The padded-input KIVI bug is now fixed at the
         # source (quant/kivi_utils/new_pack.py:fake_quant handles 2D
@@ -177,6 +193,20 @@ METRIC_TASKS = [
         # answer-phase JSD (prefill_prompt + last_tokens=512 + stride=128).
         # dense_logits is tiny under last_tokens=512 → standard path is OK.
         dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_lt128',     'B_lt128', 'gov_report',
+        # single-pass JSD on last 128 tokens. Group B_lt128's dense_logits
+        # is also trimmed to last 128 so the mask matches.
+        dict(metric='loss', loss_func='jsd',
+             stride=0, prefill_prompt=False, last_tokens=128)),
+    ('gsm8k_jsd_pp_s128', 'D', 'gsm8k',
+        # gsm8k unpadded → answer is at the end → prefill question, stride
+        # answer in 128-chunks. last_tokens=512 caps the answer span; the
+        # label=-100 mask filters out any question tokens that fall inside
+        # the last 512 window. Dense_logits is reused from Group D (padded
+        # forward gives identical FP logits at the answer positions because
+        # causal attention only sees past tokens).
+        dict(kind='gsm8k_unpad_pp',
              stride=128, prefill_prompt=True, last_tokens=512)),
     ('gov_jsd_kt',        'C', 'gov_report',
         dict(metric='loss', loss_func='jsd',
@@ -512,21 +542,86 @@ def _build_needle_loader(args, model_id, device):
     return _NeedleLoader()
 
 
-def _run_needle_nll(args, ctx, evaluator, model_id):
+def _run_needle_nll(args, ctx, evaluator, model_id, *,
+                    stride=0, prefill_prompt=False, last_tokens=None):
     """Cheap NIAH cross-entropy NLL via utils.eval.eval_loss. The loader
     yields (input_ids, attention_mask, labels) with labels=-100 on prompt
     tokens, so eval_loss's get_loss_mask naturally restricts CE to the
     answer span. No bespoke forward / loss loop — same metric math as all
-    other cross_entropy calibration paths."""
+    other cross_entropy calibration paths.
+
+    stride / prefill_prompt / last_tokens forward through eval_loss
+    untouched, so needle_nll_s512 / needle_nll_pp512_s128 reuse this path
+    by varying these args.
+    """
     loader = _build_needle_loader(args, model_id, evaluator.model.device)
     if len(loader) == 0:
         raise RuntimeError("[needle_nll] no usable NIAH prompts after tokenisation")
-    configure_model_cache(args, evaluator.model, use_cache=False)
+    use_cache = stride > 0 or prefill_prompt
+    configure_model_cache(args, evaluator.model, use_cache=use_cache)
     return eval_loss(model=evaluator.model, accelerator=ctx.accelerator,
                      loader=loader, seqlen=int(args.needle_seqlen),
                      loss_func='cross_entropy', dense_logits_list=None,
-                     key_token_list=None, stride=0, last_tokens=None,
-                     prefill_prompt=False)
+                     key_token_list=None, stride=stride,
+                     last_tokens=last_tokens, prefill_prompt=prefill_prompt)
+
+
+def _build_gsm8k_unpadded_loader(evaluator, device):
+    """Re-yield gsm8k batches with trailing padding stripped per example.
+    The existing Group D `train_loaders['gsm8k']` was built by
+    get_gsm8k_trainenc which right-pads each example to seqlen=2048; here
+    we use the attention_mask sum as the real length and slice to it.
+
+    Why: for prefill_prompt + stride mode to be meaningful, the answer
+    tokens must lie at the END of the sequence (so prefill covers the
+    question and stride covers the answer). With padding, the answer sits
+    in the middle and the `last_tokens` window misses it.
+
+    Dense_logits sharing: evaluator.dense_logits['gsm8k'] (computed by
+    get_logits on the padded loader at labels != -100 positions) is
+    IDENTICAL to what we'd get from the unpadded loader — causal attention
+    means the FP logits at the answer positions depend only on tokens
+    [0:answer_pos], which are the same in both versions. So no
+    recomputation needed.
+    """
+    padded = evaluator.train_loaders['gsm8k']
+    batches = []
+    for ids, attn, lab in padded:
+        for i in range(ids.shape[0]):
+            n = int(attn[i].sum().item())
+            if n < 2:
+                continue
+            batches.append((ids[i:i + 1, :n].to(device),
+                            attn[i:i + 1, :n].to(device),
+                            lab[i:i + 1, :n].to(device)))
+
+    class _UnpaddedGsm8k:
+        def __iter__(self):
+            return iter(batches)
+
+        def __len__(self):
+            return len(batches)
+
+    return _UnpaddedGsm8k()
+
+
+def _run_gsm8k_unpad_pp(args, ctx, evaluator, *,
+                       stride=128, prefill_prompt=True, last_tokens=512):
+    """gsm8k JSD with answer-end + prefill_prompt + stride. Builds an
+    unpadded view of Group D's padded loader, reuses Group D's dense_logits
+    (causal attention → identical FP logits at answer positions), delegates
+    to utils.eval.eval_loss."""
+    loader = _build_gsm8k_unpadded_loader(evaluator, evaluator.model.device)
+    if len(loader) == 0:
+        raise RuntimeError("[gsm8k_jsd_pp_s128] no usable examples")
+    dense_logits = evaluator.dense_logits.get('gsm8k')
+    use_cache = stride > 0 or prefill_prompt
+    configure_model_cache(args, evaluator.model, use_cache=use_cache)
+    return eval_loss(model=evaluator.model, accelerator=ctx.accelerator,
+                     loader=loader, seqlen=2048,
+                     loss_func='jsd', dense_logits_list=dense_logits,
+                     key_token_list=None, stride=stride,
+                     last_tokens=last_tokens, prefill_prompt=prefill_prompt)
 
 
 def _run_calibration_task(args, ctx, evaluator, dataset, eval_kwargs):
@@ -699,7 +794,17 @@ def cmd_eval(args):
             try:
                 kind = eval_kwargs.get('kind')
                 if kind == 'needle_nll':
-                    value = _run_needle_nll(args, ctx, evaluator, model_id)
+                    value = _run_needle_nll(
+                        args, ctx, evaluator, model_id,
+                        stride=eval_kwargs.get('stride', 0),
+                        prefill_prompt=eval_kwargs.get('prefill_prompt', False),
+                        last_tokens=eval_kwargs.get('last_tokens'))
+                elif kind == 'gsm8k_unpad_pp':
+                    value = _run_gsm8k_unpad_pp(
+                        args, ctx, evaluator,
+                        stride=eval_kwargs.get('stride', 128),
+                        prefill_prompt=eval_kwargs.get('prefill_prompt', True),
+                        last_tokens=eval_kwargs.get('last_tokens', 512))
                 else:
                     value = _run_calibration_task(args, ctx, evaluator,
                                                   dataset, eval_kwargs)
