@@ -218,4 +218,4 @@ Makefile
 benchmark_proxy/
 longbench_kivi_result/
 amq_instruct_pure/results/
-amq_instruct_pure/test/qwen3_disco
+amq_instruct_pure/test/
