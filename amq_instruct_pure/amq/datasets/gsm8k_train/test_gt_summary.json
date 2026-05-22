@@ -1,0 +1,9 @@
+{
+  "total": 7473,
+  "score_match": 7137,
+  "answer_identical": 6936,
+  "perfect_match": 6936,
+  "our_correct": 6109,
+  "gt_correct": 6157,
+  "elapsed_sec": 16907.292685985565
+}
