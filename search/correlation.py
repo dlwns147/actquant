@@ -30,12 +30,13 @@ Calibration metrics (`--metrics`):
 Long-context benchmarks:
     longbench / longbench_e / ruler  (same as post_search.py block)
 
-`--metrics all` (default) runs all calibration metrics ONLY (PPL/loss).
-Benchmarks (ruler/longbench/longbench_e) are EXCLUDED from 'all' and must
-be listed explicitly: e.g. `--metrics all ruler` to add ruler on top, or
-`--metrics ruler` to re-run only ruler. Keys listed explicitly are
-force-rerun (overwrite existing entries); keys expanded by 'all' are
-incremental (skip if already done).
+`--metrics all` (default) runs all calibration metrics (PPL/loss). Keys
+listed explicitly on --metrics are force-rerun; keys expanded by 'all'
+are incremental (skip if already done).
+
+Benchmarks are toggled via dedicated flags: `--ruler`, `--longbench`,
+`--longbench_e`. Each flag opts the benchmark in and force-reruns it
+(snapshotting the previous result under ${SAVE}/archive/<ts>/ first).
 
 The same `--*_expr / --model_* / --w_method / --kv_method / --k_bits / ...`
 flags as post_search.py and sample_surrogate.py are accepted, so a typical
@@ -437,16 +438,15 @@ def _archive_existing_results(args, result_path, results, rerunning_keys):
 
 
 def _resolve_metric_set(arg):
-    """Return (keys, rerun_set).
+    """Return (keys, rerun_set) for CALIBRATION metrics only (PPL/loss).
 
-    `'all'` (or empty --metrics) expands to **METRIC_KEYS only** — calibration
-    metrics (PPL/loss). Benchmarks (ruler/longbench/longbench_e) are
-    deliberately EXCLUDED from 'all' because they are expensive; they must be
-    requested explicitly (`--metrics ruler` or `--metrics all ruler`).
+    `'all'` (or empty --metrics) expands to all METRIC_KEYS. Benchmarks
+    (ruler/longbench/longbench_e) are rejected here with a redirect to
+    `--benchmarks` — they are not metrics by this script's taxonomy.
 
     Any token listed explicitly (i.e. not the magic `'all'`) is added to
     `rerun_set` → cmd_eval treats those specific keys as force-rerun, so
-    `--metrics ruler` re-evaluates ruler even when an entry already exists.
+    `--metrics wt2_jsd` re-evaluates wt2_jsd even when an entry exists.
     Keys expanded by `'all'` are NOT in rerun_set → they keep the
     add-only-if-missing behaviour.
     """
@@ -462,15 +462,35 @@ def _resolve_metric_set(arg):
                         seen.add(k)
                         expanded.append(k)
                 continue
-            if tok not in ALL_KEYS:
+            if tok in BENCH_KEYS:
+                raise SystemExit(
+                    f"--metrics: '{tok}' is a benchmark, not a metric. "
+                    f"Pass it via --benchmarks instead.")
+            if tok not in METRIC_KEYS:
                 raise SystemExit(
                     f"--metrics: unknown key '{tok}'. "
-                    f"Valid: {ALL_KEYS} (or 'all' for all calibration metrics).")
+                    f"Valid: {METRIC_KEYS} (or 'all').")
             if tok not in seen:
                 seen.add(tok)
                 expanded.append(tok)
             rerun_set.add(tok)
     return expanded, rerun_set
+
+
+def _benchmarks_from_args(args):
+    """Return (keys, rerun_set) for benchmarks. Each benchmark is toggled
+    by its own boolean flag (`--ruler`, `--longbench`, `--longbench_e`);
+    flagged-on benchmarks are added to rerun_set (force-rerun on next call).
+    Empty by default → no benchmarks run unless a flag is set.
+    """
+    keys, rerun_set = [], set()
+    for k, flag in (('longbench',   args.longbench),
+                    ('longbench_e', args.longbench_e),
+                    ('ruler',       args.ruler)):
+        if flag:
+            keys.append(k)
+            rerun_set.add(k)
+    return keys, rerun_set
 
 
 class _LazyGpuList:
@@ -816,7 +836,10 @@ def cmd_eval(args):
         f"{k}={row.get(k, '?')}" for k in
         ('wbits', 'kvbits', 'kvdim', 'eff_kvbits', 'memory')))
 
-    requested, rerun_set = _resolve_metric_set(args.metrics)
+    calib_keys, calib_rerun = _resolve_metric_set(args.metrics)
+    bench_keys, bench_rerun = _benchmarks_from_args(args)
+    requested = calib_keys + bench_keys
+    rerun_set = calib_rerun | bench_rerun
     print(f"[correlation/eval] requested: {requested}"
           + (f"  explicit rerun: {sorted(rerun_set)}" if rerun_set else ""))
 
@@ -1125,12 +1148,19 @@ def build_parser():
     p.add_argument('--idx', type=int, default=-1,
                    help='(eval) row index in archs.csv to evaluate')
     p.add_argument('--metrics', type=str, nargs='+', default=['all'],
-                   help='(eval) which keys to evaluate. "all" (default) = '
-                        'all calibration metrics (PPL/loss) ONLY — benchmarks '
-                        '(ruler/longbench/longbench_e) must be listed '
-                        'explicitly (e.g. `--metrics all ruler`). Explicitly '
-                        'listed keys are force-rerun (overwrite existing). '
-                        f'Valid keys: {ALL_KEYS}.')
+                   help='(eval) calibration metrics (PPL/loss) to evaluate. '
+                        '"all" (default) = all METRIC_KEYS. Explicitly listed '
+                        'keys are force-rerun. Benchmarks are NOT accepted '
+                        'here — use --ruler / --longbench / --longbench_e. '
+                        f'Valid: {METRIC_KEYS} (or "all").')
+    # Benchmark toggles: each flag opts the corresponding benchmark in.
+    # Listing the flag implies force-rerun (overwrite any existing entry).
+    p.add_argument('--ruler', action='store_true',
+                   help='(eval) run RULER benchmark.')
+    p.add_argument('--longbench', action='store_true',
+                   help='(eval) run LongBench benchmark.')
+    p.add_argument('--longbench_e', action='store_true',
+                   help='(eval) run LongBench-E benchmark.')
     p.add_argument('--force', action='store_true',
                    help='(eval) recompute even if already in result_<idx>.json')
     p.add_argument('--no_archive', action='store_true',

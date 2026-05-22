@@ -4,19 +4,14 @@
 #   IDX        row index in archs.csv to evaluate
 #   SAVE_DIR   correlation save dir (the one stage 1 wrote);
 #              if omitted, picks the newest save/correlation/* directory.
-#   METRICS    space- or comma-separated keys (default "all").
-#              "all" = all CALIBRATION metrics only (PPL/loss); benchmarks
-#              are NOT in "all" and must be listed explicitly.
-#              Examples:
-#                "all"                         calibration metrics only
-#                "all ruler"                   calibration + run ruler
-#                "ruler"                       re-run ruler only (force)
-#                "gov_jsd_kt_s512 longbench"   one new metric + run longbench
+#   METRICS    space- or comma-separated CALIBRATION metric keys (default
+#              "all" = all PPL/loss metrics). Benchmarks (ruler/longbench/
+#              longbench_e) are NOT valid here — toggle them with the
+#              RUN_RULER / RUN_LONGBENCH / RUN_LONGBENCH_E variables below.
 #              Calibration keys: c4_ppl wt2_jsd wt2_jsd_s512 wt2_jsd_pp512_s128
 #                  wt2_jsd_lt128 needle_nll needle_nll_s512 needle_nll_pp512_s128
 #                  gsm8k_jsd gov_jsd gov_jsd_s512 gov_jsd_pp512_s128 gov_jsd_lt128
 #                  gsm8k_jsd_pp_s128 gov_jsd_kt gov_jsd_kt_s512
-#              Benchmark keys:   longbench longbench_e ruler
 #
 # Run this once per IDX (parallelise across GPUs by launching multiple
 # instances). result_<IDX>.json is written into SAVE_DIR; bash
@@ -141,11 +136,22 @@ for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 [ "${W_METHOD}" = "hqq" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS} "
 [ -n "${KEY_TOKEN_PATH}" ] && ARGS+=" --key_token_path ${KEY_TOKEN_PATH}"
 
-# ── Benchmark args (toggle by commenting out the block you don't want) ──
-# LongBench / LongBench-E
+# ── Benchmark toggles ──
+# Set to 1 to run the benchmark. Path/param args are always passed (they're
+# harmless when the corresponding --ruler / --longbench / --longbench_e
+# toggle is off), so just flip these switches.
+RUN_RULER=0
+RUN_LONGBENCH=0
+RUN_LONGBENCH_E=0
+
+# LongBench / LongBench-E params (always passed; only used if toggled on)
 ARGS+=" --longbench_config ${LONGBENCH_CONFIG} --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_e_result_path ${LONGBENCH_E_RESULT_PATH}"
-# RULER
+# RULER params (always passed; only used if toggled on)
 ARGS+=" --ruler_task ${RULER_TASK} --ruler_yaml_path ${RULER_YAML_PATH} --ruler_length ${RULER_LENGTH} --ruler_sample ${RULER_SAMPLE} --ruler_batch_size ${RULER_BATCH_SIZE} --ruler_result_path ${RULER_RESULT_PATH}"
+
+[ "${RUN_RULER}"        = "1" ] && ARGS+=" --ruler"
+[ "${RUN_LONGBENCH}"    = "1" ] && ARGS+=" --longbench"
+[ "${RUN_LONGBENCH_E}"  = "1" ] && ARGS+=" --longbench_e"
 
 N_PROC=1
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} \
