@@ -30,8 +30,12 @@ Calibration metrics (`--metrics`):
 Long-context benchmarks:
     longbench / longbench_e / ruler  (same as post_search.py block)
 
-Use `--metrics all` (default) to enable everything, or pass a subset
-(comma-separated or space-separated).
+`--metrics all` (default) runs all calibration metrics ONLY (PPL/loss).
+Benchmarks (ruler/longbench/longbench_e) are EXCLUDED from 'all' and must
+be listed explicitly: e.g. `--metrics all ruler` to add ruler on top, or
+`--metrics ruler` to re-run only ruler. Keys listed explicitly are
+force-rerun (overwrite existing entries); keys expanded by 'all' are
+incremental (skip if already done).
 
 The same `--*_expr / --model_* / --w_method / --kv_method / --k_bits / ...`
 flags as post_search.py and sample_surrogate.py are accepted, so a typical
@@ -52,11 +56,12 @@ run-pair looks like:
 import os
 import json
 import csv
+import shutil
 import argparse
 import traceback
 import warnings
 from copy import deepcopy
-from time import time
+from time import time, strftime
 
 import numpy as np
 import torch
@@ -211,6 +216,12 @@ METRIC_TASKS = [
     ('gov_jsd_kt',        'C', 'gov_report',
         dict(metric='loss', loss_func='jsd',
              stride=0, prefill_prompt=False, last_tokens=None)),
+    ('gov_jsd_kt_s512',   'C', 'gov_report',
+        # stride=512 chunked forward over the same key-token archive as
+        # gov_jsd_kt — bounds peak activation memory at 8K context while
+        # keeping the key-token weighting identical.
+        dict(metric='loss', loss_func='jsd',
+             stride=512, prefill_prompt=False, last_tokens=None)),
 ]
 METRIC_KEYS = [t[0] for t in METRIC_TASKS]
 BENCH_KEYS = ['longbench', 'longbench_e', 'ruler']
@@ -372,16 +383,94 @@ def _load_arch_row(csv_path, idx):
     raise SystemExit(f"idx {idx} not in {csv_path} ({len(rows)} rows)")
 
 
+def _archive_existing_results(args, result_path, results, rerunning_keys):
+    """If any key about to be (re)computed already has a NON-error entry in
+    `results`, snapshot result_<IDX>.json + MOVE the matching raw benchmark
+    artefacts under `${SAVE}/archive/<ts>/` before they get overwritten.
+
+    No-op when keys are being added for the first time (the common
+    add-a-new-metric path) — only fires when an actual overwrite is about to
+    happen. raw artefacts are moved (not copied) because longbench dirs in
+    particular are large and disk usage would balloon otherwise.
+
+    aggregate mode scans only `result_*.json` directly under `<save>/`, so
+    archived snapshots are invisible to it by design (history, not state).
+    """
+    if args.no_archive:
+        return
+
+    def _valid(k):
+        v = results.get(k)
+        return v is not None and not (isinstance(v, dict) and 'error' in v)
+
+    overwriting = [k for k in rerunning_keys if _valid(k)]
+    if not overwriting:
+        return
+
+    ts = strftime('%y%m%d_%H%M%S')
+    save_dir = os.path.dirname(result_path) or '.'
+    archive_dir = os.path.join(save_dir, 'archive', ts)
+    os.makedirs(archive_dir, exist_ok=True)
+
+    # Snapshot the JSON (copy, since we keep writing to the live one).
+    shutil.copy2(result_path,
+                 os.path.join(archive_dir, os.path.basename(result_path)))
+
+    # Move raw bench artefacts for the bench keys actually being rerun.
+    moved = []
+    bench_artefacts = {
+        'ruler': args.ruler_result_path,
+        'longbench': args.longbench_result_path,
+        'longbench_e': args.longbench_e_result_path,
+    }
+    for k, src in bench_artefacts.items():
+        if k not in overwriting or not src or not os.path.exists(src):
+            continue
+        dst = os.path.join(archive_dir, os.path.basename(src.rstrip('/')))
+        shutil.move(src, dst)
+        moved.append(os.path.basename(src.rstrip('/')))
+
+    print(f"[archive] snapshotted result_<idx>.json + moved {len(moved)} raw "
+          f"artefact(s) → {archive_dir}\n"
+          f"          rerunning: {overwriting}"
+          + (f"  moved: {moved}" if moved else ""))
+
+
 def _resolve_metric_set(arg):
-    if not arg or arg == ['all']:
-        return ALL_KEYS
-    flat = []
+    """Return (keys, rerun_set).
+
+    `'all'` (or empty --metrics) expands to **METRIC_KEYS only** — calibration
+    metrics (PPL/loss). Benchmarks (ruler/longbench/longbench_e) are
+    deliberately EXCLUDED from 'all' because they are expensive; they must be
+    requested explicitly (`--metrics ruler` or `--metrics all ruler`).
+
+    Any token listed explicitly (i.e. not the magic `'all'`) is added to
+    `rerun_set` → cmd_eval treats those specific keys as force-rerun, so
+    `--metrics ruler` re-evaluates ruler even when an entry already exists.
+    Keys expanded by `'all'` are NOT in rerun_set → they keep the
+    add-only-if-missing behaviour.
+    """
+    if not arg:
+        return list(METRIC_KEYS), set()
+
+    expanded, rerun_set, seen = [], set(), set()
     for x in arg:
-        flat.extend(p for p in x.replace(',', ' ').split() if p)
-    bad = [k for k in flat if k not in ALL_KEYS]
-    if bad:
-        raise SystemExit(f"--metrics: unknown keys {bad}. Valid: {ALL_KEYS}")
-    return flat
+        for tok in (p for p in x.replace(',', ' ').split() if p):
+            if tok == 'all':
+                for k in METRIC_KEYS:
+                    if k not in seen:
+                        seen.add(k)
+                        expanded.append(k)
+                continue
+            if tok not in ALL_KEYS:
+                raise SystemExit(
+                    f"--metrics: unknown key '{tok}'. "
+                    f"Valid: {ALL_KEYS} (or 'all' for all calibration metrics).")
+            if tok not in seen:
+                seen.add(tok)
+                expanded.append(tok)
+            rerun_set.add(tok)
+    return expanded, rerun_set
 
 
 class _LazyGpuList:
@@ -687,16 +776,23 @@ def _run_benchmark_block(args, model, model_id, which):
         clean_up()
         configure_model_cache(args, model, use_cache=True)
         t0 = time()
-        result_path = args.ruler_result_path or ''
-        if result_path:
-            os.makedirs(os.path.dirname(result_path) or '.', exist_ok=True)
+        # --ruler_result_path is now a FOLDER (parity with longbench's dir
+        # layout). eval_ruler still wants a single JSON path, so we point it
+        # at `<folder>/scores.json`. Folder layout leaves room for future
+        # per-task artefacts and lets _archive_existing_results move the
+        # whole folder as one unit.
+        result_dir = args.ruler_result_path or ''
+        scores_file = ''
+        if result_dir:
+            os.makedirs(result_dir, exist_ok=True)
+            scores_file = os.path.join(result_dir, 'scores.json')
         eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id,
                    tasks=args.ruler_task, yaml_path=args.ruler_yaml_path,
                    batch_size=args.ruler_batch_size, length=args.ruler_length,
                    nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks,
-                   result_path=result_path, seed=args.seed)
-        if result_path and os.path.exists(result_path):
-            with open(result_path) as f:
+                   result_path=scores_file, seed=args.seed)
+        if scores_file and os.path.exists(scores_file):
+            with open(scores_file) as f:
                 scores = json.load(f)
         else:
             scores = {}
@@ -720,15 +816,18 @@ def cmd_eval(args):
         f"{k}={row.get(k, '?')}" for k in
         ('wbits', 'kvbits', 'kvdim', 'eff_kvbits', 'memory')))
 
-    requested = _resolve_metric_set(args.metrics)
-    print(f"[correlation/eval] requested metrics: {requested}")
+    requested, rerun_set = _resolve_metric_set(args.metrics)
+    print(f"[correlation/eval] requested: {requested}"
+          + (f"  explicit rerun: {sorted(rerun_set)}" if rerun_set else ""))
 
     out_dir = args.save or os.path.dirname(archs_csv) or '.'
     os.makedirs(out_dir, exist_ok=True)
     result_path = os.path.join(out_dir, f'result_{args.idx}.json')
 
+    # Always load the existing file (if any) so unrequested metrics are
+    # preserved AND so the archive step has the full pre-overwrite snapshot.
     results = {}
-    if os.path.exists(result_path) and not args.force:
+    if os.path.exists(result_path):
         with open(result_path) as f:
             results = json.load(f)
 
@@ -743,13 +842,19 @@ def cmd_eval(args):
             return False
         return True
 
+    # Per-key rerun: keys listed explicitly on --metrics are force-rerun;
+    # keys from `'all'` expansion only run if not already done. --force
+    # forces everything regardless.
+    def _should_run(k):
+        return args.force or k in rerun_set or not _done(k)
+
     pending_calib = [t for t in METRIC_TASKS
-                     if t[0] in requested and (args.force or not _done(t[0]))]
+                     if t[0] in requested and _should_run(t[0])]
     pending_bench = [k for k in BENCH_KEYS
-                     if k in requested and (args.force or not _done(k))]
+                     if k in requested and _should_run(k)]
     skipped = [k for k in requested
                if k in {t[0] for t in METRIC_TASKS} | set(BENCH_KEYS)
-               and _done(k) and not args.force]
+               and _done(k) and not (args.force or k in rerun_set)]
     if skipped:
         print(f"[correlation/eval] skipping (done): {skipped}")
     retried = [k for k in requested
@@ -760,6 +865,14 @@ def cmd_eval(args):
         print("[correlation/eval] nothing to do — all requested metrics already present "
               "(pass --force to recompute).")
         return
+
+    # Archive existing entries we're about to overwrite (no-op when only
+    # ADDING new metrics, which is the common case). Snapshots result_<IDX>.json
+    # + moves raw bench artefacts to ${SAVE}/archive/<ts>/.
+    if os.path.exists(result_path):
+        rerunning = ([t[0] for t in pending_calib]
+                     + [k for k in pending_bench])
+        _archive_existing_results(args, result_path, results, rerunning)
 
     results.setdefault('idx', args.idx)
     results.setdefault('arch', arch)
@@ -1012,9 +1125,21 @@ def build_parser():
     p.add_argument('--idx', type=int, default=-1,
                    help='(eval) row index in archs.csv to evaluate')
     p.add_argument('--metrics', type=str, nargs='+', default=['all'],
-                   help=f'(eval) subset of {ALL_KEYS}, or "all" (default).')
+                   help='(eval) which keys to evaluate. "all" (default) = '
+                        'all calibration metrics (PPL/loss) ONLY — benchmarks '
+                        '(ruler/longbench/longbench_e) must be listed '
+                        'explicitly (e.g. `--metrics all ruler`). Explicitly '
+                        'listed keys are force-rerun (overwrite existing). '
+                        f'Valid keys: {ALL_KEYS}.')
     p.add_argument('--force', action='store_true',
                    help='(eval) recompute even if already in result_<idx>.json')
+    p.add_argument('--no_archive', action='store_true',
+                   help='(eval) skip archiving when an existing metric/'
+                        'benchmark entry is about to be overwritten. By '
+                        'default, result_<idx>.json + raw bench artefacts '
+                        '(ruler_*.json, longbench_*/) are moved under '
+                        '${SAVE}/archive/<timestamp>/ before re-running, so '
+                        'previous results are recoverable.')
     # gov_jsd_kt key-token archive (consumed in eval mode only)
     p.add_argument('--key_token_path', type=str, default='',
                    help='dir containing per-dataset key-token archives '

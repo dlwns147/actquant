@@ -4,10 +4,19 @@
 #   IDX        row index in archs.csv to evaluate
 #   SAVE_DIR   correlation save dir (the one stage 1 wrote);
 #              if omitted, picks the newest save/correlation/* directory.
-#   METRICS    space- or comma-separated subset (or "all", the default).
-#              Valid keys: c4_ppl wt2_jsd wt2_jsd_s512 wt2_jsd_pp512_s128
-#                          needle_nll gsm8k_jsd gov_jsd gov_jsd_kt
-#                          longbench longbench_e ruler
+#   METRICS    space- or comma-separated keys (default "all").
+#              "all" = all CALIBRATION metrics only (PPL/loss); benchmarks
+#              are NOT in "all" and must be listed explicitly.
+#              Examples:
+#                "all"                         calibration metrics only
+#                "all ruler"                   calibration + run ruler
+#                "ruler"                       re-run ruler only (force)
+#                "gov_jsd_kt_s512 longbench"   one new metric + run longbench
+#              Calibration keys: c4_ppl wt2_jsd wt2_jsd_s512 wt2_jsd_pp512_s128
+#                  wt2_jsd_lt128 needle_nll needle_nll_s512 needle_nll_pp512_s128
+#                  gsm8k_jsd gov_jsd gov_jsd_s512 gov_jsd_pp512_s128 gov_jsd_lt128
+#                  gsm8k_jsd_pp_s128 gov_jsd_kt gov_jsd_kt_s512
+#              Benchmark keys:   longbench longbench_e ruler
 #
 # Run this once per IDX (parallelise across GPUs by launching multiple
 # instances). result_<IDX>.json is written into SAVE_DIR; bash
@@ -97,7 +106,7 @@ RULER_YAML_PATH=utils/ruler_utils
 RULER_LENGTH=16384
 RULER_SAMPLE=5
 RULER_BATCH_SIZE=1
-RULER_RESULT_PATH=${SAVE}/ruler_${IDX}_len${RULER_LENGTH}_s${RULER_SAMPLE}.json
+RULER_RESULT_PATH=${SAVE}/ruler_${IDX}_len${RULER_LENGTH}_s${RULER_SAMPLE}
 
 ARGS="--mode eval \
 --gpu_id ${DEVICES} \
@@ -121,16 +130,7 @@ ARGS="--mode eval \
 --seed ${SEED} \
 --needle_task ${NEEDLE_TASK} \
 --needle_n_sample ${NEEDLE_N_SAMPLE} \
---needle_seqlen ${NEEDLE_SEQLEN} \
---longbench_config ${LONGBENCH_CONFIG} \
---longbench_result_path ${LONGBENCH_RESULT_PATH} \
---longbench_e_result_path ${LONGBENCH_E_RESULT_PATH} \
---ruler_task ${RULER_TASK} \
---ruler_yaml_path ${RULER_YAML_PATH} \
---ruler_length ${RULER_LENGTH} \
---ruler_sample ${RULER_SAMPLE} \
---ruler_batch_size ${RULER_BATCH_SIZE} \
---ruler_result_path ${RULER_RESULT_PATH}"
+--needle_seqlen ${NEEDLE_SEQLEN}"
 
 for g in "${K_GROUP_SIZE[@]}"; do ARGS+=" --k_group_size ${g} "; done
 for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
@@ -140,6 +140,12 @@ for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 
 [ "${W_METHOD}" = "hqq" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS} "
 [ -n "${KEY_TOKEN_PATH}" ] && ARGS+=" --key_token_path ${KEY_TOKEN_PATH}"
+
+# ── Benchmark args (toggle by commenting out the block you don't want) ──
+# LongBench / LongBench-E
+ARGS+=" --longbench_config ${LONGBENCH_CONFIG} --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_e_result_path ${LONGBENCH_E_RESULT_PATH}"
+# RULER
+ARGS+=" --ruler_task ${RULER_TASK} --ruler_yaml_path ${RULER_YAML_PATH} --ruler_length ${RULER_LENGTH} --ruler_sample ${RULER_SAMPLE} --ruler_batch_size ${RULER_BATCH_SIZE} --ruler_result_path ${RULER_RESULT_PATH}"
 
 N_PROC=1
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} \

@@ -44,7 +44,8 @@ RESULT_FILE=results.txt
 # DATASETS=("gsm8k" "livebench")
 # DATASETS=("gsm8k")
 # DATASETS=("gsm8k_cot_train" "ifeval_train" "mbpp_train" "wikitext2")
-DATASETS=("gsm8k_cot_train" "wikitext2")
+# DATASETS=("gsm8k_cot_train" "wikitext2")
+DATASETS=("wikitext2")
 DATASETS_STR=$(IFS=_; echo "${DATASETS[*]}")
 # Per-dataset sample size, matched positionally to DATASETS.
 # Examples:
@@ -52,14 +53,18 @@ DATASETS_STR=$(IFS=_; echo "${DATASETS[*]}")
 #   DATASETS=("gsm8k" "livebench")  N_SAMPLE=(5 4)
 # N_SAMPLE=(5 4)
 # N_SAMPLE=(16 4)
-N_SAMPLE=(16)
+# N_SAMPLE=(16)
+N_SAMPLE=(128)
 # N_SAMPLE=(16 16 16)
 N_SAMPLE_STR=$(IFS=_; echo "${N_SAMPLE[*]}")
-BATCH_SIZE=8
+# BATCH_SIZE=8
+BATCH_SIZE=1
 # SEED=42
-SEED=${2}
+# SEED=${2}
+SEED=0
 
-STRATIFIED=${3}
+# STRATIFIED=${3}
+STRATIFIED=" "
 
 ## Sample-loader (only used when STRATIFIED=JSD).
 ##   LOADER: plain | disco
