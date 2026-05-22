@@ -90,7 +90,11 @@
       "Bash(python plot_5way_disco.py)",
       "Bash(python plot_loss_vs_genperf.py)",
       "Bash(chmod +x /NAS/SJ/actquant/poc/benchmark_proxy/amq_all_random/scripts/amq_quantization_gen_topk.sh)",
-      "Bash(python plot_topk_compare.py)"
+      "Bash(python plot_topk_compare.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('amq/search/optimizer.py'\\).read\\(\\)\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('amq/search/problem.py'\\).read\\(\\)\\); ast.parse\\(open\\('amq/search/optimizer.py'\\).read\\(\\)\\); print\\('ok'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('amq/search/optimizer.py'\\).read\\(\\)\\); ast.parse\\(open\\('amq/search/problem.py'\\).read\\(\\)\\); print\\('ok'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('amq/search/optimizer.py'\\).read\\(\\)\\); print\\('ok'\\)\")"
     ],
     "additionalDirectories": [
       "/tmp",
