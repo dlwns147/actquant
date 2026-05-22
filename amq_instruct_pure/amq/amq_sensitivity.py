@@ -69,11 +69,12 @@ def linear_sensitivity(args):
         "time_elapsed": time.time() - start_time
     }
     
+    output_file = f'{args.save_path}.json'
     with accelerator.main_process_first():
-        os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
-        with open(args.output_file, 'w') as f:
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, 'w') as f:
             json.dump(results, f, indent=2)
-        accelerator.print(f"Results saved to {args.output_file}")
+        accelerator.print(f"Results saved to {output_file}")
 
     accelerator.print(f"Time Elapsed: {time.time() - start_time:.2f} seconds")
     accelerator.print("Linear sensitivity analysis completed")

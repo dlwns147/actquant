@@ -52,7 +52,7 @@ class Evaluator:
             clean_up()
         
             print(f'Loading quantization proxies')
-            self.quantization_proxies = get_quantization_proxy(quantization_proxy_paths, device_map)
+            self.quantization_proxies = get_quantization_proxy(quantization_proxy_paths, device_map, use_cache=False)
             self.bits_range = bits_range
             assert len(self.bits_range) == len(self.quantization_proxies), f'Number of bits range and quantization proxies must be the same'
 
