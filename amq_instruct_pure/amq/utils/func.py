@@ -6,7 +6,7 @@ import torch
 import numpy as np
 import scipy.stats as stats
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from transformers import set_seed as set_seed_transformers
 from accelerate import Accelerator, InitProcessGroupKwargs
 
@@ -159,18 +159,21 @@ def get_hfmodel(model_name_or_path: str,
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
     
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name_or_path, 
-        # torch_dtype=dtype,
+    cfg = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
+    if getattr(cfg, 'model_type', None) == 'gemma3' and hasattr(cfg, 'text_config'):
+        from transformers import Gemma3ForCausalLM
+        model_cls = Gemma3ForCausalLM
+    else:
+        model_cls = AutoModelForCausalLM
+    model = model_cls.from_pretrained(
+        model_name_or_path,
         dtype=dtype,
-        device_map=device_map, 
+        device_map=device_map,
         trust_remote_code=trust_remote_code,
         low_cpu_mem_usage=True,
-        use_cache=use_cache,
         **kwargs
     )
     model.config.use_cache = use_cache
-    model.use_cache = use_cache
     
     torch.nn.init.kaiming_uniform_ = org_kaiming_uniform
     torch.nn.init.uniform_ = org_uniform

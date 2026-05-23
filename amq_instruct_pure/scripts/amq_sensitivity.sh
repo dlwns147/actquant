@@ -6,16 +6,25 @@ CUDA_VISIBLE_DEVICES=${1}
 # MODEL_PATH=/SSD/huggingface/meta-llama
 # MODEL_NAME=Llama-3.1-8B-Instruct
 # CONFIG=amq/configs/llama.json
+# DTYPE=float16
 
-MODEL_PATH=/SSD/huggingface/Qwen
-MODEL_NAME=Qwen2.5-7B-Instruct
-# MODEL_NAME=Qwen2.5-14B-Instruct
-CONFIG=amq/configs/qwen2.json
+# MODEL_PATH=/SSD/huggingface/Qwen
+# MODEL_NAME=Qwen2.5-7B-Instruct
+# # MODEL_NAME=Qwen2.5-14B-Instruct
+# CONFIG=amq/configs/qwen2.json
+# DTYPE=float16
 
-QUANTIZATION_PROXY_PATHS=("/SSD/hqq/${MODEL_NAME}_2bit_128gs_1axis_float16" \
-"/SSD/hqq/${MODEL_NAME}_3bit_128gs_1axis_float16" \
-"/SSD/hqq/${MODEL_NAME}_4bit_128gs_1axis_float16")
+MODEL_PATH=/SSD/huggingface/google
+MODEL_NAME=gemma-3-12b-it
+# MODEL_NAME=gemma-3-27b-it
+CONFIG=amq/configs/gemma.json
+DTYPE=float16
+
 GPU_ID=${CUDA_VISIBLE_DEVICES}
+
+QUANTIZATION_PROXY_PATHS=("/SSD/hqq/${MODEL_NAME}_2bit_128gs_1axis_${DTYPE}" \
+"/SSD/hqq/${MODEL_NAME}_3bit_128gs_1axis_${DTYPE}" \
+"/SSD/hqq/${MODEL_NAME}_4bit_128gs_1axis_${DTYPE}")
 
 ## Data Args
 DATASET=wikitext2

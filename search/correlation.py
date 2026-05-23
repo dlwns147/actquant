@@ -989,6 +989,102 @@ def cmd_eval(args):
 # ════════════════════════════════════════════════════════════════════════════
 # Aggregate mode — scan result_*.json files into a wide CSV for plotting
 # ════════════════════════════════════════════════════════════════════════════
+def _to_float(x):
+    """Coerce a CSV cell / JSON scalar to float; return NaN on failure
+    (strings, dicts, None, empty cell)."""
+    if x is None or x == '':
+        return float('nan')
+    if isinstance(x, (int, float)):
+        return float(x)
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return float('nan')
+
+
+def _compute_correlations(rows, metric_cols, bench_cols, min_samples=5):
+    """For each (metric, bench_subcol) pair, compute Pearson and Spearman
+    over rows where BOTH values are numeric. Returns:
+        {metric: {bench: dict(pearson, spearman, n)}}
+
+    Pairs with fewer than `min_samples` overlapping numeric rows return NaN
+    (correlation on n<5 is too noisy to interpret).
+    """
+    from scipy.stats import spearmanr
+
+    out = {m: {} for m in metric_cols}
+    metric_vals = {m: np.array([_to_float(r.get(m)) for r in rows])
+                   for m in metric_cols}
+    bench_vals = {b: np.array([_to_float(r.get(b)) for r in rows])
+                  for b in bench_cols}
+    for m in metric_cols:
+        mv = metric_vals[m]
+        for b in bench_cols:
+            bv = bench_vals[b]
+            mask = ~(np.isnan(mv) | np.isnan(bv))
+            n = int(mask.sum())
+            if n < min_samples or np.unique(mv[mask]).size < 2 \
+                    or np.unique(bv[mask]).size < 2:
+                pr, sr = float('nan'), float('nan')
+            else:
+                pr = float(np.corrcoef(mv[mask], bv[mask])[0, 1])
+                sr = float(spearmanr(mv[mask], bv[mask]).correlation)
+            out[m][b] = {'pearson': pr, 'spearman': sr, 'n': n}
+    return out
+
+
+def _write_corr_matrix(path, corr, metric_cols, bench_cols, kind):
+    """Write a wide CSV: rows=metrics, cols=bench sub-cols, cells=`kind` (pearson/spearman)."""
+    with open(path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['metric'] + bench_cols)
+        for m in metric_cols:
+            row = [m]
+            for b in bench_cols:
+                v = corr[m][b][kind]
+                row.append(f"{v:.4f}" if not np.isnan(v) else '')
+            w.writerow(row)
+
+
+def _print_corr_summary(corr, metric_cols, bench_cols, top_k=3,
+                        out_path=None):
+    """Per benchmark column, list the top-K calibration metrics by |Pearson|
+    plus their Spearman. Writes to stdout AND (if `out_path` given) to a
+    text file for offline review. Same content goes to both sinks.
+    """
+    if not metric_cols or not bench_cols:
+        return
+    lines = []
+    lines.append(f"Top-{top_k} calibration metrics per benchmark column "
+                 f"(by |Pearson r|):")
+    lines.append(f"  {'benchmark':<40}  {'rank':<4}  {'metric':<24}  "
+                 f"{'pearson':>8}  {'spearman':>9}  {'n':>4}")
+    lines.append(f"  {'-' * 40}  {'-' * 4}  {'-' * 24}  {'-' * 8}  "
+                 f"{'-' * 9}  {'-' * 4}")
+    for b in bench_cols:
+        # Rank metrics by |pearson| (NaN sorts last).
+        ranked = sorted(
+            metric_cols,
+            key=lambda m: (np.isnan(corr[m][b]['pearson']),
+                           -abs(corr[m][b]['pearson'])
+                           if not np.isnan(corr[m][b]['pearson']) else 0.0))
+        for i, m in enumerate(ranked[:top_k]):
+            c = corr[m][b]
+            pr_s = f"{c['pearson']:+.4f}" if not np.isnan(c['pearson']) else '   nan'
+            sr_s = f"{c['spearman']:+.4f}" if not np.isnan(c['spearman']) else '    nan'
+            bname = b if i == 0 else ''
+            lines.append(f"  {bname:<40}  {i + 1:<4}  {m:<24}  "
+                         f"{pr_s:>8}  {sr_s:>9}  {c['n']:>4}")
+
+    print(f"\n[correlation/aggregate] " + lines[0])
+    for ln in lines[1:]:
+        print(ln)
+    if out_path:
+        with open(out_path, 'w') as f:
+            f.write('\n'.join(lines) + '\n')
+        print(f"[correlation/aggregate] wrote {out_path}")
+
+
 def cmd_aggregate(args):
     archs_csv = (args.archs_csv
                  or os.path.join(args.save or '.', 'archs.csv'))
@@ -1038,6 +1134,34 @@ def cmd_aggregate(args):
             w.writerow(r)
     print(f"[correlation/aggregate] wrote {out_csv} "
           f"({len(rows)} rows, {len(all_cols)} cols)")
+
+    # ── Correlation: each calibration metric ↔ each benchmark sub-column ──
+    # metric_cols = the METRIC_KEYS that actually appear in the table.
+    # bench_cols  = all `<bk>__<sk>` (and deeper) sub-columns that are numeric;
+    #               the `<bk>__<sk>` parent column for LongBench-E carries the
+    #               raw dict and is non-numeric, so it's filtered out below.
+    metric_cols = [c for c in all_cols if c in METRIC_KEYS]
+    bench_prefixes = tuple(f'{bk}__' for bk in BENCH_KEYS)
+    bench_cols_all = [c for c in all_cols if c.startswith(bench_prefixes)]
+    # Keep only numeric bench cols (skip stringified dicts etc.)
+    bench_cols = [b for b in bench_cols_all
+                  if any(not np.isnan(_to_float(r.get(b))) for r in rows)]
+    if not metric_cols:
+        print("[correlation/aggregate] no calibration metrics found — skipping correlation.")
+    elif not bench_cols:
+        print("[correlation/aggregate] no benchmark columns found — skipping correlation.")
+    else:
+        corr = _compute_correlations(rows, metric_cols, bench_cols,
+                                     min_samples=args.corr_min_samples)
+        pearson_path = os.path.join(out_dir, 'correlation_pearson.csv')
+        spearman_path = os.path.join(out_dir, 'correlation_spearman.csv')
+        _write_corr_matrix(pearson_path, corr, metric_cols, bench_cols, 'pearson')
+        _write_corr_matrix(spearman_path, corr, metric_cols, bench_cols, 'spearman')
+        print(f"[correlation/aggregate] wrote {pearson_path}")
+        print(f"[correlation/aggregate] wrote {spearman_path}")
+        summary_path = os.path.join(out_dir, 'correlation_summary.txt')
+        _print_corr_summary(corr, metric_cols, bench_cols,
+                            top_k=args.corr_top_k, out_path=summary_path)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1145,6 +1269,12 @@ def build_parser():
     # eval mode
     p.add_argument('--archs_csv', type=str, default='',
                    help='(eval / aggregate) path to archs.csv (default: <save>/archs.csv)')
+    p.add_argument('--corr_min_samples', type=int, default=5,
+                   help='(aggregate) min overlapping numeric samples needed '
+                        'to compute a correlation; below this the cell is NaN.')
+    p.add_argument('--corr_top_k', type=int, default=3,
+                   help='(aggregate) per benchmark column, print top-K '
+                        'calibration metrics by |Pearson r|.')
     p.add_argument('--idx', type=int, default=-1,
                    help='(eval) row index in archs.csv to evaluate')
     p.add_argument('--metrics', type=str, nargs='+', default=['all'],

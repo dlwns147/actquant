@@ -10,7 +10,7 @@ TARGET_BITS=${2}
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
 ## Model Args
-MODEL_PATH=meta-llama
+MODEL_PATH=/SSD/huggingface/meta-llama
 MODEL_NAME=Llama-3.1-8B-Instruct
 CONFIG=amq/configs/llama.json
 
@@ -33,31 +33,37 @@ TARGET_BITS_OFFSET=0.005
 # LOAD=/NAS/SJ/actquant/poc/benchmark_proxy/amq_instruct_pure/amq/results/search/2605011244_Llama-3.1-8B-Instruct_dataset_gsm8k_livebench_nsamples_16_seed_42_stratified/iter_200.stats
 # LOAD=/NAS/SJ/actquant/poc/benchmark_proxy/amq_instruct_pure/amq/results/search/2605030855_Llama-3.1-8B-Instruct_dataset_gsm8k_livebench_nsamples_16_seed_100_stratified/iter_200.stats
 
-LOAD=/NAS/SJ/actquant/poc/benchmark_proxy/amq_instruct_pure/amq/results/search/2605091704_Llama-3.1-8B-Instruct_dataset_gsm8k_livebench_nsamples_16_seed_100_jsd_stratified/iter_200.stats
+LOAD=/NAS/SJ/actquant/amq_instruct_pure/amq/results/search/SMOKE_2605201309_Llama-3.1-8B-Instruct_ifeval_pp_train_apps_train_n_4_4_AB/iter_3.stats
 
 # LOAD=/NAS/SJ/actquant/poc/benchmark_proxy/amq_original/amq/results/search/2605020232_Llama-3.1-8B-Instruct_dataset_wikitext2/iter_200.stats
 
 ## Post-search (lm_eval) Args
 SEED=0
-LM_EVAL_TASK=("gsm8k_cot" "ifeval")
+LM_EVAL_TASK=("gsm8k_cot" "ifeval" "mbpp")
 # LM_EVAL_TASK=( "gsm8k_cot" )
 LM_EVAL_BATCH_SIZE=auto
 
 ## Eval Args (kept for shared parser)
-EVAL_DATASET=("gsm8k")
-EVAL_SEQLEN=2048
-EVAL_SEED=0
+# EVAL_DATASET=("gsm8k")
+# EVAL_SEQLEN=2048
+# EVAL_SEED=0
 
 ## Base Args
-MODEL_SAVE_PATH=/SSD/Woo/actquant/poc/benchmark_proxy/amq/results/quantization/${MODEL_NAME}_gen_${METHOD}_target_bits_${TARGET_BITS}_${TODAY}
-# SAVE_PATH=amq/results/quantization/${MODEL_NAME}_gen_${METHOD}_target_bits_${TARGET_BITS}_${TODAY}
-SAVE_PATH=amq/results/quantization/train_gsm8k_livebench/jsd_stratified_seed_100_eval_gsm8k_ifeval/${MODEL_NAME}_gen_${METHOD}_target_bits_${TARGET_BITS}_${TODAY}
+# Ephemeral dirs so the AWQ pseudo-quant checkpoint isn't kept around.
+# vLLM (lm_eval backend) loads from a path, so we still need *a* path —
+# this one lives in a mktemp dir and is wiped on EXIT.
+TMP_ROOT=$(mktemp -d -t amq_gen_XXXXXX)
+SAVE_PATH=${TMP_ROOT}/run
+MODEL_SAVE_PATH=${TMP_ROOT}/awq_model
+trap 'rm -rf "${TMP_ROOT}"' EXIT
+echo "[amq_quantization_gen] ephemeral TMP_ROOT=${TMP_ROOT}"
+
 GPU_ID=${CUDA_VISIBLE_DEVICES}
 
 args=(
     --gpu_id ${GPU_ID}
-    --model_save_path ${MODEL_SAVE_PATH}
     --save_path ${SAVE_PATH}
+    --model_save_path ${MODEL_SAVE_PATH}
     --model_path ${MODEL_PATH}
     --model_name ${MODEL_NAME}
     --config ${CONFIG}
@@ -67,14 +73,10 @@ args=(
     --target_bits ${TARGET_BITS}
     --target_bits_offset ${TARGET_BITS_OFFSET}
     --load ${LOAD}
-    --eval_dataset ${EVAL_DATASET[@]}
-    --eval_seqlen ${EVAL_SEQLEN}
-    --eval_seed ${EVAL_SEED}
     --seed ${SEED}
     --lm_eval_task ${LM_EVAL_TASK[@]}
     --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE}
 )
-
 echo ${args[@]}
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} python amq/amq_quantization_gen.py ${args[@]}

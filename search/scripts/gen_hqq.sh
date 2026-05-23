@@ -10,7 +10,7 @@ DEVICES=${1}
 # # MODEL_NAME=Llama-3.2-1B-Instruct
 # MODEL_NAME=Llama-3.2-3B-Instruct
 
-MODEL_PATH=/SSD/huggingface/Qwen
+# MODEL_PATH=/SSD/huggingface/Qwen
 # MODEL_NAME=Qwen2.5-1.5B
 # MODEL_NAME=Qwen2.5-3B
 # MODEL_NAME=Qwen2.5-7B
@@ -24,7 +24,7 @@ MODEL_PATH=/SSD/huggingface/Qwen
 # MODEL_NAME=Qwen2.5-7B-Instruct-1M
 
 # MODEL_NAME=Qwen3-4B
-MODEL_NAME=Qwen3-8B
+# MODEL_NAME=Qwen3-8B
 # MODEL_NAME=Qwen3-14B
 
 # MODEL_PATH=/SSD/huggingface/mistralai
@@ -35,9 +35,10 @@ MODEL_NAME=Qwen3-8B
 # MODEL_PATH=/SSD/huggingface/facebook
 # MODEL_NAME=opt-1.3b
 
-# MODEL_PATH=/SSD/huggingface/google
-# MODEL_NAME=gemma-3-12b-it
+MODEL_PATH=/SSD/huggingface/google
+MODEL_NAME=gemma-3-12b-it
 
-DTYPE=float16
+# DTYPE=float16
+DTYPE=bfloat16
 
 CUDA_VISIBLE_DEVICEs=${DEVICES} python /NAS/SJ/hqq/test.py --model_path ${MODEL_PATH} --model_name ${MODEL_NAME} --dtype ${DTYPE}
