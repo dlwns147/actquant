@@ -146,7 +146,6 @@ class BenchmarkProxyEvaluator:
         self.fp16_answers = self.sample_loader.fp16_answers
 
         self.model = deepcopy(self.quantization_proxies[-1])
-        self.model = self.model.to(dev)
 
         self.accelerator.wait_for_everyone()
 

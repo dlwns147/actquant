@@ -22,8 +22,8 @@
         "model_numel": 10758389760,
         "model": "model",
         "layers": "model.layers",
-        "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "model.rotary_emb", "model.rotary_emb_local", "lm_head"]
+        "pre_layer": ["model.embed_tokens", "lm_head"],
+        "post_layer": ["model.norm", "model.rotary_emb", "model.rotary_emb_local"]
     },
 
     "gemma-3-27b-it": {
@@ -49,7 +49,7 @@
         "model_numel": 25598361600,
         "model": "model",
         "layers": "model.layers",
-        "pre_layer": ["model.embed_tokens"],
-        "post_layer": ["model.norm", "model.rotary_emb", "model.rotary_emb_local", "lm_head"]
+        "pre_layer": ["model.embed_tokens", "lm_head"],
+        "post_layer": ["model.norm", "model.rotary_emb", "model.rotary_emb_local"]
     }
 }
