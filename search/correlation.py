@@ -1003,14 +1003,16 @@ def _to_float(x):
 
 
 def _compute_correlations(rows, metric_cols, bench_cols, min_samples=5):
-    """For each (metric, bench_subcol) pair, compute Pearson and Spearman
-    over rows where BOTH values are numeric. Returns:
-        {metric: {bench: dict(pearson, spearman, n)}}
+    """For each (metric, bench_subcol) pair, compute Pearson, Spearman, and
+    Kendall tau-b over rows where BOTH values are numeric. Returns:
+        {metric: {bench: dict(pearson, spearman, kendall, n)}}
 
     Pairs with fewer than `min_samples` overlapping numeric rows return NaN
-    (correlation on n<5 is too noisy to interpret).
+    (correlation on n<5 is too noisy to interpret). Kendall tau-b is more
+    robust to small-n and ties than Spearman; it's slower (O(n²)) but n=50
+    is trivial.
     """
-    from scipy.stats import spearmanr
+    from scipy.stats import spearmanr, kendalltau
 
     out = {m: {} for m in metric_cols}
     metric_vals = {m: np.array([_to_float(r.get(m)) for r in rows])
@@ -1025,11 +1027,13 @@ def _compute_correlations(rows, metric_cols, bench_cols, min_samples=5):
             n = int(mask.sum())
             if n < min_samples or np.unique(mv[mask]).size < 2 \
                     or np.unique(bv[mask]).size < 2:
-                pr, sr = float('nan'), float('nan')
+                pr, sr, kt = float('nan'), float('nan'), float('nan')
             else:
                 pr = float(np.corrcoef(mv[mask], bv[mask])[0, 1])
                 sr = float(spearmanr(mv[mask], bv[mask]).correlation)
-            out[m][b] = {'pearson': pr, 'spearman': sr, 'n': n}
+                kt = float(kendalltau(mv[mask], bv[mask]).correlation)
+            out[m][b] = {'pearson': pr, 'spearman': sr,
+                         'kendall': kt, 'n': n}
     return out
 
 
@@ -1058,9 +1062,9 @@ def _print_corr_summary(corr, metric_cols, bench_cols, top_k=3,
     lines.append(f"Top-{top_k} calibration metrics per benchmark column "
                  f"(by |Pearson r|):")
     lines.append(f"  {'benchmark':<40}  {'rank':<4}  {'metric':<24}  "
-                 f"{'pearson':>8}  {'spearman':>9}  {'n':>4}")
+                 f"{'pearson':>8}  {'spearman':>9}  {'kendall':>8}  {'n':>4}")
     lines.append(f"  {'-' * 40}  {'-' * 4}  {'-' * 24}  {'-' * 8}  "
-                 f"{'-' * 9}  {'-' * 4}")
+                 f"{'-' * 9}  {'-' * 8}  {'-' * 4}")
     for b in bench_cols:
         # Rank metrics by |pearson| (NaN sorts last).
         ranked = sorted(
@@ -1072,9 +1076,10 @@ def _print_corr_summary(corr, metric_cols, bench_cols, top_k=3,
             c = corr[m][b]
             pr_s = f"{c['pearson']:+.4f}" if not np.isnan(c['pearson']) else '   nan'
             sr_s = f"{c['spearman']:+.4f}" if not np.isnan(c['spearman']) else '    nan'
+            kt_s = f"{c['kendall']:+.4f}" if not np.isnan(c['kendall']) else '   nan'
             bname = b if i == 0 else ''
             lines.append(f"  {bname:<40}  {i + 1:<4}  {m:<24}  "
-                         f"{pr_s:>8}  {sr_s:>9}  {c['n']:>4}")
+                         f"{pr_s:>8}  {sr_s:>9}  {kt_s:>8}  {c['n']:>4}")
 
     print(f"\n[correlation/aggregate] " + lines[0])
     for ln in lines[1:]:
@@ -1170,10 +1175,13 @@ def cmd_aggregate(args):
                                      min_samples=args.corr_min_samples)
         pearson_path = os.path.join(out_dir, 'correlation_pearson.csv')
         spearman_path = os.path.join(out_dir, 'correlation_spearman.csv')
+        kendall_path = os.path.join(out_dir, 'correlation_kendall.csv')
         _write_corr_matrix(pearson_path, corr, metric_cols, bench_cols, 'pearson')
         _write_corr_matrix(spearman_path, corr, metric_cols, bench_cols, 'spearman')
+        _write_corr_matrix(kendall_path, corr, metric_cols, bench_cols, 'kendall')
         print(f"[correlation/aggregate] wrote {pearson_path}")
         print(f"[correlation/aggregate] wrote {spearman_path}")
+        print(f"[correlation/aggregate] wrote {kendall_path}")
         summary_path = os.path.join(out_dir, 'correlation_summary.txt')
         _print_corr_summary(corr, metric_cols, bench_cols,
                             top_k=args.corr_top_k, out_path=summary_path)

@@ -199,7 +199,16 @@ def get_quantization_proxy(quant_model_paths, device_map, use_cache):
 
     quantization_proxies = []
     for quant_model_path in quant_model_paths:
-        model = AutoHQQHFModel.from_quantized(quant_model_path, device='cuda:0')
+        # HQQ defaults compute_dtype=float16. Gemma-3 activations overflow fp16
+        # (>65504) → inf → NaN cascade. Derive dtype from the path suffix
+        # (e.g. `..._bfloat16` / `..._float16`) which encodes the compute dtype
+        # used at quantization time.
+        if quant_model_path.endswith('_bfloat16') or '_bfloat16' in quant_model_path.rstrip('/').split('/')[-1]:
+            compute_dtype = torch.bfloat16
+        else:
+            compute_dtype = torch.float16
+        model = AutoHQQHFModel.from_quantized(quant_model_path, device='cuda:0',
+                                              compute_dtype=compute_dtype)
         model = simple_dispatch_model(model, device_map)
         
         quantization_proxies.append(model)
