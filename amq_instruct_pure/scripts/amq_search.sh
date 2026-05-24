@@ -115,7 +115,7 @@ STRATIFIED=" "
 LOADER=${4:-plain}
 
 ## Worker Args
-JSD_TP=1
+JSD_TP=3
 
 ## Base Args
 SAVE_PATH=amq/results/search/${TODAY}_${MODEL_NAME}_dataset_${DATASETS_STR}_nsamples_${N_SAMPLE_STR}_seed_${SEED}_Loss_JSD

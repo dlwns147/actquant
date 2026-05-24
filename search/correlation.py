@@ -1114,7 +1114,11 @@ def cmd_aggregate(args):
                     # benchmark so we can derive `<bk>__avg` (overall score).
                     leaf_values = []
                     for sk, sv in res[bk].items():
-                        if sk.startswith('_'):
+                        # Skip wall-clock timings (ruler returns a top-level
+                        # 'time' field alongside scores; it's not a benchmark
+                        # score and its positive correlation with loss would
+                        # contaminate ruler__avg).
+                        if sk.startswith('_') or sk == 'time':
                             continue
                         merged[f'{bk}__{sk}'] = sv
                         if isinstance(sv, dict):
