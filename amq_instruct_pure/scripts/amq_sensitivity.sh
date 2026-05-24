@@ -18,7 +18,8 @@ MODEL_PATH=/SSD/huggingface/google
 MODEL_NAME=gemma-3-12b-it
 # MODEL_NAME=gemma-3-27b-it
 CONFIG=amq/configs/gemma.json
-DTYPE=float16
+# DTYPE=float16
+DTYPE=bfloat16
 
 GPU_ID=${CUDA_VISIBLE_DEVICES}
 

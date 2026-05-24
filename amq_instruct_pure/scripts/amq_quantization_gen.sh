@@ -10,9 +10,12 @@ TARGET_BITS=${2}
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
 ## Model Args
-MODEL_PATH=/SSD/huggingface/meta-llama
-MODEL_NAME=Llama-3.1-8B-Instruct
-CONFIG=amq/configs/llama.json
+MODEL_PATH=/SSD/huggingface/Qwen
+MODEL_NAME=Qwen2.5-7B-Instruct
+CONFIG=amq/configs/qwen2.json
+# (debug) LOAD below is a Llama-3.1-8B SMOKE stats (32 blocks);
+# Qwen2.5-7B-Instruct has 28 blocks, so AWQ apply will likely fail
+# on size mismatch. Kept on purpose for pipeline debugging per user.
 
 ## Quantization / Selection Args
 METHOD=awq

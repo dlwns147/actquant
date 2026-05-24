@@ -1110,14 +1110,25 @@ def cmd_aggregate(args):
                     merged[mk] = v if isinstance(v, (int, float)) else str(v)
             for bk in BENCH_KEYS:
                 if bk in res and isinstance(res[bk], dict):
+                    # Track all numeric leaf values that belong to this
+                    # benchmark so we can derive `<bk>__avg` (overall score).
+                    leaf_values = []
                     for sk, sv in res[bk].items():
                         if sk.startswith('_'):
                             continue
                         merged[f'{bk}__{sk}'] = sv
                         if isinstance(sv, dict):
                             # LongBench-E returns {'0-4k':…, '4-8k':…, '8k+':…}
+                            # → flatten to <bk>__<task>__<bucket> AND collect
+                            # numeric leaves for the average.
                             for sub_k, sub_v in sv.items():
                                 merged[f'{bk}__{sk}__{sub_k}'] = sub_v
+                                if isinstance(sub_v, (int, float)):
+                                    leaf_values.append(float(sub_v))
+                        elif isinstance(sv, (int, float)):
+                            leaf_values.append(float(sv))
+                    if leaf_values:
+                        merged[f'{bk}__avg'] = sum(leaf_values) / len(leaf_values)
         rows.append(merged)
 
     all_cols = []

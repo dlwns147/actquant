@@ -7,17 +7,36 @@ CUDA_VISIBLE_DEVICES=${1}
 N_PROC=1
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
+LLAMA_31_8B_INSTRUCT=Llama-3.1-8B-Instruct
+QWEN_25_7B_INSTRUCT=Qwen2.5-7B-Instruct
+QWEN_25_14B_INSTRUCT=Qwen2.5-14B-Instruct
+GEMMA_3_12B_INSTRUCT=gemma-3-12b-it
+GEMMA_3_27B_INSTRUCT=gemma-3-27b-it
+
 ## Model Args
-MODEL_PATH=/SSD/huggingface/meta-llama
-MODEL_NAME=Llama-3.1-8B-Instruct
-CONFIG=/NAS/SJ/actquant/poc/benchmark_proxy/amq_instruct_pure/amq/configs/llama.json
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=${LLAMA_31_8B_INSTRUCT}
+# CONFIG=/NAS/SJ/actquant/amq_instruct_pure/amq/configs/llama.json
+# DTYPE=float16
+
+# MODEL_PATH=/SSD/huggingface/Qwen
+# MODEL_NAME=${QWEN_25_7B_INSTRUCT}
+# # MODEL_NAME=${QWEN_25_14B_INSTRUCT}
+# CONFIG=/NAS/SJ/actquant/amq_instruct_pure/amq/configs/qwen2.json
+# DTYPE=float16
+
+MODEL_PATH=/SSD/huggingface/google
+MODEL_NAME=${GEMMA_3_12B_INSTRUCT}
+# MODEL_NAME=${GEMMA_3_27B_INSTRUCT}
+CONFIG=/NAS/SJ/actquant/amq_instruct_pure/amq/configs/gemma.json
+DTYPE=bfloat16
 
 # QUANTIZATION_PROXY_FAKE_PATHS=("/SSD/hqq/Llama-3.1-8B-Instruct_2bit_128gs_1axis_fake" \
 # "/SSD/hqq/Llama-3.1-8B-Instruct_3bit_128gs_1axis_fake" \
 # "/SSD/hqq/Llama-3.1-8B-Instruct_4bit_128gs_1axis_fake")
-QUANTIZATION_PROXY_PATHS=("/SSD/hqq/Llama-3.1-8B-Instruct_2bit_128gs_1axis_float16" \
-"/SSD/hqq/Llama-3.1-8B-Instruct_3bit_128gs_1axis_float16" \
-"/SSD/hqq/Llama-3.1-8B-Instruct_4bit_128gs_1axis_float16")
+QUANTIZATION_PROXY_PATHS=("/SSD/hqq/${MODEL_NAME}_2bit_128gs_1axis_${DTYPE}" \
+"/SSD/hqq/${MODEL_NAME}_3bit_128gs_1axis_${DTYPE}" \
+"/SSD/hqq/${MODEL_NAME}_4bit_128gs_1axis_${DTYPE}")
 
 ## Search Args
 SENSITIVITY_THRESHOLD=2.0
@@ -27,10 +46,35 @@ SENSITIVITY_SEQLEN=2048
 
 # PREDICTOR=rbf
 PREDICTOR=rbf_gpu
-ITERATIONS=200
-N_DOE=250
+# ITERATIONS=200
+# N_DOE=250
 N_ITER=50
 MAX_VALUE=1.0
+
+if [ "${MODEL_NAME}" == "${QWEN_25_7B_INSTRUCT}" ]; then
+    N_DOE=200
+    ITERATIONS=200
+elif [ "${MODEL_NAME}" == "${LLAMA_31_8B_INSTRUCT}" ]; then
+    N_DOE=250
+    ITERATIONS=200
+# elif [ "${MODEL_NAME}" == "${LLAMA_2_13B}" ]; then
+#     N_DOE=300
+#     ITERATIONS=200
+elif [ "${MODEL_NAME}" == "${QWEN_25_14B_INSTRUCT}" ] || [ "${MODEL_NAME}" == "${GEMMA_3_12B_INSTRUCT}" ]; then
+    N_DOE=350
+    ITERATIONS=200
+# elif [ "${MODEL_NAME}" == "${QWEN_25_32B}" ]; then
+#     N_DOE=450
+#     ITERATIONS=250
+# elif [ "${MODEL_NAME}" == "${LLAMA_2_70B}" ] || [ "${MODEL_NAME}" == "${LLAMA_31_70B}" ] || [ "${MODEL_NAME}" == "${QWEN_25_72B}" ]; then
+#     N_DOE=600
+#     ITERATIONS=250
+else
+	echo "Invalid model name: ${MODEL_NAME}"
+	exit
+fi
+
+
 
 SUBSET_POP_SIZE=100
 GA_POP_SIZE=200

@@ -116,6 +116,15 @@ def run_awq(
             layer_kwargs.update(kwargs)
             raise ValueError  # early exit to break later inference
 
+        def __getattr__(self, name):
+            # Delegate unknown attribute lookups to the wrapped layer so that
+            # newer HF model code (e.g. Qwen2's decoder_layer.attention_type)
+            # can still introspect the original layer through the wrapper.
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                return getattr(self.module, name)
+
     # patch layer 0 to catch input and kwargs
     layers[0] = Catcher(layers[0])
     try:
