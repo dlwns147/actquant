@@ -61,16 +61,59 @@ def load_and_eval_ppl(model, model_name='', device=torch.device("cuda:0"), datas
     return ppl_test 
 
 @torch.no_grad()
-def eval_ppl(model, accelerator, loader, seqlen=2048, stride=0):
-    # List to store negative log likelihoods
+def eval_ppl(model, accelerator, loader, seqlen=2048, stride=0,
+             last_tokens=None, prefill_prompt=False):
+    """PPL evaluation. Forward strategy mirrors eval_loss:
+      1) prefill_prompt + last_tokens: prefill prompt, stride answer span.
+      2) stride > 0: chunked forward over whole sequence.
+      3) else: single forward pass.
+    When last_tokens is set, CE/PPL is computed ONLY over the last N positions
+    per sequence; the denominator tracks actual scored tokens so PPL stays
+    apples-to-apples across stride / last_tokens variants.
+    """
     nlls = []
+    n_positions = []
 
     # Loop through each batch
     for inputs, attention_mask, labels in tqdm(loader, desc='Eval PPL'):
         total_seq_len = inputs.shape[1]
 
-        # Forward pass: stride-based with use_cache=True, or single pass
-        if stride is not None and stride > 0:
+        # ── Forward strategy ──
+        use_prefill_mode = (
+            prefill_prompt and last_tokens is not None
+            and 0 < last_tokens < total_seq_len
+        )
+        if use_prefill_mode:
+            prompt_len = total_seq_len - last_tokens
+            answer_stride = stride if (stride is not None and stride > 0) else last_tokens
+            chunked_logits = []
+            past_key_values = None
+
+            # Prefill prompt
+            prompt_attn = attention_mask[:, :prompt_len] if attention_mask is not None else None
+            prompt_out = model(
+                inputs[:, :prompt_len],
+                attention_mask=prompt_attn,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            chunked_logits.append(prompt_out.logits)
+            past_key_values = prompt_out.past_key_values
+
+            # Stride through answer span
+            for start in range(prompt_len, total_seq_len, answer_stride):
+                end = min(start + answer_stride, total_seq_len)
+                chunk_attn = attention_mask[:, :end] if attention_mask is not None else None
+                chunk_outputs = model(
+                    inputs[:, start:end],
+                    attention_mask=chunk_attn,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+                chunked_logits.append(chunk_outputs.logits)
+                past_key_values = chunk_outputs.past_key_values
+            lm_logits = torch.cat(chunked_logits, dim=1)
+        elif stride is not None and stride > 0:
             chunked_logits = []
             past_key_values = None
             for start in range(0, total_seq_len, stride):
@@ -90,20 +133,28 @@ def eval_ppl(model, accelerator, loader, seqlen=2048, stride=0):
             outputs = model(inputs, attention_mask=attention_mask)
             lm_logits = outputs.logits
 
-        # Shift logits and labels for next token prediction
-        shift_logits = lm_logits[:, :-1, :].contiguous()
-        shift_logits = shift_logits.reshape(-1, shift_logits.size(-1))
-        shift_labels = inputs[:, 1:].reshape(-1)
+        # Shift logits and labels for next-token prediction
+        shift_logits = lm_logits[:, :-1, :].contiguous()  # [B, T-1, V]
+        shift_labels = inputs[:, 1:].contiguous()         # [B, T-1]
 
-        # Compute loss
+        # last_tokens mask: keep only last N scored positions per sequence.
+        if last_tokens is not None:
+            t_shift = shift_logits.shape[1]
+            start_idx = max(0, t_shift - last_tokens)
+            shift_logits = shift_logits[:, start_idx:, :]
+            shift_labels = shift_labels[:, start_idx:]
+
+        shift_logits = shift_logits.reshape(-1, shift_logits.size(-1))
+        shift_labels = shift_labels.reshape(-1)
+
+        # Compute CE on scored positions
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(shift_logits, shift_labels)
 
-        # Calculate negative log likelihood
-        neg_log_likelihood = loss.float() * seqlen * lm_logits.shape[0]
-
-        # Append to list of negative log likelihoods
-        nlls.append(neg_log_likelihood)
+        # Weight by actual scored-token count (handles last_tokens correctly)
+        n_pos = shift_labels.numel()
+        nlls.append(loss.float() * n_pos)
+        n_positions.append(n_pos)
 
     # # Loop through each batch
     # for i in tqdm(range(0,n_sample,bs), desc='Eval PPL'):
@@ -138,10 +189,12 @@ def eval_ppl(model, accelerator, loader, seqlen=2048, stride=0):
     # nlls = torch.cat(nlls)
     # print(f'{accelerator.device} torch nlls : {nlls.shape}')
     nlls = torch.stack(accelerator.gather_for_metrics(nlls)).flatten()
+    total_positions = sum(accelerator.gather_for_metrics(n_positions))
 
-    # Compute perplexity
-    # ppl = torch.exp(torch.stack(nlls).sum() / (len(nlls) * seqlen))
-    ppl = torch.exp(nlls.sum() / (len(nlls) * seqlen))
+    # PPL = exp(sum(NLL) / total scored positions). With last_tokens, the
+    # denominator shrinks accordingly; without it, total_positions ≈
+    # len(nlls) * (seqlen - 1) which matches the legacy formula.
+    ppl = torch.exp(nlls.sum() / max(total_positions, 1))
 
     # Empty CUDA cache to save memory
     # torch.cuda.empty_cache()
@@ -395,7 +448,8 @@ def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_ent
         Metric value
     """
     if metric == 'ppl':
-        return eval_ppl(model, accelerator, loader, seqlen=seqlen, stride=stride)
+        return eval_ppl(model, accelerator, loader, seqlen=seqlen, stride=stride,
+                        last_tokens=last_tokens, prefill_prompt=prefill_prompt)
     elif metric == 'loss':
         return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list, stride=stride, last_tokens=last_tokens, prefill_prompt=prefill_prompt)
     elif 'gsm8k' in metric:

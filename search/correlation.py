@@ -151,6 +151,18 @@ METRIC_TASKS = [
     ('c4_ppl',            'A', 'c4',
         dict(metric='ppl',  loss_func='cross_entropy',
              stride=0, prefill_prompt=False, last_tokens=None)),
+    ('c4_ppl_pp512_s128', 'A', 'c4',
+        # Answer-phase PPL: prefill prompt + stride answer (s128) over the
+        # last 512 tokens. eval_ppl now supports last_tokens / prefill_prompt;
+        # dense_logits is unused for PPL so Group A's last_tokens=None is fine.
+        dict(metric='ppl',  loss_func='cross_entropy',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('wt2_ppl',           'A', 'wikitext2',
+        dict(metric='ppl',  loss_func='cross_entropy',
+             stride=0, prefill_prompt=False, last_tokens=None)),
+    ('wt2_ppl_pp512_s128', 'A', 'wikitext2',
+        dict(metric='ppl',  loss_func='cross_entropy',
+             stride=128, prefill_prompt=True, last_tokens=512)),
     ('wt2_jsd',           'A', 'wikitext2',
         dict(metric='loss', loss_func='jsd',
              stride=0, prefill_prompt=False, last_tokens=None)),
@@ -160,6 +172,11 @@ METRIC_TASKS = [
     ('wt2_jsd_pp512_s128', 'A_pp', 'wikitext2',
         dict(metric='loss', loss_func='jsd',
              stride=128, prefill_prompt=True, last_tokens=512)),
+    ('wt2_jsd_pp512_s32', 'A_pp', 'wikitext2',
+        # Same Group A_pp + answer-phase mask, finer stride=32 for denser
+        # answer-token coverage (4× the chunks of s128 → ~4× eval time).
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=512)),
     ('wt2_jsd_lt128',     'A_lt128', 'wikitext2',
         # single-pass JSD on last 128 tokens. last_tokens is set at evaluator
         # init (Group A_lt128) and matches the eval_loss mask.
@@ -178,6 +195,19 @@ METRIC_TASKS = [
         # actual answer tokens (which lie at the very end of the prompt).
         dict(kind='needle_nll',
              stride=128, prefill_prompt=True, last_tokens=512)),
+    ('needle_nll_pp512_s32', 'A', None,
+        # Same as needle_nll_pp512_s128 with finer stride=32 over answer span.
+        dict(kind='needle_nll',
+             stride=32, prefill_prompt=True, last_tokens=512)),
+    ('needle_jsd_pp512_s128', 'A', None,
+        # JSD variant: FP teacher dense_logits cached per-process + on disk
+        # (needle prompts are seed-deterministic). Higher SNR than CE since
+        # it compares the full output distribution at answer positions.
+        dict(kind='needle_jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('needle_jsd_pp512_s32', 'A', None,
+        dict(kind='needle_jsd',
+             stride=32, prefill_prompt=True, last_tokens=512)),
     ('gsm8k_jsd',         'D', 'gsm8k',
         # Standard path. The padded-input KIVI bug is now fixed at the
         # source (quant/kivi_utils/new_pack.py:fake_quant handles 2D
@@ -200,6 +230,10 @@ METRIC_TASKS = [
         # dense_logits is tiny under last_tokens=512 → standard path is OK.
         dict(metric='loss', loss_func='jsd',
              stride=128, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp512_s32', 'B_pp', 'gov_report',
+        # Same Group B_pp, finer stride=32 over the 512-token answer span.
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=512)),
     ('gov_jsd_lt128',     'B_lt128', 'gov_report',
         # single-pass JSD on last 128 tokens. Group B_lt128's dense_logits
         # is also trimmed to last 128 so the mask matches.
@@ -214,6 +248,11 @@ METRIC_TASKS = [
         # causal attention only sees past tokens).
         dict(kind='gsm8k_unpad_pp',
              stride=128, prefill_prompt=True, last_tokens=512)),
+    ('gsm8k_jsd_pp_s32', 'D', 'gsm8k',
+        # Same Group D + unpadded path, finer stride=32 over the answer
+        # span (4× chunks of s128). Same dense_logits reuse.
+        dict(kind='gsm8k_unpad_pp',
+             stride=32, prefill_prompt=True, last_tokens=512)),
     ('gov_jsd_kt',        'C', 'gov_report',
         dict(metric='loss', loss_func='jsd',
              stride=0, prefill_prompt=False, last_tokens=None)),
@@ -675,6 +714,90 @@ def _run_needle_nll(args, ctx, evaluator, model_id, *,
                      last_tokens=last_tokens, prefill_prompt=prefill_prompt)
 
 
+# Module-level in-process cache for FP teacher needle logits — keyed by all
+# inputs that affect the prompts AND the FP forward. Loaded from disk on
+# first access per process so re-runs across archs don't rebuild it.
+_NEEDLE_DENSE_CACHE = {}
+
+
+def _needle_dense_cache_path(args, last_tokens):
+    model_basename = os.path.basename(args.model_name.rstrip('/'))
+    key = (f"{model_basename}_{args.needle_task}_{args.needle_seqlen}_"
+           f"{args.needle_n_sample}_seed{args.seed}_lt{last_tokens}")
+    save_dir = args.save or '.'
+    cache_dir = os.path.join(save_dir, '_cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f'needle_dense_{key}.pt'), key
+
+
+def _get_needle_dense_logits(args, ctx, model_id, device, last_tokens=512):
+    """Lazy compute + cache FP teacher dense_logits on the (deterministic)
+    needle prompts. Cached in-memory per process AND on disk so re-runs
+    across archs (each a fresh process) don't rebuild it.
+
+    Returns a _LazyGpuList (CPU-backed, per-position upload to `device` on
+    use) — drop-in for evaluator.dense_logits[dataset] in eval_loss.
+    """
+    cache_path, key = _needle_dense_cache_path(args, last_tokens)
+    if key in _NEEDLE_DENSE_CACHE:
+        return _LazyGpuList(_NEEDLE_DENSE_CACHE[key], device)
+    if os.path.exists(cache_path):
+        print(f"[needle_jsd] loading cached FP dense_logits ← {cache_path}")
+        dense_cpu = torch.load(cache_path, map_location='cpu', weights_only=False)
+        _NEEDLE_DENSE_CACHE[key] = dense_cpu
+        return _LazyGpuList(dense_cpu, device)
+
+    # Cache miss: load FP teacher briefly to compute dense_logits.
+    from utils.func import get_hfmodel
+    from utils.eval import get_logits
+    print(f"[needle_jsd] FP teacher logits cache miss — computing one-time "
+          f"(task={args.needle_task}, n={args.needle_n_sample}, "
+          f"seqlen={args.needle_seqlen}, seed={args.seed})…")
+    t0 = time()
+    fp_model = get_hfmodel(model_id, dtype=ctx.dtype, device_map=ctx.device_map)
+    fp_model.eval()
+    needle_loader = _build_needle_loader(args, model_id, fp_model.device)
+    if len(needle_loader) == 0:
+        del fp_model
+        clean_up()
+        raise RuntimeError("[needle_jsd] no needle prompts after tokenization")
+    dense_gpu = get_logits(fp_model, needle_loader, key_token_list=None,
+                           last_tokens=last_tokens)
+    # Move to CPU for storage (matches _move_all_dense_logits_to_cpu pattern).
+    dense_cpu = [[t.detach().to('cpu', copy=False) for t in batch]
+                 for batch in dense_gpu]
+    del fp_model, dense_gpu
+    clean_up()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    torch.save(dense_cpu, cache_path)
+    print(f"[needle_jsd] computed + saved → {cache_path}  "
+          f"({time() - t0:.1f}s)")
+    _NEEDLE_DENSE_CACHE[key] = dense_cpu
+    return _LazyGpuList(dense_cpu, device)
+
+
+def _run_needle_jsd(args, ctx, evaluator, model_id, *,
+                    stride=0, prefill_prompt=False, last_tokens=512):
+    """JSD variant of needle eval. Mirrors _run_needle_nll but uses cached
+    FP-teacher dense_logits + loss_func='jsd'. The needle prompts are
+    seed-deterministic, so the same dense_logits applies to every arch.
+    """
+    loader = _build_needle_loader(args, model_id, evaluator.model.device)
+    if len(loader) == 0:
+        raise RuntimeError("[needle_jsd] no usable NIAH prompts after tokenisation")
+    dense_logits = _get_needle_dense_logits(
+        args, ctx, model_id, evaluator.model.device,
+        last_tokens=last_tokens if last_tokens is not None else int(args.needle_seqlen))
+    use_cache = stride > 0 or prefill_prompt
+    configure_model_cache(args, evaluator.model, use_cache=use_cache)
+    return eval_loss(model=evaluator.model, accelerator=ctx.accelerator,
+                     loader=loader, seqlen=int(args.needle_seqlen),
+                     loss_func='jsd', dense_logits_list=dense_logits,
+                     key_token_list=None, stride=stride,
+                     last_tokens=last_tokens, prefill_prompt=prefill_prompt)
+
+
 def _build_gsm8k_unpadded_loader(evaluator, device):
     """Re-yield gsm8k batches with trailing padding stripped per example.
     The existing Group D `train_loaders['gsm8k']` was built by
@@ -935,6 +1058,12 @@ def cmd_eval(args):
                         stride=eval_kwargs.get('stride', 0),
                         prefill_prompt=eval_kwargs.get('prefill_prompt', False),
                         last_tokens=eval_kwargs.get('last_tokens'))
+                elif kind == 'needle_jsd':
+                    value = _run_needle_jsd(
+                        args, ctx, evaluator, model_id,
+                        stride=eval_kwargs.get('stride', 0),
+                        prefill_prompt=eval_kwargs.get('prefill_prompt', False),
+                        last_tokens=eval_kwargs.get('last_tokens', 512))
                 elif kind == 'gsm8k_unpad_pp':
                     value = _run_gsm8k_unpad_pp(
                         args, ctx, evaluator,
