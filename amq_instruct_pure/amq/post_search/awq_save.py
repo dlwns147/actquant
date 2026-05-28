@@ -22,7 +22,11 @@ def awq_quantize_and_save(args, config, arch, save_dir, device_map):
     model_id = f'{args.model_path}/{args.model_name}'
     bits_usage = get_bits_usage(arch, config, args.group_size)
 
-    base = get_hfmodel(model_id, dtype='float16', device_map='cpu')
+    # Gemma-3 activations exceed the fp16 range (>65504) and cascade to NaN
+    # through AWQ's scale search. Use the model's native dtype (bf16 for
+    # Gemma-3) instead of forcing fp16.
+    load_dtype = 'auto' if 'gemma-3' in args.model_name.lower() else 'float16'
+    base = get_hfmodel(model_id, dtype=load_dtype, device_map='cpu')
     quantized = get_quantized_model(
         base, AutoTokenizer.from_pretrained(model_id),
         'awq', arch, bits_usage,

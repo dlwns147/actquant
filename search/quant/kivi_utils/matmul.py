@@ -143,7 +143,7 @@ def triton_bmm_fA_qB_outer(group_size: int,
 	# This is based on the possible BLOCK_SIZE_Ks
 	assert group_size % 64 == 0, "groupsize must be a multiple of 64, and 128"
 	flatten_B = B * nh
-	c = torch.empty((flatten_B, M, N), device='cuda', dtype=torch.float16)
+	c = torch.empty((flatten_B, M, N), device=fA.device, dtype=fA.dtype)
 	# print(f'M {M} N {N} K {K}')
 	grid = lambda META: (
 		flatten_B, triton.cdiv(N, META['BLOCK_SIZE_N']),

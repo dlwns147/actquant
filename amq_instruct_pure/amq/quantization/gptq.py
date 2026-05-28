@@ -50,6 +50,8 @@ class GPTQ(BASE):
         self.model.model.norm = self.model.model.norm.to(self.dev)
         if hasattr(self.model.model, 'rotary_emb'):
             self.model.model.rotary_emb = self.model.model.rotary_emb.to(self.dev)
+        if hasattr(self.model.model, 'rotary_emb_local'):
+            self.model.model.rotary_emb_local = self.model.model.rotary_emb_local.to(self.dev)
 
         dtype = next(iter(self.model.parameters())).dtype
         inps = torch.zeros(
@@ -61,12 +63,28 @@ class GPTQ(BASE):
             def __init__(self, module):
                 super().__init__()
                 self.module = module
+
+            def __getattr__(self, name):
+                # Gemma3TextModel.forward reads `decoder_layer.attention_type`
+                # to index into causal_mask_mapping. Delegate unknown attribute
+                # lookups to the wrapped layer.
+                try:
+                    return super().__getattr__(name)
+                except AttributeError:
+                    return getattr(self.module, name)
+
             def forward(self, inp, **kwargs):
                 inps[cache['i']] = inp
                 cache['i'] += 1
                 cache['attention_mask'] = kwargs['attention_mask']
                 if 'position_embeddings' in kwargs:
                     cache['position_embeddings'] = kwargs['position_embeddings']
+                # Gemma 3 decoder layer takes the global/local pair, not the
+                # single position_embeddings tuple Llama uses.
+                if 'position_embeddings_global' in kwargs:
+                    cache['position_embeddings_global'] = kwargs['position_embeddings_global']
+                if 'position_embeddings_local' in kwargs:
+                    cache['position_embeddings_local'] = kwargs['position_embeddings_local']
                 if 'position_ids' in kwargs:
                     cache['position_ids'] = kwargs['position_ids']
                 raise ValueError
@@ -83,6 +101,8 @@ class GPTQ(BASE):
         self.model.model.norm = self.model.model.norm.cpu()
         if hasattr(self.model.model, 'rotary_emb'):
             self.model.model.rotary_emb = self.model.model.rotary_emb.cpu()
+        if hasattr(self.model.model, 'rotary_emb_local'):
+            self.model.model.rotary_emb_local = self.model.model.rotary_emb_local.cpu()
         torch.cuda.empty_cache()
 
         outs = torch.zeros_like(inps)

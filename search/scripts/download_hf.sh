@@ -1,17 +1,17 @@
 
-MODEL_PATH=meta-llama
-# MODEL_NAME=Llama-2-7b-hf
-# MODEL_NAME=Llama-2-13b-hf
-# MODEL_NAME=Llama-2-70b-hf
-# MODEL_NAME=Meta-Llama-3-8B
+# MODEL_PATH=meta-llama
+# # MODEL_NAME=Llama-2-7b-hf
+# # MODEL_NAME=Llama-2-13b-hf
+# # MODEL_NAME=Llama-2-70b-hf
+# # MODEL_NAME=Meta-Llama-3-8B
 
-# MODEL_NAME=Llama-2-7b-chat-hf
-# MODEL_NAME=Llama-2-13b-chat-hf
-# MODEL_NAME=Llama-3.1-8B
-MODEL_NAME=Llama-3.1-8B-Instruct
+# # MODEL_NAME=Llama-2-7b-chat-hf
+# # MODEL_NAME=Llama-2-13b-chat-hf
+# # MODEL_NAME=Llama-3.1-8B
+# MODEL_NAME=Llama-3.1-8B-Instruct
 
 
-# MODEL_PATH=Qwen
+MODEL_PATH=Qwen
 # MODEL_NAME=Qwen2.5-1.5B
 # MODEL_NAME=Qwen2.5-3B
 # MODEL_NAME=Qwen2.5-7B
@@ -21,7 +21,7 @@ MODEL_NAME=Llama-3.1-8B-Instruct
 # MODEL_NAME=Qwen2.5-1.5B-Instruct
 # MODEL_NAME=Qwen2.5-3B-Instruct
 # MODEL_NAME=Qwen2.5-7B-Instruct
-# MODEL_NAME=Qwen2.5-14B-Instruct
+MODEL_NAME=Qwen2.5-14B-Instruct
 # MODEL_NAME=Qwen2.5-72B-Instruct
 # MODEL_NAME=Qwen2.5-7B-Instruct-1M
 
@@ -50,8 +50,8 @@ MODEL_NAME=Llama-3.1-8B-Instruct
 # MODEL_PATH=facebook
 # MODEL_NAME=opt-1.3b
 
-MODEL_PATH=google
-# MODEL_NAME=gemma-3-12b-it
-MODEL_NAME=gemma-3-27b-it
+# MODEL_PATH=google
+# # MODEL_NAME=gemma-3-12b-it
+# MODEL_NAME=gemma-3-27b-it
 
 python download_hf.py --model_path ${MODEL_PATH} --model_name ${MODEL_NAME}

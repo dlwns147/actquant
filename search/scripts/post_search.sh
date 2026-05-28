@@ -9,7 +9,8 @@ PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
 MODEL_PATH=/SSD/huggingface/meta-llama
 MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
+# DTYPE=float16
+DTYPE=bfloat16
 CONFIG=config/llama.json
 
 # MODEL_PATH=/SSD/huggingface/Qwen
