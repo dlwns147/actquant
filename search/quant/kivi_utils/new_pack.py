@@ -48,10 +48,10 @@ def quant_and_pack_vcache(v: torch.FloatTensor, group_size: int, bits: int):
 	return code, scale, mn
 
 
-def unpack_and_dequant_kcache(k_code: torch.FloatTensor, 
-							  scale: torch.FloatTensor, 
+def unpack_and_dequant_kcache(k_code: torch.FloatTensor,
+							  scale: torch.FloatTensor,
 							  mn: torch.FloatTensor,
-							  group_size: int, 
+							  group_size: int,
 							  bits: int,
 							  ):
 	pack_dim = 2
@@ -61,15 +61,15 @@ def unpack_and_dequant_kcache(k_code: torch.FloatTensor,
 	shape = data.shape
 	num_groups = shape[pack_dim] // group_size
 	data = data.view(shape[:pack_dim] + (num_groups, group_size,) + shape[pack_dim+1:])
-	data = data.to(torch.float16)
-	data = data * scale + mn 
+	data = data.to(scale.dtype)
+	data = data * scale + mn
 	return data.view(shape)
 
 	
-def unpack_and_dequant_vcache(v_code: torch.FloatTensor, 
-							  scale: torch.FloatTensor, 
+def unpack_and_dequant_vcache(v_code: torch.FloatTensor,
+							  scale: torch.FloatTensor,
 							  mn: torch.FloatTensor,
-							  group_size: int, 
+							  group_size: int,
 							  bits: int,
 							  ):
 	assert bits in [2, 4, 8]
@@ -78,7 +78,7 @@ def unpack_and_dequant_vcache(v_code: torch.FloatTensor,
 	shape = data.shape
 	num_groups = shape[-1] // group_size
 	data = data.view(shape[:-1] + (num_groups, group_size,))
-	data = data.to(torch.float16)
+	data = data.to(scale.dtype)
 	data = data * scale.unsqueeze(-1) + mn.unsqueeze(-1)
 	return data.view(shape)
 

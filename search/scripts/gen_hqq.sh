@@ -1,12 +1,12 @@
 DEVICES=${1}
 
-# MODEL_PATH=/SSD/huggingface/meta-llama
+MODEL_PATH=/SSD/huggingface/meta-llama
 # # MODEL_NAME=Llama-2-7b-hf
 # # MODEL_NAME=Llama-2-13b-hf
 # # MODEL_NAME=Llama-2-70b-hf
 # # MODEL_NAME=Meta-Llama-3-8B
 # # MODEL_NAME=Llama-3.1-8B
-# MODEL_NAME=Llama-3.1-8B-Instruct
+MODEL_NAME=Llama-3.1-8B-Instruct
 # # MODEL_NAME=Llama-3.2-1B-Instruct
 # MODEL_NAME=Llama-3.2-3B-Instruct
 
@@ -35,8 +35,8 @@ DEVICES=${1}
 # MODEL_PATH=/SSD/huggingface/facebook
 # MODEL_NAME=opt-1.3b
 
-MODEL_PATH=/SSD/huggingface/google
-MODEL_NAME=gemma-3-12b-it
+# MODEL_PATH=/SSD/huggingface/google
+# MODEL_NAME=gemma-3-12b-it
 
 # DTYPE=float16
 DTYPE=bfloat16

@@ -7,6 +7,7 @@ from transformers.models.opt.modeling_opt import OPTDecoderLayer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RMSNorm
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MistralRMSNorm
+from transformers.models.gemma3.modeling_gemma3 import Gemma3DecoderLayer, Gemma3RMSNorm
 from transformers.activations import GELUActivation
 
 from .qmodule import ScaledActivation
@@ -35,7 +36,13 @@ def scale_ln_fcs(ln, fcs, scales):
 
     scales = scales.to(ln.weight.device)
 
-    ln.weight.div_(scales)
+    # Gemma3RMSNorm applies (1 + weight) as the gain (unlike Llama/Qwen/Mistral
+    # which apply weight directly). To absorb 1/scales into the gain we need
+    # (1 + w_new) = (1 + w) / scales  =>  w_new = (1 + w) / scales - 1.
+    if isinstance(ln, Gemma3RMSNorm):
+        ln.weight.add_(1.0).div_(scales).sub_(1.0)
+    else:
+        ln.weight.div_(scales)
     if hasattr(ln, "bias") and ln.bias is not None:
         ln.bias.div_(scales)
 
@@ -219,6 +226,55 @@ def auto_scale_block(module, module_kwargs, q_config, input_feat, module_bit=Non
                 )
             )
     
+    elif isinstance(module, Gemma3DecoderLayer):
+        # Gemma3 uses pre+post norms on both attn and mlp. The pre-norms are
+        # the ones immediately before q/k/v and gate/up.
+        #
+        # NOTE: we deliberately DO NOT smooth `input_layernorm → q/k/v_proj`.
+        # Gemma3Attention applies q_norm/k_norm (RMSNorm) on q_proj/k_proj
+        # outputs, which renormalizes away any per-channel scale we'd
+        # absorb into input_layernorm. The smoothing math no longer holds
+        # and we'd only pay the weight-side distortion. vllm-project/
+        # llm-compressor PR #2571 found this regresses medgemma-27b
+        # CareQA from 85.6 → 69.2 vs GPTQ 83.6; matches our +43% PPL gap.
+        # q/k/v are therefore left to RTN.
+        # attn out
+        if module.self_attn.v_proj.weight.shape == module.self_attn.o_proj.weight.shape:
+            scales_list.append(
+                _auto_get_scale(
+                    prev_op=module.self_attn.v_proj,
+                    layers={
+                        'self_attn.o_proj': module.self_attn.o_proj,
+                    },
+                    inp=input_feat["self_attn.o_proj"],
+                    module_bit=module_bit,
+                )
+            )
+        # fc1 — prev_op is pre_feedforward_layernorm (Gemma3-specific)
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.pre_feedforward_layernorm,
+                layers={
+                    'mlp.gate_proj': module.mlp.gate_proj,
+                    'mlp.up_proj': module.mlp.up_proj,
+                },
+                inp=input_feat["mlp.gate_proj"],
+                module2inspect=module.mlp,
+                module_bit=module_bit,
+            )
+        )
+        # fc2
+        scales_list.append(
+            _auto_get_scale(
+                prev_op=module.mlp.up_proj,
+                layers={
+                    'mlp.down_proj': module.mlp.down_proj,
+                },
+                inp=input_feat["mlp.down_proj"],
+                module_bit=module_bit,
+            )
+        )
+
     elif isinstance(module, (Qwen2DecoderLayer, MistralDecoderLayer)):
         # attention input
         scales_list.append(
@@ -287,7 +343,7 @@ def apply_scale(module, scales_list, input_feat_dict=None):
         if isinstance(prev_op, nn.Linear):
             assert len(layers) == 1
             scale_fc_fc(prev_op, layers[0], scales)
-        elif isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm, Qwen2RMSNorm, MistralRMSNorm)):
+        elif isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm, Qwen2RMSNorm, MistralRMSNorm, Gemma3RMSNorm)):
             scale_ln_fcs(prev_op, layers, scales)
         elif isinstance(prev_op, (nn.GELU, BloomGelu, GELUActivation)):
             new_module = ScaledActivation(prev_op, scales)
