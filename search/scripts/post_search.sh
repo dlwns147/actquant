@@ -133,7 +133,8 @@ MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_T
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
 # RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
-RULER_TASK="niah_single_1"
+# RULER_TASK="niah_single_1"
+RULER_TASK="ruler_qa_squad ruler_qa_hotpot"
 RULER_YAML_PATH=utils/ruler_utils
 # RULER_LENGTH=4096
 RULER_LENGTH=16384
@@ -192,7 +193,7 @@ fi
 
 # ARGS+=" --datasets ${DATASETS} --seqlen ${SEQLEN} --min_seqlen ${MIN_SEQLEN} --n_sample ${N_SAMPLE} --data_batch_size ${DATA_BATCH_SIZE}"
 # ARGS+=" --zeroshot --tasks ${TASKS} --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE}"
-ARGS+=" --longbench --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG} --longbench_e "
+# ARGS+=" --longbench --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG} --longbench_e "
 # ARGS+=" --minilongbench --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG}"
 ARGS+=" --ruler --ruler_task ${RULER_TASK} --ruler_yaml_path ${RULER_YAML_PATH} --ruler_result_path ${RULER_RESULT_PATH} --ruler_batch_size ${RULER_BATCH_SIZE} --ruler_sample ${RULER_SAMPLE} --ruler_length ${RULER_LENGTH}"
 # ARGS+=" --pass_key_file ${PASS_KEY_FILE}"

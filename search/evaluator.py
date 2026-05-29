@@ -129,8 +129,14 @@ class LlamaEvaluator:
         if 'hqq' in method['w']:
             self.quant_model_bits = bits['w']
             if quant_model_paths and bits['w']:
-                # with accelerator.main_process_first():
-                self.model = load_hqq_model(quant_model_paths[np.argmax(bits['w'])], device_map, inference)
+                # If the caller passed an explicit torch.dtype, force HQQ to
+                # honour it (override its hard-coded fp16 default + the path's
+                # config.json torch_dtype). For dtype='auto', load_hqq_model
+                # falls back to the path's torch_dtype.
+                _compute_dtype = dtype if isinstance(dtype, torch.dtype) else None
+                self.model = load_hqq_model(quant_model_paths[np.argmax(bits['w'])],
+                                            device_map, inference,
+                                            compute_dtype=_compute_dtype)
 
                 kv_methods = self.method['kv'] if isinstance(self.method.get('kv'), list) else [self.method.get('kv')]
                 if any(m in ['hqq', 'kivi', 'think'] for m in kv_methods) and (('k' in bits and 'v' in bits and max(bits['k']) < 16 and max(bits['v']) < 16)):
@@ -147,7 +153,9 @@ class LlamaEvaluator:
                                                 v_pruning_dim=v_pruning_dim)
 
                 self.remove_linears(self.model, config)
-                self.quant_models = [load_hqq_model(p, device_map) for p in quant_model_paths]                
+                self.quant_models = [load_hqq_model(p, device_map,
+                                                    compute_dtype=_compute_dtype)
+                                     for p in quant_model_paths]
         
         elif 'fp16' in method['w']:
             # self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
@@ -177,10 +185,18 @@ class LlamaEvaluator:
         self.config = config
         # self.latency_table = latency_table
         self.seqlen = seqlen
-        
+
         if self.model is not None:
             self.model.eval()
             self.model.config.use_cache = False
+            # Resolve dtype='auto' → the model's actual torch.dtype so KIVI /
+            # downstream consumers can rely on self.dtype being a real
+            # torch.dtype rather than a string sentinel.
+            if not isinstance(self.dtype, torch.dtype):
+                try:
+                    self.dtype = next(self.model.parameters()).dtype
+                except StopIteration:
+                    pass
             
         for q_model in self.quant_models:
             if q_model is not None:
@@ -241,8 +257,12 @@ class LlamaEvaluator:
 
         elif 'awq' in self.method['w'] or 'gptq' in self.method['w'] or 'qeft' in self.method['w']:
             w_method = 'awq' if 'awq' in self.method['w'] else 'gptq' if 'gptq' in self.method['w'] else 'qeft'
-            # convert q.w to legacy {linear: [bits]*n_block} format for quant model loader
-            # arch_w_legacy = {'w': {lg: [layer_dict[lg] for layer_dict in q_arch['w']] for lg in self.config['linear']}}
+            # AWQ / GPTQ / QEFT load via BASE.load_model →
+            # from_pretrained(torch_dtype=self.dtype). dtype='auto' picks up
+            # the model config's torch_dtype (e.g. Llama-3.1-8B → bf16);
+            # passing torch.float16 / torch.bfloat16 forces that exact dtype.
+            # Weight pseudo-quant in awq_utils/quantizer.py is dtype-agnostic
+            # so the activation/KV dtype is preserved end-to-end.
             self.model = get_quantized_model(method=w_method,
                                              arch=q_arch['w'],
                                              model_name=self.model_id,
@@ -253,6 +273,14 @@ class LlamaEvaluator:
                                              do_owq='qeft' in self.method['w'],
                                              owq_path=self.outlier)
             self.model.eval()
+            # Resolve self.dtype → real torch.dtype now that the model is up;
+            # downstream KIVI cache + cuda_bmm dispatch reads model.dtype but
+            # other call sites (e.g. configure_model_cache) compare self.dtype.
+            if not isinstance(self.dtype, torch.dtype):
+                try:
+                    self.dtype = next(self.model.parameters()).dtype
+                except StopIteration:
+                    pass
             kv_methods = self.method['kv'] if isinstance(self.method.get('kv'), list) else [self.method.get('kv')]
             if any(m in ['hqq', 'kivi', 'think'] for m in kv_methods):
                 self.model = replace_kv_cache(model=self.model,

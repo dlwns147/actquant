@@ -277,6 +277,7 @@ N_PROC=1
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
+--dtype ${DTYPE} \
 --quant_model_paths ${QMODEL_PATHS} \
 --w_method ${W_METHOD} \
 --kv_method ${KV_METHOD} \

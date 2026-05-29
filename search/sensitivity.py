@@ -13,7 +13,7 @@ import time
 # from accelerate import Accelerator
 
 from evaluator import LlamaEvaluator
-from utils.func import init_accelerator, set_seed
+from utils.func import init_accelerator, set_seed, process_dtype
 # from utils.eval import load_and_eval_ppl, eval_zeroshot
 # from transformers import AutoModelForCausalLM
 import warnings
@@ -41,6 +41,7 @@ def sensitivity(args):
         datasets=[args.dataset],
         loss_func=args.loss_func,
         device_map=device_map,
+        dtype=process_dtype(args.dtype),
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
         group_size={'w': args.w_group_size, 'k': args.k_group_size, 'v': args.v_group_size},
         residual_length=args.residual_length,
@@ -150,7 +151,11 @@ if __name__ == '__main__':
                         help='file path to supernet weights')
     parser.add_argument('--model_name', type=str, default='',
                         help='file path to supernet weights')
-    parser.add_argument('--target', type=str, nargs='+', default=['w', 'k', 'v'], choices=['w', 'k', 'v'], 
+    parser.add_argument('--dtype', type=str, default='auto',
+                        choices=['float16', 'float', 'fp16',
+                                 'bfloat16', 'bfloat', 'bf16', 'auto'],
+                        help='activation / dense-logits compute dtype.')
+    parser.add_argument('--target', type=str, nargs='+', default=['w', 'k', 'v'], choices=['w', 'k', 'v'],
                         help='')
     parser.add_argument('--quant_model_paths', type=str, nargs='+', default=[], 
                         help='')

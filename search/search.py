@@ -21,7 +21,7 @@ from pymoo.operators.mutation.pm import PolynomialMutation
 
 from search_space.llama_think import LlamaThinKSearchSpace
 from predictor.factory import get_predictor
-from utils.func import get_net_info, init_accelerator, set_seed, get_correlation
+from utils.func import get_net_info, init_accelerator, set_seed, get_correlation, process_dtype
 from utils.ga import MySampling, BinaryCrossover, MyMutation, IntPolynomialMutation, MyTwoPointCrossover, MyUniformCrossover, IntegerFromFloatMutation, IntMutation
 from lm_eval.tasks import TaskManager, get_task_dict
 
@@ -45,6 +45,7 @@ class SearchThink:
         self.loss_func = kwargs.pop('loss_func', 'jsd')
 
         self.method = {'w': kwargs.pop('w_method', ['fp16']), 'kv': kwargs.pop('kv_method', 'kivi')}
+        self.dtype = process_dtype(kwargs.pop('dtype', 'auto'))
         self.quant_model_paths = kwargs.pop('quant_model_paths', [])
 
         model_path = kwargs.pop('model_path', 'meta-llama')
@@ -153,6 +154,7 @@ class SearchThink:
             data_batch_size=kwargs.pop('data_batch_size', 1),
             loss_func=self.loss_func,
             device_map=device_map,
+            dtype=self.dtype,
             bits=bits,
             group_size=self.group_size,
             residual_length=self.residual_length,
@@ -611,7 +613,13 @@ if __name__ == '__main__':
                         help='file path to supernet weights')
     parser.add_argument('--model_name', type=str, default='',
                         help='file path to supernet weights')
-    parser.add_argument('--quant_model_paths', type=str, nargs='+', default=[], 
+    parser.add_argument('--dtype', type=str, default='auto',
+                        choices=['float16', 'float', 'fp16',
+                                 'bfloat16', 'bfloat', 'bf16', 'auto'],
+                        help='activation / dense-logits compute dtype '
+                             '(HQQ side honours the dtype baked into the '
+                             'quant_model_paths config.json).')
+    parser.add_argument('--quant_model_paths', type=str, nargs='+', default=[],
                         help='')
     
     parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],

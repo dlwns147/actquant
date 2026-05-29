@@ -14,8 +14,10 @@
 
 
 import itertools  # noqa: I001
+import json
 import random
 from functools import cache
+from pathlib import Path
 
 import datasets
 import requests
@@ -25,6 +27,11 @@ import sys
 import os
 sys.path.append(os.path.dirname(__file__))
 from common_utils import DEFAULT_SEQ_LENGTHS, get_tokenizer
+
+# Directory used to cache external JSON downloads (HotpotQA / SQuAD dev sets).
+# eval_ruler() overrides this with --ruler_yaml_path so the cache lands next to
+# the yaml configs. Falls back to RULER_DATA_DIR env var, then this file's dir.
+CACHE_DIR = os.environ.get("RULER_DATA_DIR", os.path.dirname(__file__))
 
 CONFIG = {
     "tokens_to_generate": 32,
@@ -36,17 +43,66 @@ TEMPLATE = CONFIG["template"]
 DOCUMENT_PROMPT = "Document {i}:\n{document}"
 
 
+# Fallback mirror chains. download_json() tries entries left-to-right; first
+# success wins. The first entry's basename is also the local cache filename,
+# so a successful fetch from any mirror primes the cache for next runs.
+HOTPOT_DEV_URLS = (
+    # 1) primary — works when curtis.ml.cmu.edu is up
+    "http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json",
+    # 2) Wayback Machine raw-asset snapshot. `2id_` = latest 2*** snapshot,
+    #    `id_` suffix = serve original bytes (no HTML wrapper). VERIFIED working.
+    "https://web.archive.org/web/2id_/http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json",
+    # 3) Wayback Machine without id_ — currently returns HTML wrapper (json parse
+    #    fails → auto-skipped) but kept in case Wayback layout changes back.
+    "https://web.archive.org/web/2024/http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json",
+    # 4) HF community mirror — 404 today, kept so a future upload "just works".
+    "https://huggingface.co/datasets/hotpot_qa/resolve/main/hotpot_dev_distractor_v1.json",
+)
+SQUAD_DEV_URLS = (
+    # primary is reliable; Wayback id_ as last-ditch backup
+    "https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json",
+    "https://web.archive.org/web/2id_/https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json",
+)
+
+
 @cache
 def download_json(url) -> dict:
-    response = requests.get(url)
-    response.raise_for_status()
-    data = response.json()
-    return data
+    """Fetch JSON from a URL or a tuple of fallback URLs (tried in order).
+
+    Local cache at CACHE_DIR/<basename-of-first-url> is checked first, so the
+    cache filename stays stable even when a mirror is used.
+    """
+    urls = (url,) if isinstance(url, str) else tuple(url)
+    fname = urls[0].rsplit("/", 1)[-1]
+    local = Path(CACHE_DIR) / fname
+    if local.is_file():
+        with open(local, "r") as f:
+            return json.load(f)
+    last_err = None
+    for u in urls:
+        try:
+            response = requests.get(u, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            try:
+                Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+                with open(local, "w") as f:
+                    json.dump(data, f)
+            except OSError:
+                pass  # read-only FS: keep going, in-memory @cache still helps
+            return data
+        except Exception as e:
+            print(f"WARN: download failed from {u}: {e}")
+            last_err = e
+    raise RuntimeError(
+        f"All {len(urls)} mirrors failed for {fname}. "
+        f"Place the file at {local} manually. Last error: {last_err}"
+    )
 
 
 @cache
 def read_squad(
-    url="https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json",
+    url=SQUAD_DEV_URLS,
 ) -> tuple[list[dict], list[str]]:
     data = download_json(url)
     total_docs = [p["context"] for d in data["data"] for p in d["paragraphs"]]
@@ -77,7 +133,7 @@ def read_squad(
 
 @cache
 def read_hotpotqa(
-    url="http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json",
+    url=HOTPOT_DEV_URLS,
 ) -> tuple[list[dict], list[str]]:
     data = download_json(url)
     total_docs = [f"{t}\n{''.join(p)}" for d in data for t, p in d["context"]]
