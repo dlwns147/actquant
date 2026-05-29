@@ -423,27 +423,46 @@ def load_hqq_model(model_id,
                    device_map,
                    use_cache=False,
                    attn_implementation='flash_attention_2',
-                   inference=False):
+                   inference=False,
+                   compute_dtype=None):
+    """Load a pre-quantised HQQ model.
+
+    HQQ's `AutoHQQHFModel.from_quantized` hard-defaults to
+    `compute_dtype=torch.float16` regardless of what the saved
+    `config.json` says — passing a bf16-baked dir without an explicit
+    override silently downcasts every fp param to fp16, which then
+    cascades into KIVI (cache scale/min follow model dtype). To match
+    the path's stored `torch_dtype` (e.g. `_bfloat16` dirs), this
+    wrapper:
+      • when `compute_dtype` is given (a torch.dtype), uses it directly,
+      • otherwise reads `config.json` and uses its `torch_dtype`,
+      • falling back to fp16 if neither is available.
+    """
     from hqq.models.hf.base import AutoHQQHFModel
     from .dispatch import simple_dispatch_model
 
-    # # for fast model loading
-    # org_kaiming_uniform = torch.nn.init.kaiming_uniform_
-    # org_uniform = torch.nn.init.uniform_
-    # org_normal = torch.nn.init.normal_
-    # def skip(*args, **kwargs):
-    #     pass
-    # torch.nn.init.kaiming_uniform_ = skip
-    # torch.nn.init.uniform_ = skip
-    # torch.nn.init.normal_ = skip
-
     model = None
     if model_id is not None:
-        model = AutoHQQHFModel.from_quantized(model_id, device_map='cpu', attn_implementation=attn_implementation)
+        if not isinstance(compute_dtype, torch.dtype):
+            cfg_path = os.path.join(model_id, "config.json")
+            stored = None
+            if os.path.isfile(cfg_path):
+                with open(cfg_path) as f:
+                    stored = json.load(f).get("torch_dtype")
+            compute_dtype = {
+                "float16": torch.float16, "bfloat16": torch.bfloat16,
+                "float32": torch.float32,
+            }.get(stored, torch.float16)
+        model = AutoHQQHFModel.from_quantized(
+            model_id, device_map='cpu',
+            attn_implementation=attn_implementation,
+            compute_dtype=compute_dtype,
+        )
         model = simple_dispatch_model(model, device_map)
         model.config.use_cache = use_cache
         clean_up()
-        print(f'{model_id} : {torch.cuda.max_memory_reserved() / 1024 / 1024}MB')
+        print(f'{model_id} (compute_dtype={compute_dtype}) : '
+              f'{torch.cuda.max_memory_reserved() / 1024 / 1024}MB')
         # if inference:
         #     prepare_for_inference(model, backend='gptq')
 

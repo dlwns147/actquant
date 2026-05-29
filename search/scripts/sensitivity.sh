@@ -99,6 +99,7 @@ TARGET="w k v"
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
 --model_name ${MODEL_NAME} \
+--dtype ${DTYPE} \
 --target ${TARGET} \
 --quant_model_paths ${QMODEL_PATHS} \
 --w_method ${W_METHOD} \

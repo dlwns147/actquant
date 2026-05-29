@@ -39,7 +39,8 @@ from utils.minilongbench import pred_minilongbench, eval_minilongbench
 
 warnings.simplefilter("ignore")
 
-SURROGATES = ('rbf', 'gp', 'mlp', 'carts', 'as', 'ard_gp')
+SURROGATES = ('rbf', 'gp', 'mlp', 'carts', 'as', 'ard_gp',
+              'badd_quad', 'gam', 'sqrty_gp')
 
 
 def _resolve_surrogate_device(spec):
@@ -66,6 +67,9 @@ def _make_surrogate(args, X, y, M_valid):
         kw = dict(kernel=args.rbf_kernel, tail='linear',
                   lb=lb, ub=np.where(ub > lb, ub, lb + 1e-9))
     elif args.surrogate == 'ard_gp':
+        kw = dict(ard_kernel=args.ard_kernel, gp_n_restarts=args.gp_n_restarts)
+    elif args.surrogate == 'sqrty_gp':
+        # Same MLE knobs as ard_gp (kernel + restarts).
         kw = dict(ard_kernel=args.ard_kernel, gp_n_restarts=args.gp_n_restarts)
     return get_predictor(args.surrogate, X, y, device=device, **kw)
 

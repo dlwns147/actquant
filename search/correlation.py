@@ -1481,7 +1481,9 @@ def build_parser():
                             "niah_multiquery", "ruler_vt", "ruler_cwe",
                             "ruler_fwe", "ruler_qa_squad", "ruler_qa_hotpot"])
     p.add_argument('--ruler_length', type=int, nargs='+', default=[16384])
-    p.add_argument('--ruler_yaml_path', type=str, default='utils/ruler_utils')
+    p.add_argument('--ruler_yaml_path', type=str, default='utils/ruler_utils',
+                   help='dir holding ruler yaml configs AND cached qa JSON '
+                        '(hotpot_dev_distractor_v1.json, dev-v2.0.json)')
     p.add_argument('--ruler_sample', type=int, default=50)
     p.add_argument('--ruler_gen_toks', type=int, default=None)
     p.add_argument('--ruler_batch_size', type=int, default=1)

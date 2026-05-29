@@ -95,6 +95,11 @@ def eval_ruler(model,
     
     task_function = {task: task_function[task] for task in tasks}
 
+    # yaml_path doubles as the JSON data cache (hotpot/squad dev sets).
+    # Pre-place hotpot_dev_distractor_v1.json / dev-v2.0.json there to skip network.
+    if yaml_path:
+        qa_utils.CACHE_DIR = yaml_path
+
     # Reproducibility: set seed before dataset creation and generation
     set_seed(seed)
 
