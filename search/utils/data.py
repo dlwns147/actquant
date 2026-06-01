@@ -82,8 +82,12 @@ def get_wikitext2_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048,
 
 
 def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
+    # data_files=str (NOT dict) — must match the offline cache config hash
+    # `default-b04fc8a0b8562884`. The dict form `{'train': ...}` hashes to a
+    # different config id (c2cff5d7da675c1c) and fails in offline mode with
+    # "Couldn't find cache for allenai/c4 for config 'default-c2cff5d7da675c1c'".
     traindata = load_dataset(
-        'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train', cache_dir=cache_dir
+        'allenai/c4', data_files='en/c4-train.00000-of-01024.json.gz', split='train', cache_dir=cache_dir
     )
     traindata = traindata.shuffle(seed=seed)
     
