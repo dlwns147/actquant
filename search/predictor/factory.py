@@ -1,5 +1,68 @@
-def get_predictor(model, inputs, targets, device='cpu', **kwargs):
+"""Surrogate predictor factory.
 
+Dispatches ``model`` name → constructed-and-fit predictor. Base
+predictors live in ``predictor/<name>.py``; Y-target transforms are
+handled by ``predictor.target_transform.TargetTransformPredictor`` via
+the ``<transform>_<base>`` naming convention.
+
+Naming convention for target-transformed surrogates:
+    ``sqrty_<base>``  — sqrt(Y) on top of any base predictor
+    ``logy_<base>``   — log(Y)  on top of any base predictor
+    ``logity_<base>`` — logit(Y) on top of any base predictor
+
+Examples: ``sqrty_rbf``, ``sqrty_ard_gp``, ``sqrty_mlp``,
+``sqrty_badd_quad``, ``sqrty_gam``, ``logy_rbf``.
+
+Backward-compat aliases (kept until callers migrate):
+    ``sqrty_gp`` == ``sqrty_ard_gp``
+"""
+
+# Transform prefix → kwarg name used by TargetTransformPredictor.
+_TRANSFORM_PREFIXES = {
+    'sqrty_': 'sqrt',
+    'logy_': 'log',
+    'logity_': 'logit',
+}
+
+# Names registered with argparse choices in post_search.py. Keep
+# enumerated so ``--help`` lists every valid surrogate.
+BASE_PREDICTORS = ('rbf', 'gp', 'mlp', 'carts', 'as', 'ard_gp',
+                   'badd_quad', 'gam')
+
+
+def _strip_transform(model):
+    """If ``model`` carries a target-transform prefix, return
+    ``(transform_name, base_model)``; else ``(None, model)``."""
+    if model == 'sqrty_gp':              # legacy alias
+        return 'sqrt', 'ard_gp'
+    for prefix, transform in _TRANSFORM_PREFIXES.items():
+        if model.startswith(prefix):
+            return transform, model[len(prefix):]
+    return None, model
+
+
+def all_surrogates():
+    """Enumerate (base_predictor) ∪ (transform × base) names — used by
+    ``post_search.py``'s argparse ``choices``. Dedupes against the
+    legacy ``sqrty_gp`` alias which would otherwise collide with the
+    base-name ``gp``'s sqrt variant."""
+    seen = set()
+    out = []
+    for n in BASE_PREDICTORS:
+        if n not in seen:
+            seen.add(n); out.append(n)
+    for prefix in _TRANSFORM_PREFIXES:
+        for base in BASE_PREDICTORS:
+            n = f'{prefix}{base}'
+            if n not in seen:
+                seen.add(n); out.append(n)
+    if 'sqrty_gp' not in seen:           # legacy alias
+        out.append('sqrty_gp')
+    return tuple(out)
+
+
+def _build_base(model, inputs, targets, device='cpu', **kwargs):
+    """Build + fit a base predictor (no target transform)."""
     if model == 'rbf':
         from predictor.rbf import RBF
         predictor = RBF(device=device, **kwargs)
@@ -52,18 +115,31 @@ def get_predictor(model, inputs, targets, device='cpu', **kwargs):
             with_interactions=kwargs.get('gam_interactions', True))
         predictor.fit(inputs, targets)
 
-    elif model == 'sqrty_gp':
-        # sqrt-Y transformed ARD-GP. Hellinger-style metric on JSD →
-        # better-conditioned GP MLE near Y≈0. See predictor/sqrty_gp.py.
-        from predictor.sqrty_gp import SqrtYARDGP
-        predictor = SqrtYARDGP(
-            kernel=kwargs.get('ard_kernel', 'matern32'),
-            n_restarts=kwargs.get('gp_n_restarts', 10),
-            device=device)
-        predictor.fit(inputs, targets)
-
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"unknown base predictor {model!r}")
 
     return predictor
 
+
+def get_predictor(model, inputs, targets, device='cpu', **kwargs):
+    """Build, fit, and return a predictor.
+
+    Handles target-transform prefixes (``sqrty_``, ``logy_``,
+    ``logity_``) by transforming ``targets`` before fitting the base
+    predictor and wrapping the result in ``TargetTransformPredictor``
+    (which undoes the transform at predict time).
+    """
+    import numpy as np
+    transform, base_name = _strip_transform(model)
+
+    if transform is None:
+        return _build_base(base_name, inputs, targets, device=device, **kwargs)
+
+    # Apply forward transform, fit the base on transformed Y, wrap.
+    from predictor.target_transform import TargetTransformPredictor, TRANSFORMS
+    fwd, _, _ = TRANSFORMS[transform]
+    y_t = fwd(np.asarray(targets, dtype=np.float64))
+    base = _build_base(base_name, inputs, y_t, device=device, **kwargs)
+    wrapped = TargetTransformPredictor(base, transform=transform)
+    wrapped._fitted = True               # base already fit; mark ready
+    return wrapped

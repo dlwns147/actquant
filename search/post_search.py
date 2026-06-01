@@ -39,8 +39,11 @@ from utils.minilongbench import pred_minilongbench, eval_minilongbench
 
 warnings.simplefilter("ignore")
 
-SURROGATES = ('rbf', 'gp', 'mlp', 'carts', 'as', 'ard_gp',
-              'badd_quad', 'gam', 'sqrty_gp')
+# Enumerated by predictor.factory.all_surrogates(): every base predictor
+# plus its sqrty_/logy_/logity_ target-transform variants. Keeps argparse
+# choices in sync automatically when a new base is registered.
+from predictor.factory import all_surrogates as _all_surrogates
+SURROGATES = _all_surrogates()
 
 
 def _resolve_surrogate_device(spec):
@@ -56,20 +59,28 @@ def _make_surrogate(args, X, y, M_valid):
     """Fit the chosen surrogate via predictor.factory.get_predictor
     (ard_gp lives in predictor/ard_gp.py). The pure-PyTorch rbf / ard_gp
     surrogates run on --surrogate_device (GPU/CPU selectable); the other
-    predictors ignore the device kwarg."""
+    predictors ignore the device kwarg.
+
+    Per-base kwargs (rbf bounds, ard_gp kernel/restarts) are routed by
+    the *base* predictor name, so target-transformed variants
+    (``sqrty_rbf``, ``sqrty_ard_gp``, …) get the same knobs as their
+    untransformed counterpart.
+    """
+    from predictor.factory import _strip_transform
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float)
     device = _resolve_surrogate_device(args.surrogate_device)
+    _, base_name = _strip_transform(args.surrogate)
     kw = {}
-    if args.surrogate == 'rbf':
+    if base_name == 'rbf':
+        # bounds must also cover the transformed targets' X domain; X
+        # itself is untransformed (only Y is transformed), so the same
+        # bounds apply.
         lb = np.minimum(X.min(0), M_valid.min(0))
         ub = np.maximum(X.max(0), M_valid.max(0))
         kw = dict(kernel=args.rbf_kernel, tail='linear',
                   lb=lb, ub=np.where(ub > lb, ub, lb + 1e-9))
-    elif args.surrogate == 'ard_gp':
-        kw = dict(ard_kernel=args.ard_kernel, gp_n_restarts=args.gp_n_restarts)
-    elif args.surrogate == 'sqrty_gp':
-        # Same MLE knobs as ard_gp (kernel + restarts).
+    elif base_name == 'ard_gp':
         kw = dict(ard_kernel=args.ard_kernel, gp_n_restarts=args.gp_n_restarts)
     return get_predictor(args.surrogate, X, y, device=device, **kw)
 
