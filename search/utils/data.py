@@ -3,7 +3,8 @@ import json
 import torch
 import os
 import glob
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
+from datasets import Dataset as HFDataset
 from transformers import AutoTokenizer, LlamaTokenizer
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 from huggingface_hub import snapshot_download
@@ -47,8 +48,17 @@ def get_wikitext2(tokenizer, seqlen=2048, batch_size=1, cache_dir=None):
     return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=False)
 
 def get_c4(tokenizer, seqlen=2048, batch_size=1, cache_dir=None):
-   
-    valdata = load_dataset('allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation', cache_dir=cache_dir)
+    # Offline-safe c4 validation load: mmap arrow shards directly from cache,
+    # bypassing the config-hash lookup. Cache layout (see dataset_info.json):
+    #   ~/.cache/huggingface/datasets/allenai___c4/default-c7bc8b0aefc5e48f/
+    #     0.0.0/<rev-hash>/c4-validation.arrow
+    _base = cache_dir or os.path.expanduser('~/.cache/huggingface/datasets')
+    _arrow_glob = os.path.join(_base, 'allenai___c4', 'default-*', '0.0.0', '*', 'c4-validation*.arrow')
+    _arrow_files = sorted(glob.glob(_arrow_glob))
+    if _arrow_files:
+        valdata = concatenate_datasets([HFDataset.from_file(f) for f in _arrow_files])
+    else:
+        valdata = load_dataset('allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation', cache_dir=cache_dir)
 
     # valenc = tokenizer(' '.join(valdata[:1100]['text']), return_tensors='pt')
     # valenc = valenc.input_ids[:, :(256 * seqlen)]
@@ -82,13 +92,21 @@ def get_wikitext2_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048,
 
 
 def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
-    # data_files=str (NOT dict) — must match the offline cache config hash
-    # `default-b04fc8a0b8562884`. The dict form `{'train': ...}` hashes to a
-    # different config id (c2cff5d7da675c1c) and fails in offline mode with
-    # "Couldn't find cache for allenai/c4 for config 'default-c2cff5d7da675c1c'".
-    traindata = load_dataset(
-        'allenai/c4', data_files='en/c4-train.00000-of-01024.json.gz', split='train', cache_dir=cache_dir
-    )
+    # Offline-safe c4 load: read arrow shards directly from the cache, bypassing
+    # `datasets.load_dataset`'s config-hash lookup which never resolves to the
+    # pre-built cache config (`default-b04fc8a0b8562884`) across datasets-lib
+    # versions / data_files-spec shapes. Pure mmap, no network.
+    _base = cache_dir or os.path.expanduser('~/.cache/huggingface/datasets')
+    _arrow_glob = os.path.join(_base, 'allenai___c4', 'default-*', '0.0.0', '*', 'c4-train-*.arrow')
+    _arrow_files = sorted(glob.glob(_arrow_glob))
+    if _arrow_files:
+        traindata = concatenate_datasets([HFDataset.from_file(f) for f in _arrow_files])
+    else:
+        # Fallback: online resolution (only if cache miss).
+        traindata = load_dataset(
+            'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'},
+            split='train', cache_dir=cache_dir,
+        )
     traindata = traindata.shuffle(seed=seed)
     
     # trainenc = tokenizer(' '.join(traindata[:n_sample]['text']), return_tensors='pt').input_ids
