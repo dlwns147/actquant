@@ -57,6 +57,10 @@ class LlamaEvaluator:
                  alpha=2,
                  beta=-2,
                  last_tokens=None,
+                 precomputed_train_loaders=None,
+                 precomputed_test_loaders=None,
+                 precomputed_dense_logits=None,
+                 precomputed_key_token_list=None,
                  **kwargs):
         
         # model_id = os.path.join(model_path, model_name)
@@ -71,16 +75,31 @@ class LlamaEvaluator:
         # self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
 
         # with accelerator.main_process_first():
-        self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=True, seed=seed, seqlen=seqlen, min_seqlen=min_seqlen)) for dataset in datasets}
-        self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=False, seed=seed, seqlen=seqlen, min_seqlen=min_seqlen)) for dataset in datasets}
+        # Loaders / dense_logits / key tokens can be injected (precomputed
+        # upstream in ONE FP-teacher pass and reused across metric groups — see
+        # correlation.py). Injecting the SAME loader objects the dense_logits
+        # were computed over guarantees index alignment in eval_loss.
+        if precomputed_train_loaders is not None:
+            self.train_loaders = precomputed_train_loaders
+            self.test_loaders = (precomputed_test_loaders
+                                 if precomputed_test_loaders is not None else {})
+        else:
+            self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=True, seed=seed, seqlen=seqlen, min_seqlen=min_seqlen)) for dataset in datasets}
+            self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=False, seed=seed, seqlen=seqlen, min_seqlen=min_seqlen)) for dataset in datasets}
 
         self.loss_func = loss_func
-        self.dense_logits = {dataset: None for dataset in self.train_loaders.keys()}
-        self.key_token_list = {dataset: None for dataset in self.train_loaders.keys()}
+        self.dense_logits = (precomputed_dense_logits if precomputed_dense_logits is not None
+                             else {dataset: None for dataset in self.train_loaders.keys()})
+        self.key_token_list = (precomputed_key_token_list if precomputed_key_token_list is not None
+                               else {dataset: None for dataset in self.train_loaders.keys()})
         self.outlier = dict()
         self.last_tokens = last_tokens
-        
-        if loss_func in ['jsd', 'kld', 'topk'] or outlier is not None or use_key_token:
+
+        # Only spin up the FP teacher for work that is NOT already injected:
+        # outlier fp16-channels (always needs it), key tokens, dense_logits.
+        need_keytok = use_key_token and precomputed_key_token_list is None
+        need_dense = (loss_func in ['jsd', 'kld', 'topk']) and precomputed_dense_logits is None
+        if need_dense or need_keytok or outlier is not None:
             # model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', device_map=device_map, low_cpu_mem_usage=True)
             model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
 
@@ -92,7 +111,7 @@ class LlamaEvaluator:
                             if key in outlier:
                                 self.outlier[f'{blk_idx}.{linear}'] = [outlier[key], get_fp16_channel(getsubattr(getblock(model, config)[blk_idx], linear), outlier[key])]
 
-            if use_key_token:
+            if need_keytok:
                 key_token_path_list = {dataset: os.path.join(key_token_path, dataset) for dataset in self.train_loaders}
                 self.key_token_list = {
                     dataset: get_key_token_list(
@@ -113,7 +132,7 @@ class LlamaEvaluator:
                     accelerator.print(f'dataset: {dataset}, n_key_token: {n_key_token}')
                     accelerator.wait_for_everyone()
 
-            if loss_func in ['jsd', 'kld', 'topk']:
+            if need_dense:
                 self.dense_logits = {
                     dataset: get_logits(
                         model, loader,

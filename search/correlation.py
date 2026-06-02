@@ -594,10 +594,81 @@ def _move_all_dense_logits_to_cpu(evaluator):
               f"GPU free={free/1e9:.2f}GB / {total/1e9:.2f}GB")
 
 
+def _precompute_group_data(args, ctx, model_id, group_items):
+    """Load the FP teacher ONCE and build every metric group's data side up
+    front: loaders + dense_logits (+ key tokens), all stashed on CPU. The
+    dense_logits do NOT depend on the arch, so this single FP pass serves every
+    group of this idx — and the FP teacher is freed before the quant model is
+    built, so the two never sit on the GPU together. dense_logits is a raw CPU
+    list-of-lists (wrapped to a _LazyGpuList by _build_evaluator →
+    _move_all_dense_logits_to_cpu).
+
+    The SAME train-loader objects used here for get_logits are returned for
+    injection, so dense_logits[i] aligns with eval_loss's loader[i] exactly.
+    Returns {g: dict(train_loaders, test_loaders, dense_logits, key_token_list)}.
+    """
+    from utils.func import get_hfmodel
+    from utils.eval import get_logits
+    from utils.loss import get_key_token_list
+    from utils.data import get_loader
+
+    accel = ctx.accelerator
+    out, pending = {}, []
+    for g, spec in group_items:
+        tl = {d: accel.prepare(get_loader(d, model=model_id, n_sample=spec['n_sample'],
+                batch_size=1, train=True, seed=args.seed, seqlen=spec['seqlen'],
+                min_seqlen=spec['min_seqlen'])) for d in spec['datasets']}
+        vl = {d: accel.prepare(get_loader(d, model=model_id, n_sample=spec['n_sample'],
+                batch_size=1, train=False, seed=args.seed, seqlen=spec['seqlen'],
+                min_seqlen=spec['min_seqlen'])) for d in spec['datasets']}
+        is_jsd = spec['loss_func'] in ('jsd', 'kld', 'topk')
+        dense = {d: None for d in spec['datasets']} if is_jsd else None
+        keytok = {d: None for d in spec['datasets']} if spec['use_key_token'] else None
+        out[g] = dict(train_loaders=tl, test_loaders=vl,
+                      dense_logits=dense, key_token_list=keytok)
+        if is_jsd or spec['use_key_token']:
+            pending.append((g, spec))
+
+    if pending:
+        print(f"[group_dense] one FP-teacher pass for groups "
+              f"{[g for g, _ in pending]} (dense_logits are arch-independent) …")
+        t0 = time()
+        fp = get_hfmodel(model_id, dtype=ctx.dtype, device_map=ctx.device_map)
+        fp.eval()
+        tok = get_tokenizer(model_id, use_fast=True)
+        for g, spec in pending:
+            r = out[g]
+            if spec['use_key_token']:
+                ktp = spec.get('key_token_path', '') or ''
+                r['key_token_list'] = {
+                    d: get_key_token_list(
+                        evaluator_model=fp, evaluator_tokenizer=tok, loader=loader,
+                        trunc_len=spec['trunc_len'], sliding_window=spec['sliding_window'],
+                        alpha=spec['alpha'], beta=spec['beta'],
+                        load_path=os.path.join(ktp, d), mode='offline')
+                    for d, loader in r['train_loaders'].items()}
+            if r['dense_logits'] is None:
+                continue
+            for d, loader in r['train_loaders'].items():
+                kt = r['key_token_list'][d] if spec['use_key_token'] else None
+                dg = get_logits(fp, loader, key_token_list=kt,
+                                last_tokens=spec['last_tokens'])
+                r['dense_logits'][d] = [[t.detach().to('cpu', copy=False) for t in batch]
+                                        for batch in dg]
+                del dg
+                clean_up()
+                print(f"[group_dense] {g}/{d}: computed "
+                      f"({len(r['dense_logits'][d])} batches, on CPU)")
+        del fp
+        clean_up()
+        print(f"[group_dense] FP-teacher pass done ({time() - t0:.1f}s)")
+    return out
+
+
 def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
                      loss_func, use_key_token, key_token_path,
                      trunc_len, sliding_window, alpha, beta,
-                     last_tokens=None):
+                     last_tokens=None, precomputed=None):
     """One LlamaEvaluator with the requested data-side config. `last_tokens`
     here is set on the evaluator at init so dense_logits gets pre-masked to
     the last N positions — must match the eval_loss last_tokens used at
@@ -623,7 +694,11 @@ def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
         loss_func=loss_func, last_tokens=last_tokens,
         use_key_token=use_key_token, trunc_len=trunc_len,
         sliding_window=sliding_window, alpha=alpha, beta=beta,
-        key_token_path=key_token_path)
+        key_token_path=key_token_path,
+        precomputed_train_loaders=(precomputed or {}).get('train_loaders'),
+        precomputed_test_loaders=(precomputed or {}).get('test_loaders'),
+        precomputed_dense_logits=(precomputed or {}).get('dense_logits'),
+        precomputed_key_token_list=(precomputed or {}).get('key_token_list'))
     _move_all_dense_logits_to_cpu(evaluator)
     return evaluator
 
@@ -1027,8 +1102,34 @@ def cmd_eval(args):
 
     model_id = f'{args.model_path}/{args.model_name}'
 
+    # AWQ/GPTQ/QEFT produce an IDENTICAL quantized model for every metric group
+    # and benchmark within ONE idx (same arch), yet rebuilding the evaluator per
+    # group re-runs the expensive AWQ scale search (~8 min) each time. Build the
+    # quant-weight model ONCE and reuse it across all groups + benchmarks; only
+    # the data side (loaders + FP-teacher dense_logits, which legitimately
+    # differ per group) is rebuilt. Mirrors post_search.py, which quantizes once
+    # and reuses one model for the metric AND every benchmark.
+    # HQQ is unaffected — its per-group build is a cheap pre-quant disk load +
+    # layer swap, so we leave that path on the default sample() each group.
+    _reuse_w = any(m in args.w_method for m in ('awq', 'gptq', 'qeft'))
+    _shared_qmodel = {'model': None}
+
+    def _sample_or_reuse(ev, arch):
+        """First call builds the quant model (AWQ runs once); later calls within
+        this idx reattach the same model object — no re-quantization. The KV
+        cache wrapper + kivi_config set at first build persist on the model and
+        stay valid (arch is constant across this idx's groups)."""
+        if _reuse_w and _shared_qmodel['model'] is not None:
+            ev.model = _shared_qmodel['model']
+            return _shared_qmodel['model']
+        m = ev.sample(arch)
+        if _reuse_w:
+            _shared_qmodel['model'] = m
+        return m
+
     # ── Calibration metrics, grouped to share evaluator builds ──
     groups_needed = sorted({t[1] for t in pending_calib})
+    group_items = []
     for g in groups_needed:
         spec = dict(GROUPS[g])
         if g == 'C':
@@ -1039,11 +1140,21 @@ def cmd_eval(args):
             spec['key_token_path'] = args.key_token_path
         else:
             spec['key_token_path'] = ''
+        group_items.append((g, spec))
+
+    # One FP-teacher pass builds every group's dense_logits (+ key tokens) up
+    # front and stashes them on CPU (dense is arch-independent → one pass serves
+    # all groups). Keeps the FP teacher and the (later, reused) quant model off
+    # the GPU together.
+    precomp = (_precompute_group_data(args, ctx, model_id, group_items)
+               if group_items else {})
+
+    for g, spec in group_items:
         print(f"\n[correlation/eval] === group {g}: datasets={spec['datasets']} "
               f"n_sample={spec['n_sample']} seqlen={spec['seqlen']} "
               f"use_key_token={spec['use_key_token']} ===")
-        evaluator = _build_evaluator(args, ctx, **spec)
-        model = evaluator.sample(arch)
+        evaluator = _build_evaluator(args, ctx, precomputed=precomp.get(g), **spec)
+        model = _sample_or_reuse(evaluator, arch)
 
         for key, group, dataset, eval_kwargs in pending_calib:
             if group != g:
@@ -1085,7 +1196,11 @@ def cmd_eval(args):
             with open(result_path, 'w') as f:
                 json.dump(results, f, indent=2)
 
-        # Free this evaluator before building the next group's
+        # Free this evaluator AND this group's precomputed dense_logits before
+        # the next group — each group is evaluated exactly once, so its CPU
+        # tensors are dead weight afterwards. Bounds CPU RAM to ~one group while
+        # keeping the single up-front FP-teacher pass.
+        precomp.pop(g, None)
         del evaluator
         clean_up()
 
@@ -1098,7 +1213,7 @@ def cmd_eval(args):
             args, ctx, datasets=[], n_sample=128, seqlen=2048, min_seqlen=0,
             loss_func='cross_entropy', use_key_token=False, key_token_path='',
             trunc_len=512, sliding_window=128, alpha=2, beta=-2)
-        model = bench_evaluator.sample(arch)
+        model = _sample_or_reuse(bench_evaluator, arch)
         for which in pending_bench:
             print(f"[correlation/eval] → benchmark '{which}'")
             try:
