@@ -155,7 +155,15 @@ def draw_random(n_draw, n_pool, exclude=(), rng=None):
 # are also sorted by the first comp_obj value ascending (deterministic order;
 # post_search re-ranks by F[:,0] anyway).
 
-_LAZY_MAX_FEASIBLE = 5e7   # cap on the POST-filter set, not the full product
+# Cap on the POST-filter feasible set (not the full no-NDS product). Raised
+# 5e7 → 1e9 now that the enumeration fill is vectorised (np.repeat/np.tile,
+# no per-row python loop): 1e9 rows enumerate in a few minutes and fit RAM
+# (~140-200 GB peak through F/M_valid/sort on this 503 GB box; the chunked
+# GP predict never materialises the full kernel). NOTE: this is a wall-clock /
+# RAM guard only — a feasible set this large means the surrogate ranks far
+# OUTSIDE its training band, so widen --comp_obj_min/max deliberately, not by
+# accident.
+_LAZY_MAX_FEASIBLE = 1e9
 
 
 def _interval(v, lo, hi):
@@ -319,13 +327,16 @@ def _lazy_feasible(lc, comp_obj_min, comp_obj_max, random_sample,
         fmesh = (np.stack([m.ravel() for m in
                            np.meshgrid(*free_surv, indexing='ij')], 1)
                  if free else np.zeros((1, 0), np.int64))
-        row = 0
-        for t in tup:
-            seg = nd_idx[row:row + n_free]
-            seg[:, group] = t
-            for ci, axx in enumerate(free):
-                seg[:, axx] = fmesh[:, ci]
-            row += n_free
+        # Vectorised cartesian product tup × fmesh, outer=tup / inner=fmesh —
+        # identical row contents and order to the old per-row python loop, but
+        # done in C. Critical for large feasible sets (1e8–1e9): when free=[]
+        # (memory comp_obj over every axis → n_free=1) the old loop ran one
+        # python iteration per feasible row and dominated wall-clock; here it
+        # collapses to two C-level assignments. (np.repeat(t, 1) == t, so the
+        # free=[] case is just nd_idx[:, group] = tup.)
+        nd_idx[:, group] = np.repeat(tup, n_free, axis=0)
+        if free:
+            nd_idx[:, free] = np.tile(fmesh, (len(tup), 1))
 
     if verbose:
         print(f'range_idx : {len(nd_idx)}')

@@ -30,6 +30,16 @@ BASE_PREDICTORS = ('rbf', 'gp', 'mlp', 'carts', 'as', 'ard_gp',
                    'badd_quad', 'gam')
 
 
+def _resolve_device(spec):
+    """'auto' → 'cuda' if visible else 'cpu'; otherwise pass through.
+    Mirrors post_search.py::_resolve_surrogate_device so the factory
+    defaults to GPU when one is available."""
+    if spec == 'auto':
+        import torch
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
+    return spec
+
+
 def _strip_transform(model):
     """If ``model`` carries a target-transform prefix, return
     ``(transform_name, base_model)``; else ``(None, model)``."""
@@ -61,8 +71,9 @@ def all_surrogates():
     return tuple(out)
 
 
-def _build_base(model, inputs, targets, device='cpu', **kwargs):
+def _build_base(model, inputs, targets, device='auto', **kwargs):
     """Build + fit a base predictor (no target transform)."""
+    device = _resolve_device(device)
     if model == 'rbf':
         from predictor.rbf import RBF
         predictor = RBF(device=device, **kwargs)
@@ -121,15 +132,19 @@ def _build_base(model, inputs, targets, device='cpu', **kwargs):
     return predictor
 
 
-def get_predictor(model, inputs, targets, device='cpu', **kwargs):
+def get_predictor(model, inputs, targets, device='auto', **kwargs):
     """Build, fit, and return a predictor.
 
     Handles target-transform prefixes (``sqrty_``, ``logy_``,
     ``logity_``) by transforming ``targets`` before fitting the base
     predictor and wrapping the result in ``TargetTransformPredictor``
     (which undoes the transform at predict time).
+
+    ``device='auto'`` (default) resolves to ``'cuda'`` when a GPU is
+    visible, else ``'cpu'``. Pass an explicit string to override.
     """
     import numpy as np
+    device = _resolve_device(device)
     transform, base_name = _strip_transform(model)
 
     if transform is None:
