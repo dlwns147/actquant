@@ -61,6 +61,7 @@ N_TOKEN=16384
 # per-loader `n_sample` (calibration data examples per metric), which is
 # set inside GROUPS in correlation.py.
 N_ARCHS=50
+# N_ARCHS=200
 
 # ── Sampling strategy (mirrors scripts/sample_surrogate.sh) ──
 # Empty QUANTILE_SAMPLE → pure random sampling (cheap; uniform over the
@@ -70,6 +71,7 @@ N_ARCHS=50
 # Recommended for correlation studies: cover the per-axis extremes so the
 # regression sees high-loss / low-loss archs, not a random clump.
 QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.01,0.5,0.99"
+# QUANTILE_SAMPLE="metric_w#0.01,0.25,0.5,0.75,0.99 metric_kv#0.01,0.25,0.5,0.75,0.99 metric_kvdim#0.01,0.25,0.5,0.75,0.99"
 # QUANTILE_SAMPLE=""
 
 # SAMPLING_METHOD: random | coverage_nsga2_{joint,marginal,combined}

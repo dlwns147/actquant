@@ -366,7 +366,7 @@ class SearchThink:
 
         return metric_list, complexity_list
 
-    def _fit_predictor(self, archive, device='cpu'):
+    def _fit_predictor(self, archive, device='auto'):
         inputs = np.array([self.search_space.encode_predictor(x[0]) for x in archive])
         targets = np.array([x[1] for x in archive])
 
