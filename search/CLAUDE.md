@@ -245,14 +245,123 @@ with no change to search.py / search_space / surrogate / NSGA2.
   CUDA kernel.
 
 ### Attention-sink protection — cheapest biggest KV win
-`test_attention_sink.py`, `test_sink_ruler.py`.
+`test_attention_sink.py`, `test_sink_ruler.py`, `test_sink_per_layer.py`,
+`verify_sink_cache.py`, `test_sink_cache_eval.py`.
 - Keeping the first S tokens of the KV cache in FP (KVSink) — orthogonal to
   `residual_length` which only protects the LAST R tokens.
+- **NOW A REAL IN-MODEL KNOB (not just a monkeypatch):** `KIVICacheConfig.sink`
+  (+ `replace_kv_cache(sink=S)`). Implemented in `KIVICache.py::KIVIFakeCache` at
+  all 6 fake_quant sites (prefill/stride/lazy_update × K/V) via `_sink_n` (position-
+  aware: protects only the GLOBAL first-S tokens — committed-length bookkeeping, so
+  stride/decode never mis-protect mid-seq) + `_restore_sink` (overwrite first n with
+  FP). Correctness `verify_sink_cache.py`: sink≥seq ⇒ JSD vs FP-cache = 5e-4 (≈0, all
+  restored) PASS; sink0 ⇒ 0.080; sink4/16/64 ⇒ ~0.041 (−48%). End-to-end via the
+  CONFIG path (no monkeypatch, `test_sink_cache_eval.py --bench ruler|minilongbench`):
+  RULER niah_multikey_3@16384 n=20 = FP 1.0 / 2-bit sink0 0.25 / **sink16 0.50** and
+  MiniLongBench 2-bit gs128 = sink0 58.34 / **sink16 59.61** (recovers to FP 59.39) —
+  both reproduce the monkeypatch rescue.
+- **PACKED real-GEMV cache (`KIVIDynamicCache`, packing=True) ALSO implemented**
+  (`test_sink_packed.py`). Faithful to KVSink (arXiv 2508.04257) / KIVI-K2V2* (keeps
+  initial ~32 tokens FP): a FP FRONT sink buffer (`key/value_states_sink_cache`)
+  peeled before quantization (mirror of the back residual) + attended via a new
+  `att_qksink` term in `kivi_utils.forward_for_kivi_gemv` (positions stay ordered
+  [sink | quant | back-residual]; value reconstruction splits post-softmax weights by
+  position). Kernel constraint: K GEMV groups along the token axis, so the FP front
+  is rounded UP to a multiple of `residual_length` (`_sink_len`; rl is a multiple of
+  k_group_size, V groups along head_dim so unconstrained) — so packed S protects ≥S
+  in residual_length-sized steps (harmless over-protection). K_sink is km-centered
+  (softmax-invariant). Correctness: packed 2-bit decode, sink≥prompt ⇒ JSD vs FP
+  decode 2.5e-4 (all FP via sink buffer through the GEMV path) PASS; sink0 0.532;
+  sink128 0.0015 (first-128 FP rescues near-FP in the real packed cache). sink=0 skips
+  all sink code (no regression). Stride path also prepends sink.
+- **Group EXCLUSION (true KVSink) vs overwrite:** sinks must be EXCLUDED from quant
+  groups, not just overwritten after, else their outlier values inflate the group
+  min/max and pollute neighbours. Packed peels before quant = true exclusion (K+V).
+  FakeCache: V (token scheme, per-token groups along head_dim) overwrite ≡ exclusion
+  (no cross-token sharing); K (channel scheme, groups along TOKEN axis) needs true
+  exclusion → `_fake_quant_k_excl_sink` quantizes only [n':] and keeps the FP front
+  (n' = sink rounded UP to k_group_size). So overwrite-vs-exclude only ever mattered
+  for FakeCache-K's first group (small; made the old measurement slightly conservative).
+- **WIRED as `--attn_sink` (default 0 = off):** search.py → SearchThink →
+  LlamaEvaluator(attn_sink=) → replace_kv_cache(sink=) → KIVICacheConfig.sink; same
+  --attn_sink arg + ATTN_SINK script knob in search.py/sample_surrogate.py/post_search.py/
+  correlation.py (and all 5 scripts). NOT a searched axis (per-layer S flat) — a FIXED
+  global eval-time primitive like residual_length/k_quant_scheme: it is NOT stored in the
+  arch dict or .stats archives, so it does NOT propagate from the search run — you must
+  pass --attn_sink EXPLICITLY at every post-search stage, and it MUST match the search-time
+  value (else the surrogate trains on sink-on JSD but the final pick is eval'd sink-off,
+  or vice-versa). Default 0 so existing 781+ archives stay comparable; recommend 8 when
+  enabling. Effective S rounds: packed → residual_length multiple, FakeCache-K →
+  k_group_size multiple, V exact.
+- **Memory accounting** (`utils/func.py`): sink is a THIRD KV token partition (oldest
+  S tokens = fp16 at FULL head_dim, never quantized/pruned) alongside the back-residual
+  (newest R fp16) and ThinK-residual (newest 32 full-dim). `compute_memory` uses a
+  segment sweep over {sink, residual, think} boundaries (handles all orderings);
+  `compute_cache_memory_single/_batch` (the post-search `memory` comp_obj budget) add the
+  fp16-full sink term and quantize only n_token−S. Threaded via `get_net_info(...,
+  attn_sink=)` ← evaluator/search self.attn_sink, and `build_nd`/`_build_lazy_comp` ←
+  args.attn_sink; compute_mem.py has --attn_sink. sink=0 reproduces old numbers exactly.
+  Since sink is a global constant added equally to every arch, it shifts the memory
+  budget but not the relative ranking.
+- **Scripts** (`scripts/*.sh`): `ATTN_SINK=0` knob + `--attn_sink ${ATTN_SINK}` in
+  search.sh / search_mckp.sh / sample_surrogate.sh / post_search.sh /
+  correlation_sample.sh / correlation_eval.sh. SAVE/result dirs get an abbreviated
+  `SINK_TAG` = `_sk${ATTN_SINK}` (e.g. `_sk8`), appended ONLY when sink≠0 (PP_TAG
+  pattern) so sink=0 dir names stay byte-identical/comparable with existing archives.
+  `_sk` not `_s` because correlation dirs already use `_s${SEED}`. correlation_eval
+  inherits SAVE from the sample dir so its subdirs carry the tag automatically.
 - 2-bit JSD: sink4 −44%, sink16 −49%, sink64 −54% (bulk from the first 4 tokens,
   0.2% mem). Stacks with rotation (sub-additive).
-- RULER end-to-end: niah_multikey_2@16384 2-bit 0.95→1.00 (sink16, = FP);
-  harder niah_multivalue 2-bit 0.90→0.95 (sink16). ⇒ add a small sink window to
-  KIVIFakeCache/quant_kv_output; likely fixes the cwe/multivalue proxy collapse.
+- RULER end-to-end @16384 (n=20), 2-bit KIVI gs128, sink0→sink16→sink16+rot:
+  niah_multikey_3 **0.25→0.55→0.85** (FP 1.0; 2-bit collapses, sink+rot rescues),
+  ruler_cwe 0.60→0.70→0.80 (FP 0.65), niah_multikey_2 0.95→1.0→1.0,
+  niah_multivalue 0.90→0.95, ruler_vt 0.95→1.0, niah_multiquery 0.95→1.0.
+  ⇒ on HARD low-bit long-context tasks sink+rotation are essential; add a small
+  sink window to KIVIFakeCache/quant_kv_output. (test_sink_ruler.py --task ...)
+- MiniLongBench (10 KV-sensitive EN datasets), 2-bit gs128: fp16 59.39, sink0
+  58.34, **sink16 59.33 (recovers to FP)**, sink16+rot 58.23 (rotation neutral/
+  noisy on aggregate LongBench vs clearly helpful on hard RULER retrieval).
+  (test_sink_minilongbench.py --mode fp16|sink0|sink16|sink16rot, 1 cfg/GPU)
+- **Per-layer sink axis? NO** (`test_sink_per_layer.py`, layer-aware sink via
+  patching `llama_kivi.quant_kv_output` + `kivi_config.sink[layer]`; n=8 wikitext2
+  @2048, 2-bit gs128, S=16). Gate before making sink a NAS axis = is the benefit
+  layer-localized? *Which* layer needs sink IS layer-dependent (leave-one-in CV=1.29,
+  benefit concentrated in EARLY layers 1,2,3 + a few mid 7,9,12,14; layers 15-31 ≈0).
+  BUT *how much* S per layer is NOT — the per-layer S∈{4,16,64} JSD curves are FLAT
+  (spread ~0.003 = noise floor; argmin scatter is noise). Greedy knee: top-6 layers
+  → only 46% of the 49% global gain, no sharp knee. ⇒ sink is near-free (0.2% mem) +
+  monotone, so nothing to recover by withholding it from late layers; **bake in a
+  fixed global S≈4-8 as a primitive (like residual_length), do NOT add a per-layer
+  sink-length search axis.** (modes: profile|loo|ssweep; patches the per-arch kivi
+  module's `quant_kv_output` name via `get_arch_module`, so works for llama/qwen2/
+  mistral; gemma3 needs the text_config+hybrid-cache harness, not yet run.)
+  **Cross-arch confirmed** (Qwen2.5-7B, Mistral-7B-v0.3, same protocol): both
+  findings hold everywhere — which-layers IS layer-dependent (CV: Llama 1.29 /
+  Mistral 1.47 / Qwen 1.46), per-layer S IS flat (argmin=noise) in all three, no
+  sharp knee (top-6 → 46/55/59%). NUANCE: the profile LOCATION is arch-specific —
+  Llama & Mistral concentrate in EARLY layers (1-5) but Qwen2.5's strongest is the
+  LATE layer 26 (+scattered mid); global gain also varies (Llama 49% > Mistral 37%
+  > Qwen 26%). ⇒ use a fixed UNIFORM global S≈8 (arch-agnostic, ~0.2% mem); an
+  "early-layers-only" shortcut is fragile (breaks on Qwen).
+
+### 1-bit KV feasibility — NO (2-bit is the floor)
+`test_attention_sink.py --bits 1`, `test_kv_1bit_asym.py` (Llama-3.1-8B, wikitext2
+@2048, JSD vs FP). Asked: with the full sink+rotation+small-group stack, is sub-2-bit
+KV feasible? Answer: no.
+- **Symmetric 1-bit collapses** to JSD ~0.61-0.68 (ln2=0.693 = max possible JSD =
+  output nearly decorrelated from FP), at BOTH gs128 (0.676) and gs32 (0.635).
+  Group size barely helps (gs128→gs32: 2-bit 0.159→0.050 but 1-bit only 0.676→0.635).
+- **Sink/rotation give ~0 at 1-bit** (−2 to −5%, vs −44/−54% at 2-bit): they protect
+  outliers, but at 1-bit every value snaps to its group min/max so there is no
+  within-group dynamic range left to protect.
+- **Asymmetric (gs32 sink16 rot): K is the bottleneck, not V.** K2V2 0.0287 → K2V1
+  0.214 (7.5×) → K1V2 0.510 (17.8×) → K1V1 0.630 (22×). 1-bit K destroys attention
+  (K feeds the softmax exponentially; V is only a linear average). But even the best
+  sub-2-bit point K2V1 (eff 1.5b) is 7.5× worse than K2V2 AND worse than coarse
+  symmetric 2-bit gs128 (0.159) — not a good trade.
+- ⇒ **2-bit is the practical KIVI floor; never drop K below 2-bit.** Scalar group
+  quant can't go sub-2-bit; that needs a different quantizer (per-head/token mixed
+  precision, or vector/product quant) — out of current scope.
 
 ### MCKP / Lagrangian bit allocation vs NSGA-II
 `mckp_vs_nsga2.py` (CPU, on the real 10400-config W-axis archive).
@@ -264,6 +373,31 @@ with no change to search.py / search_space / surrogate / NSGA2.
   extreme where additivity breaks. ⇒ replace `search.py::_next` NSGA2 with the
   closed-form sweep for separable comp_objs; refine the extreme corner by
   measurement (hybrid). Needs per-module 2/3/4-bit curves (extend sensitivity.py).
+- **3-axis post_search baseline** (`mckp_post_search.py`, mirrors post_search.sh:
+  same W/KV/KVdim archives + memory budget + build_nd combined space). At the
+  5.316 GB budget MCKP/additive (0 sampling, 267 ms over 23M combos) picks
+  wbits3.21/kvbits2.95/kvdim123.5 vs the ard_gp surrogate's
+  wbits3.19/kvbits2.95/kvdim127.75 — **rank-corr ρ=0.978**, near-identical
+  operating point at zero sampling cost. ⇒ MCKP/additive is a strong baseline for
+  post_search; the surrogate's value is the small residual interaction + extreme
+  corner. Fronts saved to tests/mckp_baseline/.
+- **`search_mckp.py` + `scripts/search_mckp.sh`** (Stage-1 per-method search, the
+  recommended MCKP locus; mirrors search.sh, same LlamaEvaluator/protocol).
+  MEASUREMENT-based (NOT archive-fit): measures the reference (all-max-bit) + every
+  per-module marginal d_m(b)=JSD(ref with m:=b)−JSD(ref) with REAL JSD, runs a
+  SIZE-WEIGHTED DP-MCKP (cost MUST be numel-weighted — wbits is size-weighted),
+  then MEASURES each frontier arch's real JSD → iter_mckp.stats (post_search-
+  consumable). Tested on wbits (461 real evals vs NSGA's 10400; DP 67 ms):
+  vs the same-protocol NSGA pp512 front on MEASURED JSD — **MCKP MATCHES/BEATS NSGA
+  at ≥3.1 bits** (Δ 0 to −0.007, e.g. 3.31bit 0.055 vs 0.062) but is **WORSE below
+  ~2.7 bits** (2.31bit 0.660 vs 0.519) where marginal additivity breaks (many
+  modules forced to 2-bit at once). HV 0.892×. ⇒ MCKP = near-optimal per-method
+  frontier at ~23× fewer evals in the deployable band; hybrid (measure-refine the
+  aggressive low-bit corner). Stage analysis: MCKP belongs at Stage 1 (additive +
+  separable cost + 3^224 explosion); Stage 2 keeps the surrogate (coupled KV×KVdim
+  memory + cross-method interaction). GOTCHAs: n_sample>=128 (wikitext2_trainenc
+  joins n_sample text rows → too few = empty/None loader); HQQ banks are bfloat16
+  on disk (no float16); pass a COPY of vars(args) to SearchThink (it pops keys).
 
 ### Deferred (recorded, not yet run)
 M2 Hessian/Fisher sensitivity prior into ARD-GP (BAQ); M4 cross-model surrogate

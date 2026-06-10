@@ -34,7 +34,8 @@ def compute_one(args, config, n_block, w_bits, w_group_size, k_bits, v_bits,
     }
     group_size = {'w': w_group_size, 'k': k_group_size, 'v': v_group_size}
     complexity = get_net_info(arch, config, group_size, n_token,
-                              residual_length=args.residual_length)
+                              residual_length=args.residual_length,
+                              attn_sink=getattr(args, 'attn_sink', 0))
     return arch, complexity
 
 def normalize_kv_args(args):
@@ -188,6 +189,8 @@ if __name__ == '__main__':
                              '--kv_bits')
     parser.add_argument('--residual_length', type=int, default=128,
                         help='')
+    parser.add_argument('--attn_sink', type=int, default=0,
+                        help='Attention-sink: first S KV tokens fp16 full-dim (KVSink). 0=off.')
     parser.add_argument('--config', type=str, default='config/llama.json',
                         help='')
     parser.add_argument('--n_token', type=int, nargs='+', default=[0],

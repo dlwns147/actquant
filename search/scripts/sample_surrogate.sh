@@ -34,6 +34,9 @@ V_BITS_TEXT="24"
 V_GROUP_SIZE=("128" "128")
 
 RESIDUAL_LENGTH=128
+# Attention-sink (KVSink): keep first S KV tokens FP. 0=off. MUST match the
+# search-time --attn_sink so the surrogate training JSDs mirror the search.
+ATTN_SINK=0
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
@@ -98,7 +101,12 @@ COVERAGE_PARETO_SELECT=knee
 # KVDIM_SCALE=1
 # EFF_KVDIM_SCALE=1
 
-SAVE=save/result/sample/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample_${SEED}seed
+# Abbreviated attention-sink tag (e.g. _sk8), only when sink is on so sink=0
+# names stay comparable. MUST match the search-time ATTN_SINK.
+SINK_TAG=""
+[ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
+
+SAVE=save/result/sample/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample_${SEED}seed${SINK_TAG}
 [ -n "${W_EXPR}" ]      && SAVE+="_w_expr"
 [ -n "${KV_EXPR}" ]     && SAVE+="_kv_expr"
 [ -n "${KVDIM_EXPR}" ]  && SAVE+="_kvdim_expr"
@@ -135,6 +143,7 @@ ARGS="--gpu_id ${DEVICES} \
 --v_bits ${V_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
+--attn_sink ${ATTN_SINK} \
 --k_quant_scheme ${K_QUANT_SCHEME} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
 --n_token ${N_TOKEN} \

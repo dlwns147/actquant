@@ -39,6 +39,8 @@ K_GROUP_SIZE_TEXT=3264128x2_128
 V_GROUP_SIZE_TEXT=3264128x2_128
 
 RESIDUAL_LENGTH=128
+# Attention-sink (KVSink): keep first S KV tokens FP. 0=off. Match the eval config.
+ATTN_SINK=0
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
@@ -114,7 +116,12 @@ MIN_COMP_OBJ=$(IFS=" " ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ=$(IFS=" " ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
 # ── output dir (eval/aggregate read archs.csv from here) ──
-SAVE=save/correlation/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_n${N_ARCHS}_s${SEED}
+# Abbreviated attention-sink tag (e.g. _sk8), only when sink is on so sink=0
+# dirs stay comparable. correlation_eval.sh inherits this SAVE so its
+# longbench_/ruler_ subdirs carry the tag too. (_sk not _s: _s${SEED} is seed.)
+SINK_TAG=""
+[ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
+SAVE=save/correlation/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_n${N_ARCHS}_s${SEED}${SINK_TAG}
 # Tag the dir with quantile + sampling_method so multiple runs are distinguishable.
 if [ -n "${QUANTILE_SAMPLE}" ]; then
     QS_TEXT=""
@@ -146,6 +153,7 @@ ARGS="--mode sample \
 --v_bits ${V_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
+--attn_sink ${ATTN_SINK} \
 --k_quant_scheme ${K_QUANT_SCHEME} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
 --n_token ${N_TOKEN} \

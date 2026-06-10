@@ -23,6 +23,10 @@ class QEFT(BASE):
     def __init__(self, model_name, config, arch, device_map, group_size=128, dtype='auto', dev='cuda', prune=False, do_owq=False, owq=None, **kwargs):
         super().__init__(model_name, config, arch, device_map=device_map, group_size=group_size, dtype=dtype, dev=dev, prune=prune, do_owq=do_owq, owq=owq)
         self.method = 'owq'
+        # BASE.__init__ keys outlier loading off `outlier_path`, but subclasses
+        # forward `owq=` (lands in BASE **kwargs) -> self.owq stays None. Set it.
+        if do_owq and self.owq is None and owq is not None:
+            self.owq = torch.load(owq, weights_only=False) if isinstance(owq, str) else owq
 
 
     @torch.no_grad()
@@ -52,6 +56,13 @@ class QEFT(BASE):
             
         # assert args.no_frob_norm == True
         meta = get_meta(self.model_name, layers)
+        # transformers>=4.45 passes position_embeddings (cos,sin) to each decoder
+        # layer; capture it so the Catcher replay below doesn't pass None.
+        if 'position_embeddings' not in meta['inp_kwargs']:
+            meta['inp_kwargs'] = list(meta['inp_kwargs']) + ['position_embeddings']
+        # arch may be {'linear': {name: [...]}} (standalone) or {name: [...]}
+        # (evaluator passes q_arch['w'] directly); accept both.
+        larch = self.arch['linear'] if isinstance(self.arch, dict) and 'linear' in self.arch else self.arch
         print('Starting ...')
 
         use_cache = self.model.config.use_cache
@@ -84,7 +95,7 @@ class QEFT(BASE):
                     if key == 'i':
                         cache['i'] += 1
                     else:
-                        cache[key] = kwargs[key]
+                        cache[key] = kwargs.get(key)
                 raise ValueError
         
         layers[0] = Catcher(layers[0])
@@ -109,14 +120,62 @@ class QEFT(BASE):
         # print('Ready.')
         owq_layers = meta['owq_layers']
         ratios = meta['ratios']
-        n_out_dict = {l:[0] * len(layers) for l in owq_layers.keys()}
-        if target_rank is not None:
-            for l, owq in owq_layers.items():
-                if owq:
-                    n_out_dict[l] = [target_rank if bits != math.ceil(bits) else 0 for bits in self.arch['linear'][l]]
+        # New (search) scheme: arch entries are (w_bits, n_outlier) tuples carrying a
+        # searchable per-layer outlier-column count; outlier indices come from a
+        # MULTI-rank dict {key: {n_out: [cols]}} (extract_outidx.py). The legacy
+        # scheme uses fractional bits + a single target_rank + a flat {key: [cols]} dict.
+        tuple_arch = any(isinstance(larch[l][0], (list, tuple)) for l in larch)
+        # When the arch carries searchable per-layer outlier counts, the indices
+        # must come from a multi-rank dict {key: {n_out: [cols]}}. Fail fast with an
+        # actionable message instead of crashing on `None[key]` / a flat list deep in
+        # the per-layer loop (e.g. post_search/sample_surrogate run with --w_method
+        # qeft but a missing/old-format --outlier_path).
+        if tuple_arch and any(e[1] > 0 for l in larch for e in larch[l]):
+            # skip the 'n_outlier' metadata key (a list of ranks, saved first by
+            # extract_outidx.py) when sampling a representative per-layer entry.
+            sample_key = next((k for k in self.owq if k != 'n_outlier'), None) \
+                if isinstance(self.owq, dict) and self.owq else None
+            if not isinstance(self.owq, dict) or sample_key is None or not isinstance(self.owq[sample_key], dict):
+                raise ValueError(
+                    "QEFT (bits, n_outlier) arch needs a multi-rank outlier dict "
+                    "{key: {n_out: [cols]}} from extract_outidx.py, but got "
+                    f"{type(self.owq).__name__}. Pass --outlier_path to that dict.")
+        n_out_dict = {l: [0] * len(layers) for l in owq_layers.keys()}
+        if tuple_arch:
+            for l, is_owq in owq_layers.items():
+                if is_owq:
+                    n_out_dict[l] = [int(e[1]) for e in larch[l]]
+            # Per-layer outlier counts vary across layers, which is incompatible with
+            # QEFT's single global channel reorder (one shared out_id set for all
+            # qkv/up/gate). Reorder is a kernel-packing optimization only and does not
+            # change fake-quant outputs, so disable it for the searchable scheme.
+            reorder = False
+        elif target_rank is not None:
+            for l, is_owq in owq_layers.items():
+                if is_owq:
+                    n_out_dict[l] = [target_rank if bits != math.ceil(bits) else 0 for bits in larch[l]]
                     # n_out_dict[l] = target_rank
+        print(f'tuple_arch : {tuple_arch}, reorder : {reorder}')
         print(f'n_out_dict : {n_out_dict}')
         print(f'self.arch : {self.arch}')
+
+        def _wbits(name, i):
+            """Integer weight bits for (name, block i), handling both the (bits,
+            n_outlier)-tuple search arch and the legacy scalar/fractional arch."""
+            e = larch[name][i]
+            return int(e[0]) if tuple_arch else e
+
+        def _outidx(name, i, key):
+            """FP16 outlier column indices for (name, block i), or None.
+            tuple_arch -> multi-rank dict lookup self.owq[key][n_out];
+            legacy -> flat self.owq[key] gated on fractional bits."""
+            if key not in self.owq:
+                return None
+            if tuple_arch:
+                n_out = n_out_dict[name][i]
+                return torch.tensor(self.owq[key][n_out]) if n_out > 0 else None
+            wb = larch[name][i]
+            return torch.tensor(self.owq[key]) if wb != math.floor(wb) else None
         
         quantizers = {}
         for i in tqdm(range(len(layers)), "Reconstruction Blocks..."):
@@ -133,7 +192,7 @@ class QEFT(BASE):
 
                 gptq_owq = {}
                 for name in subset:
-                    wbits = self.arch['linear'][name][i]
+                    wbits = _wbits(name, i)
                     gptq_owq[name] = GPTQ_OWQ(subset[name], n_out=n_out_dict[name][i])
                     gptq_owq[name].quantizer = Quantizer(
                         math.floor(wbits), perchannel=True, sym=sym, mse=(tuning == 'mse'), group_size=self.group_size
@@ -153,8 +212,10 @@ class QEFT(BASE):
                     h.remove()
                 
                 for name in subset:
-                    wbits = self.arch['linear'][name][i]
-                    if not no_frob_norm and (not reorder or (reorder and name in meta['sequential'][1] + meta['sequential'][3])):
+                    wbits = _wbits(name, i)
+                    # tuple_arch supplies outlier indices from the dict, so the
+                    # frob-norm outlier-ranking pass is unused — skip it (big speedup).
+                    if not no_frob_norm and not tuple_arch and (not reorder or (reorder and name in meta['sequential'][1] + meta['sequential'][3])):
                         W = subset[name].weight.data.clone().to(torch.float)
                         temp_quantizer = Quantizer(
                             math.floor(wbits), perchannel=True, sym=sym, mse=(tuning == 'mse'), group_size=self.group_size
@@ -166,21 +227,19 @@ class QEFT(BASE):
                         frob_norm_error = None
 
                     key = f"{meta['prefix']}.{i}.{name}"
-                    outidx = torch.tensor(self.owq[key]) if key in self.owq and wbits != math.floor(wbits) else None
+                    outidx = _outidx(name, i, key)
                     # print(f'key : {key}, outidx : {outidx}, wbits : {wbits}, key in self.owq : {key in self.owq}')
                     out_ids = gptq_owq[name].hessian_sorting(
-                        actorder=act_order, 
-                        frob_norm=frob_norm_error, 
-                        # outidx=torch.tensor(self.owq[key]) if key in self.owq and name not in meta['sequential'][1] and wbits != math.floor(wbits) else None, 
-                        outidx=torch.tensor(self.owq[key]) if key in self.owq and wbits != math.floor(wbits) else None, 
-                        # outidx=outidx if name not in meta['sequential'][1] + meta['sequential'][3] and wbits != math.floor(wbits) else None, 
+                        actorder=act_order,
+                        frob_norm=frob_norm_error,
+                        outidx=outidx,
                         )
                     gptq_owq[name].quantizer.out_ids = out_ids
                     gptq_owq[name].quantizer.n_out = out_ids.numel()
                     gptq_owq[name].quantizer.reorder = reorder # if name not in meta['sequential'][1] else False
                     # print(f'n_out_dict[name][i] : {n_out_dict[name][i]}, n_out : {out_ids.numel()}, self.owq[key] : {self.owq[key] if key in self.owq else 0}')
 
-                if not no_frob_norm:
+                if not no_frob_norm and not tuple_arch:
                     del W
                     del W_quant
                     del temp_quantizer
@@ -189,7 +248,10 @@ class QEFT(BASE):
                 for name in subset:
                     key = f"{meta['prefix']}.{i}.{name}"
                     # print(f"Quantizing {key}")
-                    if name not in meta['sequential'][1] and name not in meta['sequential'][3]:
+                    # global_ids feeds the single global make_reorder (legacy scheme
+                    # only). Skip when reorder is off — and self.owq[key] is a per-rank
+                    # dict in the tuple/multi scheme, not a flat index list.
+                    if reorder and name not in meta['sequential'][1] and name not in meta['sequential'][3]:
                         global_ids = torch.tensor(self.owq[key])
                     # print(f'out_ids : {gptq_owq[name].quantizer.out_ids.tolist()}')
                     # print(f'self.owq[key] : {self.owq[key] if key in self.owq else 0}') 

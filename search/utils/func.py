@@ -103,7 +103,7 @@ THINK_RESIDUAL = 32
 
 
 def compute_memory(arch, config, group_size, n_token=0, residual_length=0,
-                   think_residual=THINK_RESIDUAL):
+                   think_residual=THINK_RESIDUAL, sink=0):
     # arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
     w_group_size = group_size['w']
     weight_memory = 0
@@ -133,35 +133,41 @@ def compute_memory(arch, config, group_size, n_token=0, residual_length=0,
     head_dim = int(config['head_dim'])
     p_arch = arch.get('p', {})
 
-    # Two independent token partitions, counted from the newest token:
+    # Three token partitions over the n_token positions (oldest=0 … newest):
     #   * KV-quant residual: the newest `residual_length` tokens stay fp16
     #     (16-bit, no scale); older tokens are quantized to `bits` (+scale).
     #   * ThinK residual: when `prune_dim > 0`, only the newest
     #     `think_residual` (=32, 원본대로) tokens keep full head_dim; older
-    #     tokens drop `prune_dim` channels — applied to both the quantized and
-    #     the fp16 slab, exactly like ThinK_kivi which prunes only the
-    #     non-residual key/value states.
+    #     tokens drop `prune_dim` channels.
+    #   * Attention-sink (KVSink/KIVI-K2V2*): the OLDEST `sink` tokens are kept
+    #     fp16 at FULL head_dim — peeled before quant AND before ThinK pruning,
+    #     so they are never quantized and never channel-pruned. (Deployment
+    #     rounds `sink` up to a group boundary; the raw value is used here — a
+    #     ≤1-group, ~0.2%-mem difference added equally to every arch.)
+    # Per position i: fp16 iff i<sink (sink) or i>=n-R (residual); full head_dim
+    # iff i<sink (sink) or i>=n-think_residual (ThinK newest) or prune_dim==0.
+    # A segment sweep over the boundaries handles every R/think/sink ordering.
     R = max(int(residual_length), 0) if residual_length else 0
+    S = max(int(sink), 0)
     cache_memory = 0
     for target in ['k', 'v']:
         kv_dim = int(config['linear_shape'][config[f'{target}_linear']][0])
         n_kv_heads = kv_dim // head_dim
         prune_list = p_arch.get(target, [0] * len(arch['q'][target]))
         for (bits, gs), prune_dim in zip(arch['q'][target], prune_list):
-            n_fp = min(R, n_token)                       # newest: fp16
-            n_q = n_token - n_fp                          # older: quantized
-            if prune_dim > 0:
-                n_full = min(int(think_residual), n_token)  # newest: full dim
-            else:
-                n_full = n_token                            # nothing pruned
-            n_pruned = n_token - n_full                  # older: dim reduced
-
-            # Region token counts (newest→oldest order is preserved because
-            # both partitions keep the newest tokens "more precise"):
-            c_fp_full   = min(n_fp, n_full)
-            c_fp_pruned = max(0, n_fp - n_full)
-            c_q_full    = max(0, n_full - n_fp)
-            c_q_pruned  = n_token - max(n_fp, n_full)
+            n = int(n_token)
+            r = min(R, n)
+            s = min(S, n)
+            t = min(int(think_residual), n) if prune_dim > 0 else n  # newest full
+            c = {('fp', 'full'): 0, ('fp', 'pru'): 0,
+                 ('q', 'full'): 0, ('q', 'pru'): 0}
+            bps = sorted({0, s, n - r, n - t, n})
+            for a, b in zip(bps, bps[1:]):
+                if b <= a:
+                    continue
+                is_fp = (a < s) or (a >= n - r)
+                is_full = (a < s) or (a >= n - t)
+                c[('fp' if is_fp else 'q', 'full' if is_full else 'pru')] += b - a
 
             full_dim   = n_kv_heads * head_dim
             pruned_dim = n_kv_heads * (head_dim - prune_dim)
@@ -172,10 +178,10 @@ def compute_memory(arch, config, group_size, n_token=0, residual_length=0,
                     m += (dim / gs) * 4              # scale + zero point
                 return m
 
-            cache_memory += c_fp_full   * full_dim   * 16 / 8
-            cache_memory += c_fp_pruned * pruned_dim * 16 / 8
-            cache_memory += c_q_full    * _q_mem(full_dim)
-            cache_memory += c_q_pruned  * _q_mem(pruned_dim)
+            cache_memory += c[('fp', 'full')] * full_dim   * 16 / 8
+            cache_memory += c[('fp', 'pru')]  * pruned_dim * 16 / 8
+            cache_memory += c[('q', 'full')]  * _q_mem(full_dim)
+            cache_memory += c[('q', 'pru')]   * _q_mem(pruned_dim)
 
     return weight_memory + cache_memory
 
@@ -208,10 +214,15 @@ def compute_weight_memory(arch, config, group_size):
     return weight_memory
 
 
-def compute_cache_memory_single(arch, config, n_token):
-    """Return KV cache memory in bytes for a single arch. Mirrors the cache_memory part of compute_memory."""
+def compute_cache_memory_single(arch, config, n_token, sink=0):
+    """Return KV cache memory in bytes for a single arch. Mirrors the cache_memory
+    part of compute_memory (this simplified model omits the fp16 back-residual).
+    Attention-sink: the oldest `sink` tokens are fp16 at FULL head_dim (never
+    quantized/pruned); the remaining (n_token - sink) follow the per-layer quant."""
     head_dim = int(config['head_dim'])
     p_arch = arch.get('p', {})
+    S = min(max(int(sink), 0), int(n_token))
+    n_q = int(n_token) - S
     cache_memory = 0
     for target in ['k', 'v']:
         kv_dim = int(config['linear_shape'][config[f'{target}_linear']][0])
@@ -222,11 +233,12 @@ def compute_cache_memory_single(arch, config, n_token):
             layer_mem = effective_kv_dim * bits / 8
             if bits < 16:
                 layer_mem += (effective_kv_dim / gs) * 4
-            cache_memory += layer_mem * n_token
+            cache_memory += layer_mem * n_q
+            cache_memory += (n_kv_heads * head_dim) * 16 / 8 * S   # sink: fp16 full-dim
     return cache_memory
 
 
-def compute_cache_memory_batch(kv_subnets, kvdim_subnets, config, n_token):
+def compute_cache_memory_batch(kv_subnets, kvdim_subnets, config, n_token, sink=0):
     """
     Vectorized KV cache memory for all (kv_arch, kvdim_arch) pairs.
 
@@ -235,6 +247,9 @@ def compute_cache_memory_batch(kv_subnets, kvdim_subnets, config, n_token):
                     Pass None to assume zero pruning (no kvdim_expr).
     config        : model config dict
     n_token       : number of KV-cache tokens
+    sink          : attention-sink window — the oldest `sink` tokens are fp16 at
+                    FULL head_dim (never quantized/pruned). The remaining
+                    (n_token - sink) follow the per-layer quant.
 
     Returns np.ndarray
         shape (N_kv, N_kvdim)  when kvdim_subnets is not None
@@ -249,6 +264,13 @@ def compute_cache_memory_batch(kv_subnets, kvdim_subnets, config, n_token):
     bits_v = np.array([[e[0] for e in sv['q']['v']] for sv in kv_subnets], dtype=float)
     gs_v   = np.array([[e[1] for e in sv['q']['v']] for sv in kv_subnets], dtype=float)
 
+    S = min(max(int(sink), 0), int(n_token))
+    n_q = int(n_token) - S                       # quantized token count
+    L = bits_k.shape[1]
+    # sink: oldest S tokens fp16 at full head_dim, summed over all L layers (k+v).
+    # Constant across archs (global sink) → added to every output entry.
+    sink_total = S * 2.0 * L * (n_kv_h['k'] * head_dim + n_kv_h['v'] * head_dim)
+
     if kvdim_subnets is not None:
         prune_k = np.array([sv['p']['k'] for sv in kvdim_subnets], dtype=float)  # (N_kvdim, L)
         prune_v = np.array([sv['p']['v'] for sv in kvdim_subnets], dtype=float)
@@ -257,24 +279,24 @@ def compute_cache_memory_batch(kv_subnets, kvdim_subnets, config, n_token):
         eff_v = n_kv_h['v'] * (head_dim - prune_v)
 
         # broadcast to (N_kv, N_kvdim, L)
-        k_mem   = bits_k[:, None, :] * eff_k[None, :, :] / 8.0 * n_token
+        k_mem   = bits_k[:, None, :] * eff_k[None, :, :] / 8.0 * n_q
         k_scale = np.where(bits_k[:, None, :] < 16,
-                           eff_k[None, :, :] / gs_k[:, None, :] * 4.0 * n_token, 0.0)
-        v_mem   = bits_v[:, None, :] * eff_v[None, :, :] / 8.0 * n_token
+                           eff_k[None, :, :] / gs_k[:, None, :] * 4.0 * n_q, 0.0)
+        v_mem   = bits_v[:, None, :] * eff_v[None, :, :] / 8.0 * n_q
         v_scale = np.where(bits_v[:, None, :] < 16,
-                           eff_v[None, :, :] / gs_v[:, None, :] * 4.0 * n_token, 0.0)
-        return (k_mem + k_scale + v_mem + v_scale).sum(axis=-1)  # (N_kv, N_kvdim)
+                           eff_v[None, :, :] / gs_v[:, None, :] * 4.0 * n_q, 0.0)
+        return (k_mem + k_scale + v_mem + v_scale).sum(axis=-1) + sink_total  # (N_kv, N_kvdim)
 
     else:
         # zero pruning → effective dim is constant per target
         eff_k = float(n_kv_h['k'] * head_dim)
         eff_v = float(n_kv_h['v'] * head_dim)
 
-        k_mem   = bits_k * eff_k / 8.0 * n_token                                    # (N_kv, L)
-        k_scale = np.where(bits_k < 16, eff_k / gs_k * 4.0 * n_token, 0.0)
-        v_mem   = bits_v * eff_v / 8.0 * n_token
-        v_scale = np.where(bits_v < 16, eff_v / gs_v * 4.0 * n_token, 0.0)
-        return (k_mem + k_scale + v_mem + v_scale).sum(axis=-1)  # (N_kv,)
+        k_mem   = bits_k * eff_k / 8.0 * n_q                                    # (N_kv, L)
+        k_scale = np.where(bits_k < 16, eff_k / gs_k * 4.0 * n_q, 0.0)
+        v_mem   = bits_v * eff_v / 8.0 * n_q
+        v_scale = np.where(bits_v < 16, eff_v / gs_v * 4.0 * n_q, 0.0)
+        return (k_mem + k_scale + v_mem + v_scale).sum(axis=-1) + sink_total  # (N_kv,)
 
 
 def compute_eff_kvbits_batch(kv_subnets, kvdim_subnets, config, target='kv'):
@@ -320,7 +342,7 @@ def compute_params(arch, config):
             
     return params / total_params
 
-def get_net_info(arch, config, group_size, n_token=0, residual_length=0):
+def get_net_info(arch, config, group_size, n_token=0, residual_length=0, attn_sink=0):
     # arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
     # Also accepts legacy format: {'w': {linear: [bits,...],...}, 'k': [...], 'v': [...]}
     if 'q' in arch:
@@ -347,7 +369,7 @@ def get_net_info(arch, config, group_size, n_token=0, residual_length=0):
     net_info['eff_kvbits'] = compute_bits(arch=arch, config=config, group_size=group_size, target='kv', include_pruning=True)  if 'k' in q_arch and 'v' in q_arch else 0
     net_info['eff_kbits']  = compute_bits(arch=arch, config=config, group_size=group_size, target='k',  include_pruning=True)  if 'k' in q_arch else 0
     net_info['eff_vbits']  = compute_bits(arch=arch, config=config, group_size=group_size, target='v',  include_pruning=True)  if 'v' in q_arch else 0
-    net_info['memory']     = compute_memory(arch=arch, config=config, group_size=group_size, n_token=n_token, residual_length=residual_length) if 'w' in q_arch and 'k' in q_arch and 'v' in q_arch else 0
+    net_info['memory']     = compute_memory(arch=arch, config=config, group_size=group_size, n_token=n_token, residual_length=residual_length, sink=attn_sink) if 'w' in q_arch and 'k' in q_arch and 'v' in q_arch else 0
     net_info['n_token'] = n_token
     return net_info
 
@@ -856,22 +878,26 @@ def _build_lazy_comp(args, expr_keys, esm, efm, config, group_size,
                                                       group_size))
             if 'eff_kv' in expr_keys:
                 kvv = np.array([compute_cache_memory_single(sv, config,
-                                                            args.n_token)
+                                                            args.n_token,
+                                                            sink=getattr(args, 'attn_sink', 0))
                                 for sv in esm['eff_kv']], dtype=np.float64)
                 kv = {'kind': '1d', 'axis': ax('eff_kv'), 'vals': kvv}
             elif 'kv' in expr_keys and 'kvdim' in expr_keys:
                 kvv = compute_cache_memory_batch(esm['kv'], esm['kvdim'],
-                                                 config, args.n_token)
+                                                 config, args.n_token,
+                                                 sink=getattr(args, 'attn_sink', 0))
                 kv = {'kind': '2d', 'axes': (ax('kv'), ax('kvdim')),
                       'vals': np.asarray(kvv, np.float64)}
             elif 'kv' in expr_keys:
                 kvv = compute_cache_memory_batch(esm['kv'], None, config,
-                                                 args.n_token)
+                                                 args.n_token,
+                                                 sink=getattr(args, 'attn_sink', 0))
                 kv = {'kind': '1d', 'axis': ax('kv'),
                       'vals': np.asarray(kvv, np.float64)}
             elif 'kvdim' in expr_keys:
                 kvv = compute_cache_memory_batch([default_arch], esm['kvdim'],
-                                                 config, args.n_token)[0]
+                                                 config, args.n_token,
+                                                 sink=getattr(args, 'attn_sink', 0))[0]
                 kv = {'kind': '1d', 'axis': ax('kvdim'),
                       'vals': np.asarray(kvv, np.float64)}
             else:
@@ -1000,21 +1026,25 @@ def build_nd(args, ctx, expr_map):
                                  dtype=np.float64)
             if 'eff_kv' in expr_keys:
                 kv_cache = np.array([compute_cache_memory_single(sv, config,
-                                                                 args.n_token)
+                                                                 args.n_token,
+                                                                 sink=getattr(args, 'attn_sink', 0))
                                      for sv in _esm['eff_kv']])
                 mem_nd = mem_nd + _bcast_1d(kv_cache, expr_keys.index('eff_kv'))
             elif 'kv' in expr_keys and 'kvdim' in expr_keys:
                 kv_2d = compute_cache_memory_batch(_esm['kv'], _esm['kvdim'],
-                                                   config, args.n_token)
+                                                   config, args.n_token,
+                                                   sink=getattr(args, 'attn_sink', 0))
                 mem_nd = mem_nd + _bcast_2d(kv_2d, expr_keys.index('kv'),
                                             expr_keys.index('kvdim'))
             elif 'kv' in expr_keys:
                 kv_1d = compute_cache_memory_batch(_esm['kv'], None, config,
-                                                   args.n_token)
+                                                   args.n_token,
+                                                   sink=getattr(args, 'attn_sink', 0))
                 mem_nd = mem_nd + _bcast_1d(kv_1d, expr_keys.index('kv'))
             elif 'kvdim' in expr_keys:
                 kv_1d = compute_cache_memory_batch([default_arch], _esm['kvdim'],
-                                                   config, args.n_token)[0]
+                                                   config, args.n_token,
+                                                   sink=getattr(args, 'attn_sink', 0))[0]
                 mem_nd = mem_nd + _bcast_1d(kv_1d, expr_keys.index('kvdim'))
             comp_nd_list.append(mem_nd)
         else:

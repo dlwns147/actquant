@@ -61,6 +61,8 @@ K_GROUP_SIZE=("128" "128")
 V_GROUP_SIZE=("128" "128")
 
 RESIDUAL_LENGTH=128
+# Attention-sink (KVSink): keep first S KV tokens FP. 0=off. Match the eval config.
+ATTN_SINK=0
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
@@ -119,6 +121,7 @@ ARGS="--mode eval \
 --v_bits ${V_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
+--attn_sink ${ATTN_SINK} \
 --k_quant_scheme ${K_QUANT_SCHEME} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
 --n_token ${N_TOKEN} \

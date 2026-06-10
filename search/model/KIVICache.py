@@ -160,6 +160,10 @@ class KIVICacheConfig(CacheConfig):
         residual_length: Optional[int] = 128,
 
         packing: Optional[bool] = False,
+
+        # Attention-sink: keep the first `sink` tokens of the KV cache in FP
+        # (orthogonal to residual_length, which protects the LAST tokens).
+        sink: Optional[int] = 0,
     ):
         assert len(k_bits) > 0 and len(v_bits) > 0, "k_bits, v_bits must be provided"
 
@@ -176,6 +180,9 @@ class KIVICacheConfig(CacheConfig):
 
         # packing config
         self.packing = packing
+
+        # attention-sink window (first S tokens kept FP)
+        self.sink = int(sink) if sink else 0
 
         # ThinK options (optional)
         self.enable_think = False
@@ -223,6 +230,11 @@ class KIVIDynamicCache(DynamicCache):
         self.value_states_full_cache: List[torch.Tensor] = []
         self.value_scale_cache: List[torch.Tensor] = []
         self.value_mn_cache: List[torch.Tensor] = []
+        # Attention-sink (KVSink / KIVI-K2V2*): first S tokens kept in FP, peeled
+        # off the FRONT before quantization and attended separately at GEMV time
+        # (mirror of the back residual). K stored already km-centered (softmax-invariant).
+        self.key_states_sink_cache: List[Optional[torch.Tensor]] = []
+        self.value_states_sink_cache: List[Optional[torch.Tensor]] = []
         # ThinK: store last keep-mask per layer for generation path
         self.key_keep_mask_cache: List[torch.Tensor] = []
         self.value_keep_mask_cache: List[Optional[torch.Tensor]] = []
@@ -302,6 +314,8 @@ class KIVIDynamicCache(DynamicCache):
                 self.value_states_full_cache.append([])
                 self.value_scale_cache.append([])
                 self.value_mn_cache.append([])
+                self.key_states_sink_cache.append(None)
+                self.value_states_sink_cache.append(None)
                 self.key_keep_mask_cache.append([])
                 self.value_keep_mask_cache.append(None)
 
@@ -404,7 +418,39 @@ class KIVIDynamicCache(DynamicCache):
             self.key_cache[layer_idx] = self.key_cache[layer_idx][indices, ...]
             self.value_cache[layer_idx] = self.value_cache[layer_idx][indices, ...]
 
+    def _sink_len(self, layer_idx: int, quant_end: int) -> int:
+        """Attention-sink front window for the PACKED cache, rounded UP to a multiple
+        of `residual_length`. Peeling the FP front re-uses the existing quant/residual
+        split (which keys off `len % residual_length`), so the front must be a multiple
+        of residual_length to keep the BACK residual boundary correct; residual_length
+        is always a multiple of k_group_size, so the K GEMV slab stays group-aligned
+        too. Capped at quant_end. Returns 0 if sink is off. (S<residual_length still
+        protects one residual_length window — harmless over-protection, ~0 mem.)"""
+        S = int(getattr(self.kivi_config, 'sink', 0) or 0)
+        if S <= 0 or quant_end <= 0:
+            return 0
+        rl = self.kivi_config.residual_length
+        S = ((S + rl - 1) // rl) * rl
+        return min(S, quant_end)
+
     def _update_prefill(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int, cache_kwargs: Optional[Dict[str, Any]] = None):
+        # ── Attention-sink: peel the FP front BEFORE the quant/residual split. The
+        # back residual must stay the LAST `rem` tokens, so split on the ORIGINAL
+        # length and carve [0:sink_len | sink_len:T-rem | T-rem:T] for K (V uses the
+        # residual_length boundary). sink_len ≡ 0 mod k_group_size keeps the K quant
+        # slab divisible. K is already km-centered here (done in update()).
+        T = key_states.shape[-2]
+        k_quant_end = T - (T % self.kivi_config.residual_length) if T >= self.kivi_config.residual_length else 0
+        sink_len = self._sink_len(layer_idx, k_quant_end)
+        if sink_len > 0:
+            self.key_states_sink_cache.append(key_states[:, :, :sink_len, :].contiguous())
+            self.value_states_sink_cache.append(value_states[:, :, :sink_len, :].contiguous())
+            key_states = key_states[:, :, sink_len:, :]
+            value_states = value_states[:, :, sink_len:, :]
+        else:
+            self.key_states_sink_cache.append(None)
+            self.value_states_sink_cache.append(None)
+
         if key_states.shape[-2] % self.kivi_config.residual_length != 0:
             if key_states.shape[-2] < self.kivi_config.residual_length:
                 key_states_quant = None
@@ -415,6 +461,10 @@ class KIVIDynamicCache(DynamicCache):
         else:
             key_states_quant = key_states
             key_states_full = None
+
+        # sink may have consumed the entire quantizable region (sink_len == quant_end)
+        if key_states_quant is not None and key_states_quant.shape[-2] == 0:
+            key_states_quant = None
 
         # quantize key states
         key_keep_mask = None
@@ -653,6 +703,14 @@ class KIVIDynamicCache(DynamicCache):
         else:
             val_for_attn = new_val_full  # only residual, no quantized part yet
 
+        # Attention-sink: prepend the FP front so standard (stride) attention sees
+        # the full sequence [sink | quant | residual]. (K_sink is km-centered.)
+        key_sink = self.key_states_sink_cache[layer_idx] if layer_idx < len(self.key_states_sink_cache) else None
+        value_sink = self.value_states_sink_cache[layer_idx] if layer_idx < len(self.value_states_sink_cache) else None
+        if isinstance(key_sink, torch.Tensor):
+            key_for_attn = torch.cat([key_sink, key_for_attn], dim=2) if key_for_attn is not None else key_sink
+            val_for_attn = torch.cat([value_sink, val_for_attn], dim=2) if val_for_attn is not None else value_sink
+
         return key_for_attn, val_for_attn
 
     def lazy_update(self, layer_idx: int):
@@ -870,6 +928,53 @@ class KIVIFakeCache(DynamicCache):
         # this part of code otherwise fails when used to verify attn_weight shape in some models
         return self._seen_tokens if layer_idx == 0 else self._seen_tokens - 1
 
+    def _sink_n(self, layer_idx: int, kind: str, chunk_len: int) -> int:
+        """Attention-sink: how many tokens at the FRONT of this about-to-be-quantized
+        chunk are global sink positions (< S) that have NOT been committed to the
+        quant cache yet. The quant cache for a layer grows monotonically from global
+        position 0, so `committed` = current quant length; a chunk occupies global
+        positions [committed : committed+chunk_len]. Position-aware so prefill, stride,
+        and lazy_update all protect ONLY the true first-S tokens (never mid-sequence)."""
+        S = int(getattr(self.kivi_config, 'sink', 0) or 0)
+        if S <= 0:
+            return 0
+        cache = self.key_states_quant_trans_cache if kind == 'k' else self.value_states_quant_cache
+        committed = 0
+        if layer_idx < len(cache) and isinstance(cache[layer_idx], torch.Tensor):
+            committed = cache[layer_idx].shape[2]
+        return max(0, min(S - committed, chunk_len))
+
+    @staticmethod
+    def _restore_sink(quantized: torch.Tensor, fp: torch.Tensor, n: int) -> torch.Tensor:
+        """Overwrite the first `n` tokens of a (B, n_kv, T, D) fake-quant slab with FP.
+        Used for the V (token-scheme) path: V groups along head_dim independently per
+        token, so overwriting == excluding the sink from its group (no cross-token
+        contamination) — identical result, and works for any `n` (no T-alignment)."""
+        if n <= 0:
+            return quantized
+        quantized = quantized.clone()
+        quantized[:, :, :n, :] = fp[:, :, :n, :]
+        return quantized
+
+    def _fake_quant_k_excl_sink(self, key_fp: torch.Tensor, layer_idx: int, n: int) -> torch.Tensor:
+        """K (channel scheme) groups along the TOKEN axis, so a sink token shares a
+        group with its neighbours and inflates that group's min/max. TRUE KVSink
+        behaviour = EXCLUDE sinks from the groups: quantize only [n':] and keep the
+        front FP, where n' = n rounded UP to k_group_size (group-axis alignment).
+        Returns the assembled (B,n_kv,T,D) slab [FP front | quantized rest]."""
+        gs = self.kivi_config.k_group_size[layer_idx]
+        bits = self.kivi_config.k_bits[layer_idx]
+        scheme = self.kivi_config.k_quant_scheme
+        T = key_fp.shape[2]
+        if n > 0:
+            n = min(((n + gs - 1) // gs) * gs, T)
+        if n <= 0:
+            return fake_quant(key_fp, gs, bits, scheme)
+        if n >= T:
+            return key_fp                                   # whole slab is sink → all FP
+        q = fake_quant(key_fp[:, :, n:, :].contiguous(), gs, bits, scheme)
+        return torch.cat([key_fp[:, :, :n, :], q], dim=2)
+
     def _update_prefill(
         self,
         key_states: torch.Tensor,
@@ -898,7 +1003,8 @@ class KIVIFakeCache(DynamicCache):
             # ThinK: apply keep_mask before and after fake_quant so stored cache has exact zeros in pruned dims (decode matches ThinK_kivi)
             if key_keep_mask is not None and isinstance(key_keep_mask, torch.Tensor):
                 key_states_quant = key_states_quant * key_keep_mask.unsqueeze(2).to(key_states_quant.dtype)
-            key_states_quant = fake_quant(key_states_quant, self.kivi_config.k_group_size[layer_idx], self.kivi_config.k_bits[layer_idx], self.kivi_config.k_quant_scheme)
+            sink_n = self._sink_n(layer_idx, 'k', key_states_quant.shape[2])
+            key_states_quant = self._fake_quant_k_excl_sink(key_states_quant, layer_idx, sink_n)
             if key_keep_mask is not None and isinstance(key_keep_mask, torch.Tensor):
                 key_states_quant = key_states_quant * key_keep_mask.unsqueeze(2).to(key_states_quant.dtype)
 
@@ -911,7 +1017,10 @@ class KIVIFakeCache(DynamicCache):
             # ThinK Appendix D: apply V keep_mask before and after fake_quant (zero-fill pruned dims)
             if value_keep_mask is not None and isinstance(value_keep_mask, torch.Tensor):
                 value_states_quant = value_states_quant * value_keep_mask.unsqueeze(2).to(value_states_quant.dtype)
+            value_fp = value_states_quant
+            sink_n_v = self._sink_n(layer_idx, 'v', value_fp.shape[2])
             value_states_quant = fake_quant(value_states_quant, self.kivi_config.v_group_size[layer_idx], self.kivi_config.v_bits[layer_idx], self.kivi_config.v_quant_scheme)
+            value_states_quant = self._restore_sink(value_states_quant, value_fp, sink_n_v)
             if value_keep_mask is not None and isinstance(value_keep_mask, torch.Tensor):
                 value_states_quant = value_states_quant * value_keep_mask.unsqueeze(2).to(value_states_quant.dtype)
 
@@ -975,9 +1084,8 @@ class KIVIFakeCache(DynamicCache):
             key_to_quant_m = key_to_quant
             if keep_mask is not None and isinstance(keep_mask, torch.Tensor):
                 key_to_quant_m = key_to_quant * keep_mask.unsqueeze(2).to(key_to_quant.dtype)
-            key_quant_new = fake_quant(
-                key_to_quant_m, cfg.k_group_size[layer_idx], cfg.k_bits[layer_idx], cfg.k_quant_scheme
-            )
+            sink_n = self._sink_n(layer_idx, 'k', key_to_quant_m.shape[2])
+            key_quant_new = self._fake_quant_k_excl_sink(key_to_quant_m, layer_idx, sink_n)
             if keep_mask is not None and isinstance(keep_mask, torch.Tensor):
                 key_quant_new = key_quant_new * keep_mask.unsqueeze(2).to(key_quant_new.dtype)
             if self.key_states_quant_trans_cache[layer_idx] is not None:
@@ -1012,9 +1120,11 @@ class KIVIFakeCache(DynamicCache):
             val_to_quant_m = val_to_quant
             if getattr(cfg, 'enable_think', False) and value_keep_mask is not None and isinstance(value_keep_mask, torch.Tensor):
                 val_to_quant_m = val_to_quant * value_keep_mask.unsqueeze(2).to(val_to_quant.dtype)
+            sink_n_v = self._sink_n(layer_idx, 'v', val_to_quant_m.shape[2])
             val_quant_new = fake_quant(
                 val_to_quant_m, cfg.v_group_size[layer_idx], cfg.v_bits[layer_idx], cfg.v_quant_scheme
             )
+            val_quant_new = self._restore_sink(val_quant_new, val_to_quant_m, sink_n_v)
             if getattr(cfg, 'enable_think', False) and value_keep_mask is not None and isinstance(value_keep_mask, torch.Tensor):
                 val_quant_new = val_quant_new * value_keep_mask.unsqueeze(2).to(val_quant_new.dtype)
             if self.value_states_quant_cache[layer_idx] is not None:
@@ -1057,7 +1167,8 @@ class KIVIFakeCache(DynamicCache):
             if keep_mask is not None and isinstance(keep_mask, torch.Tensor):
                 # keep shape (B, n_kv, seqlen, D); zero pruned dims to match prefill masked keys
                 key_to_pack = key_to_pack * keep_mask.unsqueeze(2).to(key_to_pack.dtype)
-            key_states_quant_trans_new = fake_quant(key_to_pack, self.kivi_config.k_group_size[layer_idx], self.kivi_config.k_bits[layer_idx], self.kivi_config.k_quant_scheme)
+            sink_n = self._sink_n(layer_idx, 'k', key_to_pack.shape[2])
+            key_states_quant_trans_new = self._fake_quant_k_excl_sink(key_to_pack, layer_idx, sink_n)
 
             self.key_states_full_cache[layer_idx] = None
             if self.key_states_quant_trans_cache[layer_idx] is not None:
@@ -1073,10 +1184,12 @@ class KIVIFakeCache(DynamicCache):
             value_keep_mask = self.value_keep_mask_cache[layer_idx] if layer_idx < len(self.value_keep_mask_cache) else None
             if value_keep_mask is not None and isinstance(value_keep_mask, torch.Tensor):
                 val_slice = val_slice * value_keep_mask.unsqueeze(2).to(val_slice.dtype)
+            sink_n_v = self._sink_n(layer_idx, 'v', val_slice.shape[2])
             value_states_quant_new = fake_quant(val_slice,
                                                 self.kivi_config.v_group_size[layer_idx],
                                                 self.kivi_config.v_bits[layer_idx],
                                                 self.kivi_config.v_quant_scheme)
+            value_states_quant_new = self._restore_sink(value_states_quant_new, val_slice, sink_n_v)
             if value_keep_mask is not None and isinstance(value_keep_mask, torch.Tensor):
                 value_states_quant_new = value_states_quant_new * value_keep_mask.unsqueeze(2).to(value_states_quant_new.dtype)
             self.value_states_full_cache[layer_idx] = self.value_states_full_cache[layer_idx][:, :, 1:, :].contiguous()

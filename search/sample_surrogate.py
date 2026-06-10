@@ -160,6 +160,7 @@ def main(args):
         datasets=args.datasets, device_map=ctx.device_map, dtype=ctx.dtype,
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
         group_size=ctx.group_size, residual_length=args.residual_length,
+        attn_sink=args.attn_sink,
         k_quant_scheme=args.k_quant_scheme, v_quant_scheme=args.v_quant_scheme,
         loss_func=args.loss_func, last_tokens=args.last_tokens,
         use_key_token=args.use_key_token, trunc_len=args.trunc_len,
@@ -233,6 +234,8 @@ def build_parser():
     p.add_argument('--k_group_size', type=int, default=128)
     p.add_argument('--v_group_size', type=int, default=128)
     p.add_argument('--residual_length', type=int, default=128)
+    p.add_argument('--attn_sink', type=int, default=0,
+                   help='Keep first S KV tokens in FP (KVSink). 0=off. Match the search-time value.')
     p.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'])
     p.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'])
     p.add_argument('--outlier_path', type=str, default='')

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Usage: bash scripts/surrogate/sample.sh <SAVE> <METHOD> [<ROUND> <BATCH>]
 #   SAVE     output dir (archs.csv / sample_meta.json / result_*.json land here)
-#   METHOD   quantile | random | ga | al_ei | validation
+#   METHOD   quantile | random | ga | validation
+#            | al_ei (back-compat) | al  (uses $ACQ from _config.sh)
+#            | al_<acq>  where acq ∈ ei ucb alm imse maximin qbc rank
 #   ROUND    (default 0) round_id stored on the new rows
-#   BATCH    (default $N_EXTRAS for random/ga, $AL_BATCH for al_ei,
+#   BATCH    (default $N_EXTRAS for random/ga, $AL_BATCH for al/al_*,
 #            $N_VAL for validation; ignored for quantile)
 #
 # CPU-only (no GPU acquired). Safe to run on the login node.
@@ -42,6 +44,12 @@ case "${METHOD}" in
         BATCH=${BATCH_ARG:-${AL_BATCH}}
         # al_ei needs the calibration y-column to refit on completed results
         ARGS+=" --method al_ei --batch ${BATCH} --datasets ${DATASETS}"
+        ;;
+    al|al_*)
+        # al → use $ACQ from _config.sh; al_<acq> → that acq explicitly.
+        if [ "${METHOD}" = "al" ]; then ACQ_NAME=${ACQ}; else ACQ_NAME=${METHOD#al_}; fi
+        BATCH=${BATCH_ARG:-${AL_BATCH}}
+        ARGS+=" --method al --acq ${ACQ_NAME} --batch ${BATCH} --datasets ${DATASETS}"
         ;;
     validation)
         NV=${BATCH_ARG:-${N_VAL}}

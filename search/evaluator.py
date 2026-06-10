@@ -36,6 +36,7 @@ class LlamaEvaluator:
                  bits={},
                  group_size={},
                  residual_length=128,
+                 attn_sink=0,
                  quant_kv_output=False,
                  k_quant_scheme='channel',
                  v_quant_scheme='token',
@@ -93,6 +94,10 @@ class LlamaEvaluator:
         self.key_token_list = (precomputed_key_token_list if precomputed_key_token_list is not None
                                else {dataset: None for dataset in self.train_loaders.keys()})
         self.outlier = dict()
+        # Raw outlier dict ({model.layers.i.linear: [col indices]}) as loaded from
+        # disk. self.outlier (below) is the HQQ-shaped {blk.linear: [idx, fp16ch]}
+        # variant; the QEFT path (quant/qeft.py) needs the RAW form instead.
+        self.outlier_raw = outlier
         self.last_tokens = last_tokens
 
         # Only spin up the FP teacher for work that is NOT already injected:
@@ -103,7 +108,11 @@ class LlamaEvaluator:
             # model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', device_map=device_map, low_cpu_mem_usage=True)
             model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
 
-            if outlier is not None:
+            # Only the HQQ path consumes the {blk.linear: [idx, fp16ch]} form and
+            # needs flat per-layer index lists. QEFT uses the RAW dict (self.outlier_raw)
+            # and may carry the multi-rank {n_out: [idx]} form, which would break the
+            # get_fp16_channel indexing below — so skip this transform for non-HQQ.
+            if outlier is not None and 'hqq' in method['w']:
                 for blk_idx in range(n_block):
                     for linear_group in config['linear']:
                         for linear in linear_group.split(','):
@@ -166,6 +175,7 @@ class LlamaEvaluator:
                                                 k_quant_scheme=k_quant_scheme,
                                                 v_quant_scheme=v_quant_scheme,
                                                 residual_length=residual_length,
+                                                sink=attn_sink,
                                                 packing=packing,
                                                 quant_kv_output=quant_kv_output,
                                                 k_pruning_dim=k_pruning_dim,
@@ -189,6 +199,7 @@ class LlamaEvaluator:
                                             k_quant_scheme=k_quant_scheme,
                                             v_quant_scheme=v_quant_scheme,
                                             residual_length=residual_length,
+                                            sink=attn_sink,
                                             packing=packing,
                                             quant_kv_output=quant_kv_output,
                                             k_pruning_dim=k_pruning_dim,
@@ -233,6 +244,7 @@ class LlamaEvaluator:
         self.k_quant_scheme = k_quant_scheme
         self.v_quant_scheme = v_quant_scheme
         self.residual_length = residual_length
+        self.attn_sink = attn_sink
         self.quant_kv_output = quant_kv_output
         self.packing = packing
         self.k_pruning_dim = k_pruning_dim
@@ -290,7 +302,7 @@ class LlamaEvaluator:
                                              dtype=self.dtype,
                                              config=self.config,
                                              do_owq='qeft' in self.method['w'],
-                                             owq_path=self.outlier)
+                                             owq_path=self.outlier_raw)
             self.model.eval()
             # Resolve self.dtype → real torch.dtype now that the model is up;
             # downstream KIVI cache + cuda_bmm dispatch reads model.dtype but
@@ -309,6 +321,7 @@ class LlamaEvaluator:
                                             k_quant_scheme=self.k_quant_scheme,
                                             v_quant_scheme=self.v_quant_scheme,
                                             residual_length=self.residual_length,
+                                            sink=self.attn_sink,
                                             packing=self.packing,
                                             quant_kv_output=self.quant_kv_output,
                                             k_pruning_dim=self.k_pruning_dim,
@@ -382,7 +395,7 @@ class LlamaEvaluator:
             
             metric_list[dataset] = result
         
-        complexity = get_net_info(arch, self.config, self.group_size, n_token=self.n_token)
+        complexity = get_net_info(arch, self.config, self.group_size, n_token=self.n_token, attn_sink=self.attn_sink)
         return metric_list, complexity
     
     def remove_linears(self, model, config):

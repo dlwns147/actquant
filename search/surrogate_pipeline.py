@@ -14,8 +14,21 @@ Modes
     ``--method quantile``   Initial warm-start anchors (run once, round 0).
     ``--method random``     Append ``--batch`` random extras.
     ``--method ga``         Append ``--batch`` coverage_nsga2 extras.
-    ``--method al_ei``      Append ``--batch`` active-learning EI extras.
-                             Refits the surrogate on completed ``result_*.json``.
+    ``--method al --acq A`` Append ``--batch`` active-learning extras using
+                             acquisition ``A`` (refits on completed
+                             ``result_*.json`` each round). ``--acq`` ∈
+                               ei    EVI (conformal σ) — lowest-JSD arch (obj B)
+                               ucb   LCB = μ − κσ            — obj B
+                               alm   max posterior σ          — obj A
+                               imse  ALC integrated-var drop  — obj A (GP only)
+                               maximin farthest-point (model-free) — obj A
+                               qbc   bootstrap-ensemble σ (tps-friendly) — obj A
+                               rank  ensemble rank-disagreement — obj A
+                             obj A = global surrogate ranking accuracy;
+                             obj B = find the best arch within the band.
+                             σ source: GP posterior std when --surrogate ard_gp,
+                             else bootstrap ensemble (so rbf/tps also work).
+    ``--method al_ei``      Back-compat alias of ``--method al --acq ei``.
     ``--validation``        (orthogonal) Build / extend
                              ``validation_archs.csv`` with uniform random
                              picks under ``--val_seed``. Used by all
@@ -65,13 +78,20 @@ from utils.select import (build_arch, draw_random, assemble_F,
                           coverage_subset_nsga2_extras)
 
 from correlation import _build_ctx
-from post_search import _make_surrogate
-from predictor.factory import all_surrogates as _all_surrogates
+from post_search import _make_surrogate, _resolve_surrogate_device
+from predictor.factory import all_surrogates as _all_surrogates, _strip_transform
 
 warnings.simplefilter("ignore")
 
 SURROGATES = _all_surrogates()
-METHODS = ['quantile', 'random', 'ga', 'al_ei']
+# Acquisitions selectable via --acq (all driven by --method al; al_ei kept as a
+# back-compat alias of --method al --acq ei). Objective tag: 'A' = global
+# surrogate-ranking accuracy (uncertainty / coverage / disagreement), 'B' =
+# find the lowest-JSD arch within the band (improvement-based).
+ACQS = ['ei', 'ucb', 'alm', 'imse', 'maximin', 'qbc', 'rank']
+ACQ_OBJECTIVE = {'ei': 'B', 'ucb': 'B', 'alm': 'A', 'imse': 'A',
+                 'maximin': 'A', 'qbc': 'A', 'rank': 'A'}
+METHODS = ['quantile', 'random', 'ga', 'al', 'al_ei']
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -264,6 +284,159 @@ def _ei_acquire(args, X_train, y_train, M_cand, K, *, eps=1e-6):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Uncertainty signals (shared by alm / ucb / qbc / rank)
+# ════════════════════════════════════════════════════════════════════════════
+def _gp_mu_std(args, X_tr, y_tr, M_cand):
+    """Fit a plain ARD-GP (matching --ard_kernel) and return its posterior
+    (mu, std) over M_cand. Used as the query-dependent σ for variance-based
+    acquisitions when the surrogate base is a GP."""
+    from predictor.ard_gp import ARDGP
+    m = ARDGP(kernel=args.ard_kernel, n_restarts=args.gp_n_restarts,
+              device=_resolve_surrogate_device(args.surrogate_device))
+    m.fit(np.asarray(X_tr, float), np.asarray(y_tr, float))
+    mu, std = m.predict(np.asarray(M_cand, float), return_std=True)
+    return np.asarray(mu, float).ravel(), np.asarray(std, float).ravel(), m
+
+
+def _bootstrap_preds(args, X_tr, y_tr, M_cand, B, seed=0):
+    """B bootstrap refits of the chosen surrogate → (B, n_cand) predictions.
+    Model-agnostic query-dependent uncertainty (the tps-native AL signal):
+    works for rbf/tps interpolants that have no posterior variance."""
+    X_tr = np.asarray(X_tr, float); y_tr = np.asarray(y_tr, float)
+    M_cand = np.asarray(M_cand, float)
+    rng = np.random.default_rng(seed)
+    n = len(y_tr)
+    bounds = np.vstack([X_tr, M_cand]) if len(M_cand) else X_tr
+    P = np.empty((B, len(M_cand)), dtype=float)
+    for b in range(B):
+        bi = rng.integers(0, n, size=n)
+        mdl = _make_surrogate(args, X_tr[bi], y_tr[bi], bounds)
+        P[b] = np.asarray(mdl.predict(M_cand)).reshape(-1)
+    return P
+
+
+def _mu_sigma(args, X_tr, y_tr, M_cand, *, force_bootstrap=False):
+    """(mu, sigma) over M_cand. GP posterior std when the base surrogate is
+    ard_gp (unless force_bootstrap), else bootstrap-ensemble mean/std."""
+    base = _strip_transform(args.surrogate)[1]
+    if base == 'ard_gp' and not force_bootstrap:
+        mu, sd, _ = _gp_mu_std(args, X_tr, y_tr, M_cand)
+        return mu, sd
+    P = _bootstrap_preds(args, X_tr, y_tr, M_cand, int(args.al_qbc_B))
+    return P.mean(0), P.std(0)
+
+
+def _maximin_pick(Xs_c, Xs_seed, K):
+    """Greedy farthest-point: pick K rows of Xs_c maximizing min-distance to
+    Xs_seed ∪ already-picked. Xs_* are standardized. Returns positions in Xs_c."""
+    if len(Xs_seed):
+        dmin = np.min(np.linalg.norm(Xs_c[:, None] - Xs_seed[None], axis=2), axis=1)
+    else:
+        dmin = np.full(len(Xs_c), np.inf)
+    sel = []
+    for _ in range(int(min(K, len(Xs_c)))):
+        j = int(np.argmax(dmin))
+        sel.append(j)
+        dmin = np.minimum(dmin, np.linalg.norm(Xs_c - Xs_c[j], axis=1))
+        dmin[j] = -1.0
+    return np.asarray(sel, dtype=np.int64)
+
+
+def _topk_diverse(scores, M_cand, K, enable, mult=4):
+    """Top-K by score; if `enable`, spread the batch by maximin among the
+    top mult·K scorers (high-score AND diverse — avoids a clumped batch that
+    a single sbatch array would waste on near-identical archs)."""
+    order = np.argsort(-np.asarray(scores), kind='stable')
+    K = int(min(K, len(order)))
+    if not enable or len(order) <= K:
+        return order[:K]
+    pool = order[:min(len(order), mult * K)]
+    Xp = np.asarray(M_cand, float)[pool]
+    mu_, sd_ = Xp.mean(0), Xp.std(0); sd_[sd_ < 1e-12] = 1.0
+    Xs = (Xp - mu_) / sd_
+    # seed maximin with the single highest scorer so it stays score-anchored.
+    sub = _maximin_pick(Xs, Xs[:1], K - 1)
+    return pool[np.concatenate([[0], sub])][:K]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Unified acquisition dispatch (all --acq choices)
+# ════════════════════════════════════════════════════════════════════════════
+def _acquire(args, X_train, y_train, M_cand, K, acq):
+    """Return (selected positions into M_cand, info dict) for the chosen
+    acquisition. Minimization objective (lower JSD = better)."""
+    K = int(min(K, len(M_cand)))
+    info = dict(acq=acq, objective=ACQ_OBJECTIVE[acq],
+                n_train=int(len(y_train)), n_cand=int(len(M_cand)))
+    diverse = bool(args.al_diverse)
+
+    if acq == 'ei':
+        sel, ei_info = _ei_acquire(args, X_train, y_train, M_cand, K)
+        info.update(ei_info)
+        return sel, info
+
+    if acq == 'ucb':
+        mu, sigma = _mu_sigma(args, X_train, y_train, M_cand)
+        lcb = mu - float(args.al_ucb_kappa) * sigma     # optimistic lower bound
+        sel = np.argsort(lcb, kind='stable')[:K]        # smallest LCB = best
+        info.update(kappa=float(args.al_ucb_kappa),
+                    lcb_min=float(lcb.min()), sigma_max=float(sigma.max()))
+        return np.asarray(sel, np.int64), info
+
+    if acq in ('alm', 'qbc'):
+        _, sigma = _mu_sigma(args, X_train, y_train, M_cand,
+                             force_bootstrap=(acq == 'qbc'))
+        sel = _topk_diverse(sigma, M_cand, K, diverse)
+        info.update(sigma_max=float(sigma.max()),
+                    signal='gp_std' if (acq == 'alm' and
+                            _strip_transform(args.surrogate)[1] == 'ard_gp')
+                            else 'bootstrap_std')
+        return np.asarray(sel, np.int64), info
+
+    if acq == 'rank':
+        P = _bootstrap_preds(args, X_train, y_train, M_cand, int(args.al_qbc_B))
+        ranks = P.argsort(1).argsort(1).astype(float)   # per-member ranks
+        score = ranks.std(0)                             # rank disagreement
+        sel = _topk_diverse(score, M_cand, K, diverse)
+        info.update(rank_std_max=float(score.max()), n_members=int(P.shape[0]))
+        return np.asarray(sel, np.int64), info
+
+    if acq == 'maximin':
+        X_all = np.vstack([np.asarray(X_train, float), np.asarray(M_cand, float)])
+        mu_, sd_ = X_all.mean(0), X_all.std(0); sd_[sd_ < 1e-12] = 1.0
+        Xs_tr = (np.asarray(X_train, float) - mu_) / sd_
+        Xs_c = (np.asarray(M_cand, float) - mu_) / sd_
+        sel = _maximin_pick(Xs_c, Xs_tr, K)
+        info.update(signal='model_free_distance')
+        return np.asarray(sel, np.int64), info
+
+    if acq == 'imse':
+        if _strip_transform(args.surrogate)[1] != 'ard_gp':
+            print(f"[al imse] surrogate '{args.surrogate}' has no posterior "
+                  f"cov; falling back to alm (bootstrap σ).")
+            return _acquire(args, X_train, y_train, M_cand, K, 'alm')
+        cap = int(args.al_pool_cap)
+        n = len(M_cand)
+        if n > cap:
+            rng = np.random.default_rng(int(args.seed))
+            idx = rng.choice(n, cap, replace=False)
+            print(f"[al imse] candidate/reference pool capped {n}→{cap} "
+                  f"(random; logged, not silent).")
+        else:
+            idx = np.arange(n)
+        _, _, gp = _gp_mu_std(args, X_train, y_train, M_cand[idx])
+        cov = gp.predict_cov(np.asarray(M_cand, float)[idx])
+        jit = 1e-12
+        # one-step ALC: adding c lowers every ref j's var by cov(c,j)^2/var(c).
+        delta = (cov ** 2).sum(1) / (np.diag(cov) + jit)
+        order = idx[np.argsort(-delta)[:K]]
+        info.update(pool_cap=cap, delta_max=float(delta.max()))
+        return np.asarray(order, np.int64), info
+
+    raise SystemExit(f"unknown --acq {acq}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # cmd_sample
 # ════════════════════════════════════════════════════════════════════════════
 def cmd_sample(args):
@@ -343,15 +516,19 @@ def cmd_sample(args):
         new_positions += I_extra
         new_sources += ['ga'] * len(I_extra)
 
-    elif args.method == 'al_ei':
+    elif args.method in ('al', 'al_ei'):
+        # al_ei is the back-compat alias of `--method al --acq ei`; otherwise
+        # the acquisition is whatever --acq selects.
+        acq = 'ei' if args.method == 'al_ei' else args.acq
+        src_tag = 'al_ei' if args.method == 'al_ei' else f'al_{acq}'
         completed = _load_completed_results(
             args.save or '.', existing_rows,
             dataset_idx=int(args.al_dataset_idx))
         if not completed:
             raise SystemExit(
-                "[al_ei] no completed result_*.json — the warm-start round "
-                "(method=quantile / random / ga) must finish evaluating "
-                "before AL round ≥ 1.")
+                f"[{src_tag}] no completed result_*.json — the warm-start "
+                "round (method=quantile / random / ga) must finish evaluating "
+                "before an AL round ≥ 1.")
         # Train (X, y) from completed rows only, X taken from per-axis
         # metric columns already stored in archs.csv.
         X_train, y_train = [], []
@@ -373,21 +550,31 @@ def cmd_sample(args):
         if len(existing_pos):
             mask[existing_pos] = False
         cand_pos = np.where(mask)[0]
+        # Pool-based AL: the full feasible combo space can be tens of millions,
+        # so scoring every candidate (esp. bootstrap qbc/rank) is intractable.
+        # Subsample the candidate set to --al_pool_cap (seeded per round; logged,
+        # not silent). Applies uniformly to every acq so the comparison is fair.
+        cap = int(args.al_pool_cap)
+        if cap > 0 and len(cand_pos) > cap:
+            rng_c = np.random.default_rng(int(args.seed) + 7919 * int(args.round))
+            cand_pos = np.sort(rng_c.choice(cand_pos, cap, replace=False))
+            print(f"[{src_tag}] candidate pool subsampled "
+                  f"{int(mask.sum())}→{cap} (random, seed-dependent).")
         M_cand = M_valid[cand_pos]
         if len(M_cand) < int(args.batch):
-            print(f"[al_ei] only {len(M_cand)} candidates left, "
+            print(f"[{src_tag}] only {len(M_cand)} candidates left, "
                   f"reducing batch from {args.batch}")
-        sel, info = _ei_acquire(args, X_train, y_train, M_cand,
-                                K=int(args.batch))
+        sel, info = _acquire(args, X_train, y_train, M_cand,
+                             K=int(args.batch), acq=acq)
         I_extra = [int(cand_pos[s]) for s in sel]
-        print(f"[al_ei] train={info['n_train']} cand={info['n_cand']} "
+        print(f"[{src_tag}] acq={acq} objective={info.get('objective')} "
+              f"train={info['n_train']} cand={info['n_cand']} "
               f"surrogate={args.surrogate}")
-        print(f"[al_ei] σ_conf={info['sigma_conf']:.5f}  "
-              f"B_ε={info['B_eps']:.5f}  y_min={info['y_min']:.5f}  "
-              f"μ_range=[{info['mu_min']:.5f},{info['mu_max']:.5f}]  "
-              f"max_EVI={info['evi_max']:.5f}")
+        print(f"[{src_tag}] info=" + ", ".join(
+            f"{k}={v}" for k, v in info.items()
+            if k not in ('acq', 'objective', 'n_train', 'n_cand')))
         new_positions += I_extra
-        new_sources += ['al_ei'] * len(I_extra)
+        new_sources += [src_tag] * len(I_extra)
     else:
         raise SystemExit(f"unknown --method {args.method}")
 
@@ -573,10 +760,12 @@ def cmd_aggregate(args):
     print(f"[aggregate] train: {len(train_data)}/{len(train_rows)} completed")
 
     sources_present = {r['source'] for _, r, _ in train_data}
+    # Each non-quantile source becomes its own method, always paired with the
+    # shared quantile warm-start. Discovers every al_<acq> source dynamically
+    # (al_ei, al_alm, al_imse, al_maximin, al_qbc, al_rank) plus random / ga.
     method_groups = {
-        'random': [s for s in ('quantile', 'random') if s in sources_present],
-        'ga':     [s for s in ('quantile', 'ga')     if s in sources_present],
-        'al_ei':  [s for s in ('quantile', 'al_ei')  if s in sources_present],
+        src: [s for s in ('quantile', src) if s in sources_present]
+        for src in sorted(sources_present) if src != 'quantile'
     }
 
     # ── results_<method>.csv (post_search.load_sample_csv layout) ──
@@ -664,39 +853,43 @@ def cmd_aggregate(args):
         print(f"  {method:<8}  n_tr={n_tr:<3}  R²={r2:+.4f}  "
               f"ρ={rho:+.4f}  τ={tau:+.4f}")
 
-    # ── learning_curve.csv (AL only, cumulative-by-round) ──
-    al_rs = [(i, r, res) for i, r, res in train_data
-             if r['source'] in ('quantile', 'al_ei')]
-    if not al_rs:
+    # ── learning_curve.csv (per non-quantile source, cumulative-by-round) ──
+    # Covers al_<acq> AND the random / ga baselines so every method has a curve.
+    al_sources = sorted(s for s in sources_present if s != 'quantile')
+    curve = []   # (source, round, n_train, r2, rho, tau)
+    for al_src in al_sources:
+        al_rs = [(i, r, res) for i, r, res in train_data
+                 if r['source'] in ('quantile', al_src)]
+        if not al_rs:
+            continue
+        for R in sorted({int(r['round']) for _, r, _ in al_rs}):
+            rs = [(i, r, res) for i, r, res in al_rs if int(r['round']) <= R]
+            if len(rs) < 5:
+                continue
+            X_tr = np.asarray([[float(r[f'metric_{k}']) for k in expr_keys]
+                               for _, r, _ in rs], dtype=float)
+            y_tr = np.asarray([res['measured_metric'][0] for _, _, res in rs],
+                              dtype=float)
+            try:
+                r2, rho, tau = _validation_metrics(args, X_tr, y_tr, X_val, y_val)
+            except Exception:                               # noqa: BLE001
+                continue
+            curve.append((al_src, R, len(rs), r2, rho, tau))
+    if not curve:
         return
-    rounds = sorted({int(r['round']) for _, r, _ in al_rs})
-    curve = []
-    for R in rounds:
-        rs = [(i, r, res) for i, r, res in al_rs
-              if int(r['round']) <= R]
-        if len(rs) < 5:
-            continue
-        X_tr = np.asarray([[float(r[f'metric_{k}']) for k in expr_keys]
-                           for _, r, _ in rs], dtype=float)
-        y_tr = np.asarray([res['measured_metric'][0] for _, _, res in rs],
-                          dtype=float)
-        try:
-            r2, rho, tau = _validation_metrics(args, X_tr, y_tr, X_val, y_val)
-        except Exception:                                   # noqa: BLE001
-            continue
-        curve.append((R, len(rs), r2, rho, tau))
 
     out_path = os.path.join(save, 'learning_curve.csv')
     with open(out_path, 'w', newline='') as f:
         w = csv.writer(f)
-        w.writerow(['round', 'n_train', 'n_val', 'R2', 'Spearman', 'Kendall'])
-        for R, n_tr, r2, rho, tau in curve:
-            w.writerow([R, n_tr, len(val_data),
+        w.writerow(['acq', 'round', 'n_train', 'n_val', 'R2', 'Spearman',
+                    'Kendall'])
+        for acq_src, R, n_tr, r2, rho, tau in curve:
+            w.writerow([acq_src, R, n_tr, len(val_data),
                         f"{r2:.6f}", f"{rho:.6f}", f"{tau:.6f}"])
     print(f"[aggregate] wrote {out_path}")
     print(f"[aggregate] AL learning curve (n_val={len(val_data)}):")
-    for R, n_tr, r2, rho, tau in curve:
-        print(f"  round {R}  n_tr={n_tr:<3}  R²={r2:+.4f}  "
+    for acq_src, R, n_tr, r2, rho, tau in curve:
+        print(f"  {acq_src:<10} round {R}  n_tr={n_tr:<3}  R²={r2:+.4f}  "
               f"ρ={rho:+.4f}  τ={tau:+.4f}")
 
 
@@ -713,7 +906,27 @@ def build_parser():
     p.add_argument('--method', choices=METHODS, default='quantile',
                    help='(sample) which method drives the new rows. '
                         '"quantile" writes warm-start anchors once (round 0); '
-                        '"random"/"ga"/"al_ei" append --batch extras.')
+                        '"random"/"ga"/"al"/"al_ei" append --batch extras. '
+                        '"al" uses --acq; "al_ei" == --method al --acq ei.')
+    p.add_argument('--acq', choices=ACQS, default='ei',
+                   help='(sample --method al) acquisition. Objective A (global '
+                        'surrogate ranking): alm/imse/maximin/qbc/rank. '
+                        'Objective B (lowest-JSD arch in band): ei/ucb. '
+                        'imse needs --surrogate ard_gp (else falls back to alm). '
+                        'maximin/qbc/rank are model-free / interpolant-friendly '
+                        '(work with --surrogate rbf tps).')
+    p.add_argument('--al_ucb_kappa', type=float, default=2.0,
+                   help='(acq ucb) LCB = mu - kappa*sigma exploration weight.')
+    p.add_argument('--al_qbc_B', type=int, default=20,
+                   help='(acq qbc/rank, and alm/ucb when surrogate is not a GP) '
+                        'bootstrap-ensemble size for the disagreement σ.')
+    p.add_argument('--al_pool_cap', type=int, default=3000,
+                   help='(acq imse) cap on the candidate/reference pool for the '
+                        'O(n^2) posterior-cov ALC step (random subsample, logged).')
+    p.add_argument('--al_diverse', action='store_true',
+                   help='(acq alm/qbc/rank) spread the batch by maximin among '
+                        'the top scorers so one sbatch array is not wasted on '
+                        'near-identical archs. EI/UCB keep pure top-K.')
     p.add_argument('--round', type=int, default=0,
                    help='(sample) round id stored on each new row. AL '
                         'increments by 1 each acquisition step.')
