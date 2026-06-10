@@ -370,6 +370,16 @@ def _acquire(args, X_train, y_train, M_cand, K, acq):
                 n_train=int(len(y_train)), n_cand=int(len(M_cand)))
     diverse = bool(args.al_diverse)
 
+    # Improvement-2: transform y for the σ/cov-fitting acquisitions so the
+    # heavy-tailed JSD extreme does not dominate (ei keeps raw y — its baseline
+    # B_ε is defined in y-space).
+    tr = getattr(args, 'al_transform', 'none')
+    if acq != 'ei' and tr != 'none':
+        y_train = np.asarray(y_train, float)
+        y_train = (np.sqrt(np.clip(y_train, 0, None)) if tr == 'sqrt'
+                   else np.log(np.clip(y_train, 1e-12, None)))
+        info['transform'] = tr
+
     if acq == 'ei':
         sel, ei_info = _ei_acquire(args, X_train, y_train, M_cand, K)
         info.update(ei_info)
@@ -927,6 +937,13 @@ def build_parser():
                    help='(acq alm/qbc/rank) spread the batch by maximin among '
                         'the top scorers so one sbatch array is not wasted on '
                         'near-identical archs. EI/UCB keep pure top-K.')
+    p.add_argument('--al_transform', choices=['none', 'sqrt', 'log'],
+                   default='none',
+                   help='target transform applied to y when fitting the '
+                        'acquisition surrogate (alm/imse/qbc/rank/ucb). sqrt '
+                        'stabilises heavy-tailed JSD so the σ/cov signal is not '
+                        'dominated by the high-JSD extreme (diagnosis: raw-Y '
+                        'GP chases the tail). Does not affect ei.')
     p.add_argument('--round', type=int, default=0,
                    help='(sample) round id stored on each new row. AL '
                         'increments by 1 each acquisition step.')
