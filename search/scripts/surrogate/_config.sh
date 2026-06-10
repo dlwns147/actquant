@@ -107,6 +107,11 @@ AL_UCB_KAPPA=2.0
 AL_QBC_B=20
 AL_POOL_CAP=8000
 AL_DIVERSE=True
+# Improvement knobs: AL_CAND front = Pareto-frontier-focused candidate pool (1);
+# AL_TRANSFORM sqrt = stabilise heavy-tailed JSD for the acquisition surrogate (2).
+# (ga_imse method = GA-coverage + front/sqrt IMSE-refine = improvements 1+2+3.)
+AL_CAND=front
+AL_TRANSFORM=sqrt
 
 # Per-method extras (random / ga / al_ei total = same).
 N_EXTRAS=31
@@ -205,6 +210,8 @@ build_sample_args() {
     A+=" --al_ucb_kappa ${AL_UCB_KAPPA}"
     A+=" --al_qbc_B ${AL_QBC_B}"
     A+=" --al_pool_cap ${AL_POOL_CAP}"
+    A+=" --al_cand ${AL_CAND}"
+    A+=" --al_transform ${AL_TRANSFORM}"
     [ "${AL_DIVERSE}" = "True" ] && A+=" --al_diverse"
     echo "${A}"
 }

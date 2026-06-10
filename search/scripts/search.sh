@@ -63,7 +63,7 @@ if [ ${COMP_OBJ} == 'wbits' ]; then
     #      (no per-arch re-quant). Needs the multi-rank outlier dict from
     #      extract_outidx.py (run scripts/extract_outidx.sh --target_rank 32 64 96 128).
     N_QEFT_COLUMN="0 32 64 96 128"   # per-layer outlier-column options
-    BASE_OUTLIER_BITS="2 3 4"        # which W bit-widths get the outlier ladder
+    BASE_OUTLIER_BITS="2 3"        # which W bit-widths get the outlier ladder
     N_OUTLIER=128                    # only to satisfy search.py's outlier-arg assert
     QEFT_RANK_TEXT=32_64_96_128      # non-zero ranks → outlier-dict dirname
 

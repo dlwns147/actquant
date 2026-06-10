@@ -4,7 +4,7 @@
 # keeping at most one job per GPU. Idempotent (surrogate_pipeline skips done idx).
 #
 # Usage: bash scripts/surrogate/eval_local.sh <SAVE> <FROM> <TO> [--validation] [GPUS]
-#   GPUS  space/comma list, default "0 1 2 3"
+#   GPUS  space/comma list, default $SURR_GPUS or "0 1 2 3"
 
 set -uo pipefail
 
@@ -24,6 +24,7 @@ NG=${#GPUS[@]}
 
 COMMON="$(build_model_args) $(build_eval_args)"
 [ "${VAL_FLAG}" = "--validation" ] && COMMON+=" --validation"
+RPREFIX=$([ "${VAL_FLAG}" = "--validation" ] && echo "validation_result" || echo "result")
 
 declare -A SLOT_PID=()    # gpu -> pid of running job (if any)
 
@@ -38,8 +39,14 @@ launch() {
     SLOT_PID[$G]=$!
 }
 
-t0=$(date +%s)
+t0=$(date +%s); nskip=0
 for IDX in $(seq "${FROM}" "${TO}"); do
+    # Fast resume: skip launching if a valid result already exists (avoids the
+    # ~20s accelerate-import-then-skip tax surrogate_pipeline would pay).
+    rf="${SAVE}/${RPREFIX}_${IDX}.json"
+    if [ -f "${rf}" ] && grep -q "measured_metric" "${rf}" 2>/dev/null; then
+        nskip=$(( nskip + 1 )); continue
+    fi
     placed=0
     while [ ${placed} -eq 0 ]; do
         for G in "${GPUS[@]}"; do
@@ -55,4 +62,5 @@ for IDX in $(seq "${FROM}" "${TO}"); do
     done
 done
 wait
-echo "[eval_local] ${SAVE} idx ${FROM}..${TO} done in $(( $(date +%s) - t0 ))s"
+echo "[eval_local] ${SAVE} idx ${FROM}..${TO} done in $(( $(date +%s) - t0 ))s "\
+"(${nskip} already-done skipped fast)"

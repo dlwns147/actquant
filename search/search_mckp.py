@@ -25,7 +25,7 @@ from copy import deepcopy
 import numpy as np
 from time import time as _t
 
-from search import SearchThink
+from search import Search
 from utils.func import get_net_info, set_seed, init_accelerator
 
 import warnings
@@ -121,13 +121,13 @@ def dp_mckp(d, cost, res):
 
 def main():
     args = build_parser().parse_args()
-    # capture before SearchThink (it pops keys out of the kwargs dict we pass)
+    # capture before Search (it pops keys out of the kwargs dict we pass)
     save_dir, front_points, dp_res = args.save, args.mckp_front_points, args.dp_res
     set_seed(args.seed)
     with open(args.config) as f:
         config = json.load(f)[args.model_name]
     accelerator, device_map = init_accelerator(args.gpu_id, config)
-    engine = SearchThink(config=config, accelerator=accelerator,
+    engine = Search(config=config, accelerator=accelerator,
                          device_map=device_map, kwargs=dict(vars(args)))
     axis = engine.comp_obj[0]
     accelerator.print(f"[search_mckp] axis={axis}  n_token={engine.n_token}")
@@ -214,7 +214,7 @@ def main():
 
 
 def build_parser():
-    # mirrors search.py's parser (subset needed by SearchThink) + MCKP knobs
+    # mirrors search.py's parser (subset needed by Search) + MCKP knobs
     p = argparse.ArgumentParser()
     p.add_argument('--save', type=str, default='save/mckp')
     p.add_argument('--gpu_id', type=str, default='0')
@@ -232,7 +232,7 @@ def build_parser():
     p.add_argument('--v_group_size', type=int, nargs='+', action='append', default=[])
     p.add_argument('--residual_length', type=int, default=128)
     p.add_argument('--attn_sink', type=int, default=0,
-                   help='Keep first S KV tokens in FP (KVSink). 0=off. Read by SearchThink via vars(args).')
+                   help='Keep first S KV tokens in FP (KVSink). 0=off. Read by Search via vars(args).')
     p.add_argument('--quant_kv_output', action='store_true')
     p.add_argument('--k_quant_scheme', type=str, default='channel')
     p.add_argument('--v_quant_scheme', type=str, default='token')
@@ -243,7 +243,7 @@ def build_parser():
     p.add_argument('--v_pruning_dim', type=int, nargs='+', default=None)
     # QEFT outlier-column axis (folds into the 'wbits' rate via compute_bits).
     # When n_qeft_column has a >0 entry, each weight linear's option becomes a
-    # (w_bits, n_outlier) tuple; SearchThink reads these out of vars(args).
+    # (w_bits, n_outlier) tuple; Search reads these out of vars(args).
     p.add_argument('--outlier_path', type=str, default='')
     p.add_argument('--base_outlier_bits', type=int, nargs='+', default=[])
     p.add_argument('--n_outlier', type=int, default=0)
