@@ -45,6 +45,17 @@ case "${METHOD}" in
         # al_ei needs the calibration y-column to refit on completed results
         ARGS+=" --method al_ei --batch ${BATCH} --datasets ${DATASETS}"
         ;;
+    ga_imse)
+        # improvements 1+2+3: GA-coverage + front/sqrt IMSE-refine
+        BATCH=${BATCH_ARG:-${AL_BATCH}}
+        ARGS+=" --method ga_imse --batch ${BATCH} --datasets ${DATASETS}"
+        ;;
+    al_fimse)
+        # front+sqrt IMSE (improvements 1+2 on standalone imse; AL_CAND/AL_TRANSFORM
+        # from _config supply front/sqrt). Distinct dir from raw al_imse.
+        BATCH=${BATCH_ARG:-${AL_BATCH}}
+        ARGS+=" --method al --acq imse --batch ${BATCH} --datasets ${DATASETS}"
+        ;;
     al|al_*)
         # al → use $ACQ from _config.sh; al_<acq> → that acq explicitly.
         if [ "${METHOD}" = "al" ]; then ACQ_NAME=${ACQ}; else ACQ_NAME=${METHOD#al_}; fi

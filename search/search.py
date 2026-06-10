@@ -28,7 +28,7 @@ from lm_eval.tasks import TaskManager, get_task_dict
 import warnings
 warnings.simplefilter("ignore")
 
-class SearchThink:
+class Search:
     def __init__(self, config, accelerator, device_map, kwargs):
         self.args = deepcopy(kwargs)
         self.config = config
@@ -598,7 +598,7 @@ def main(args):
         config = json.load(f)[args.model_name]
     accelerator, device_map = init_accelerator(args.gpu_id, config)
     accelerator.print(args)
-    engine = SearchThink(config=config, accelerator=accelerator, device_map=device_map, kwargs=vars(args))
+    engine = Search(config=config, accelerator=accelerator, device_map=device_map, kwargs=vars(args))
     engine.search(accelerator)
     return
 

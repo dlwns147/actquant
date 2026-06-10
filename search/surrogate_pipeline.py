@@ -91,7 +91,7 @@ SURROGATES = _all_surrogates()
 ACQS = ['ei', 'ucb', 'alm', 'imse', 'maximin', 'qbc', 'rank']
 ACQ_OBJECTIVE = {'ei': 'B', 'ucb': 'B', 'alm': 'A', 'imse': 'A',
                  'maximin': 'A', 'qbc': 'A', 'rank': 'A'}
-METHODS = ['quantile', 'random', 'ga', 'al', 'al_ei']
+METHODS = ['quantile', 'random', 'ga', 'al', 'al_ei', 'ga_imse']
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -449,6 +449,55 @@ def _acquire(args, X_train, y_train, M_cand, K, acq):
 # ════════════════════════════════════════════════════════════════════════════
 # cmd_sample
 # ════════════════════════════════════════════════════════════════════════════
+def _front_pool(F, cand_pos, K_axes, cap, nbin=40):
+    """Improvement-1: Pareto-frontier-focused candidate pool. For each
+    complexity bin (Σ per-axis complexity), keep the lowest-combined-metric
+    (= front-ward / best-quality) candidates, spread across the complexity
+    axis → the deployment operating curve, NOT a random clump. Cheap
+    (per-bin argsort), no get_net_info."""
+    f0 = F[cand_pos, 0].astype(float)
+    comp = F[cand_pos][:, [2 + 2 * i for i in range(K_axes)]].sum(1).astype(float)
+    edges = np.quantile(comp, np.linspace(0, 1, nbin + 1)[1:-1]) if nbin > 1 else []
+    bins = np.digitize(comp, edges)
+    per = max(1, cap // nbin)
+    chosen = []
+    for b in range(nbin):
+        idx = np.where(bins == b)[0]
+        if len(idx):
+            chosen.extend(idx[np.argsort(f0[idx])[:per]].tolist())
+    chosen = np.asarray(chosen[:cap], dtype=np.int64)
+    return cand_pos[chosen]
+
+
+def _restrict_pool(args, F, cand_pos, K_axes, tag, n_full):
+    """Cap the AL candidate pool to --al_pool_cap, either random (default) or
+    --al_cand front (Pareto-frontier-focused)."""
+    cap = int(args.al_pool_cap)
+    if cap <= 0 or len(cand_pos) <= cap:
+        return cand_pos
+    if getattr(args, 'al_cand', 'random') == 'front':
+        out = _front_pool(F, cand_pos, K_axes, cap)
+        print(f"[{tag}] candidate pool → Pareto-front-focused "
+              f"{n_full}→{len(out)} (al_cand=front)")
+        return out
+    rng_c = np.random.default_rng(int(args.seed) + 7919 * int(args.round))
+    out = np.sort(rng_c.choice(cand_pos, cap, replace=False))
+    print(f"[{tag}] candidate pool subsampled {n_full}→{cap} (random)")
+    return out
+
+
+def _al_train_xy(existing_rows, completed, expr_keys):
+    """(X_train, y_train) from the completed-and-measured archs.csv rows."""
+    X, y = [], []
+    for r in existing_rows:
+        i = int(r['idx'])
+        if i not in completed:
+            continue
+        X.append([float(r[f'metric_{k}']) for k in expr_keys])
+        y.append(completed[i])
+    return np.asarray(X, float), np.asarray(y, float)
+
+
 def cmd_sample(args):
     # Validation mode reseeds for clean disjoint draws from train.
     if args.validation:
@@ -539,37 +588,17 @@ def cmd_sample(args):
                 f"[{src_tag}] no completed result_*.json — the warm-start "
                 "round (method=quantile / random / ga) must finish evaluating "
                 "before an AL round ≥ 1.")
-        # Train (X, y) from completed rows only, X taken from per-axis
-        # metric columns already stored in archs.csv.
-        X_train, y_train = [], []
-        used_pos = []
-        for r in existing_rows:
-            idx = int(r['idx'])
-            if idx not in completed:
-                continue
-            X_train.append([float(r[f'metric_{k}']) for k in expr_keys])
-            y_train.append(completed[idx])
-            t = tuple(json.loads(r['nd_idx_json']))
-            # not every row needs to be in current pool, but for the mask
-            # we use existing_pos derived above (also includes pending rows).
-            del t  # silence linter
-        X_train = np.asarray(X_train, dtype=float)
-        y_train = np.asarray(y_train, dtype=float)
+        # Train (X, y) from completed rows; X = per-axis metric cols in archs.csv.
+        X_train, y_train = _al_train_xy(existing_rows, completed, expr_keys)
 
         mask = np.ones(len(valid_nd_idx), dtype=bool)
         if len(existing_pos):
             mask[existing_pos] = False
         cand_pos = np.where(mask)[0]
-        # Pool-based AL: the full feasible combo space can be tens of millions,
-        # so scoring every candidate (esp. bootstrap qbc/rank) is intractable.
-        # Subsample the candidate set to --al_pool_cap (seeded per round; logged,
-        # not silent). Applies uniformly to every acq so the comparison is fair.
-        cap = int(args.al_pool_cap)
-        if cap > 0 and len(cand_pos) > cap:
-            rng_c = np.random.default_rng(int(args.seed) + 7919 * int(args.round))
-            cand_pos = np.sort(rng_c.choice(cand_pos, cap, replace=False))
-            print(f"[{src_tag}] candidate pool subsampled "
-                  f"{int(mask.sum())}→{cap} (random, seed-dependent).")
+        # Pool-based AL: full feasible space is tens of millions → cap to
+        # --al_pool_cap (random, or --al_cand front = Pareto-frontier-focused).
+        cand_pos = _restrict_pool(args, F, cand_pos, len(expr_keys),
+                                  src_tag, int(mask.sum()))
         M_cand = M_valid[cand_pos]
         if len(M_cand) < int(args.batch):
             print(f"[{src_tag}] only {len(M_cand)} candidates left, "
@@ -585,6 +614,44 @@ def cmd_sample(args):
             if k not in ('acq', 'objective', 'n_train', 'n_cand')))
         new_positions += I_extra
         new_sources += [src_tag] * len(I_extra)
+
+    elif args.method == 'ga_imse':
+        # Improvement-3: GA-coverage(front) seed + IMSE-refine, with the IMSE
+        # half on a Pareto-front candidate pool (improvement-1) and a sqrt
+        # transform (improvement-2). Beats pure GA by adding uncertainty
+        # refinement on top of front coverage.
+        src_tag = 'ga_imse'
+        k_cov = max(1, int(args.batch) // 2)
+        k_unc = int(args.batch) - k_cov
+        fit_mode = args.sampling_method.replace('coverage_nsga2_', '')
+        I_cov = [int(p) for p in coverage_subset_nsga2_extras(
+            valid_nd_idx, _efm, expr_keys, anchor_idx=existing_pos.tolist(),
+            K=k_cov, fitness=fit_mode, coord=args.coverage_coord,
+            per_axis_agg=args.coverage_per_axis_agg,
+            pareto_select=args.coverage_pareto_select,
+            seed=int(args.seed) + int(args.round), verbose=False)]
+        completed = _load_completed_results(
+            args.save or '.', existing_rows, dataset_idx=int(args.al_dataset_idx))
+        if not completed:
+            raise SystemExit("[ga_imse] no completed result_*.json — warm-start "
+                             "must be evaluated before round >= 1.")
+        X_train, y_train = _al_train_xy(existing_rows, completed, expr_keys)
+        mask = np.ones(len(valid_nd_idx), dtype=bool)
+        if len(existing_pos):
+            mask[existing_pos] = False
+        if I_cov:
+            mask[np.asarray(I_cov, dtype=np.int64)] = False   # don't re-pick cov
+        cand_pos = np.where(mask)[0]
+        cand_pos = _restrict_pool(args, F, cand_pos, len(expr_keys),
+                                  src_tag, int(mask.sum()))
+        M_cand = M_valid[cand_pos]
+        sel, info = _acquire(args, X_train, y_train, M_cand, K=k_unc, acq='imse')
+        I_unc = [int(cand_pos[s]) for s in sel]
+        print(f"[ga_imse] coverage={len(I_cov)} + imse_refine={len(I_unc)} "
+              f"(transform={getattr(args, 'al_transform', 'none')}, "
+              f"cand={getattr(args, 'al_cand', 'random')})")
+        new_positions += I_cov + I_unc
+        new_sources += ['ga_imse'] * (len(I_cov) + len(I_unc))
     else:
         raise SystemExit(f"unknown --method {args.method}")
 
@@ -937,6 +1004,12 @@ def build_parser():
                    help='(acq alm/qbc/rank) spread the batch by maximin among '
                         'the top scorers so one sbatch array is not wasted on '
                         'near-identical archs. EI/UCB keep pure top-K.')
+    p.add_argument('--al_cand', choices=['random', 'front'], default='random',
+                   help='AL candidate pool restriction (improvement-1). '
+                        'random = uniform subsample of the feasible space; '
+                        'front = Pareto-frontier-focused (lowest combined metric '
+                        'per complexity bin) — parity with GA so uncertainty '
+                        'refinement adds value on the deployment curve.')
     p.add_argument('--al_transform', choices=['none', 'sqrt', 'log'],
                    default='none',
                    help='target transform applied to y when fitting the '
