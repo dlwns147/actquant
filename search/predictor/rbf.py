@@ -37,8 +37,8 @@ _EPS = float(np.finfo(np.float64).eps)
 def _resolve_device(device):
     if isinstance(device, torch.device):
         return device
-    if device is None:
-        return torch.device('cpu')
+    if device is None or device == 'auto':
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dev = torch.device(device)
     if dev.type == 'cuda' and not torch.cuda.is_available():
         print("[RBF] CUDA requested but not available — falling back to CPU")
@@ -50,7 +50,7 @@ class RBF:
     """ Radial Basis Function """
 
     def __init__(self, kernel='cubic', tail='linear', lb=None, ub=None,
-                 eta=1e-6, device='cpu', predict_batch=None,
+                 eta=1e-6, device='auto', predict_batch=None,
                  predict_mem_budget=512 * 1024 ** 2):
         self.kernel = kernel
         self.tail = tail

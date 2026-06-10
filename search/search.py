@@ -418,7 +418,7 @@ class SearchThink:
             eliminate_duplicates=True)
         
         # initialize the candidate finding optimization problem
-        problem = AuxiliarySingleLevelProblemThink(self.search_space, predictor, self.config, self.comp_obj, self.comp_obj_max, self.comp_obj_min, self.group_size, self.n_token)
+        problem = AuxiliarySingleLevelProblemThink(self.search_space, predictor, self.config, self.comp_obj, self.comp_obj_max, self.comp_obj_min, self.group_size, self.n_token, self.attn_sink)
         
         # kick-off the search
         res = minimize(problem, method, termination=('n_gen', 20), save_history=True, verbose=True)
@@ -509,7 +509,7 @@ class SearchThink:
 class AuxiliarySingleLevelProblemThink(Problem):
     """ The optimization problem for finding the next N candidate architectures with pruning ratio """
 
-    def __init__(self, search_space, predictor, config, comp_obj, comp_obj_max, comp_obj_min, group_size, n_token):
+    def __init__(self, search_space, predictor, config, comp_obj, comp_obj_max, comp_obj_min, group_size, n_token, attn_sink=0):
         n_block, n_linear = search_space.n_block, search_space.n_linear
         n_comp_obj = len(search_space.comp_obj)
         super().__init__(n_var=n_block * (n_linear + 4), n_obj=n_comp_obj + 1, n_constr=2 * n_comp_obj, type_var=int)  # +4 for k, v, k_prune, v_prune
@@ -522,6 +522,7 @@ class AuxiliarySingleLevelProblemThink(Problem):
         self.config = config
         self.group_size = group_size
         self.n_token = n_token
+        self.attn_sink = attn_sink
         self.xl = np.zeros((n_linear + 4, n_block))
         self.xu = np.ones((n_linear + 4, n_block))
 

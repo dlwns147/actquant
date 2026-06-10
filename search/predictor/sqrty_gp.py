@@ -15,7 +15,7 @@ from predictor.ard_gp import ARDGP
 from predictor.target_transform import TargetTransformPredictor
 
 
-def SqrtYARDGP(kernel='matern32', n_restarts=10, device='cpu', max_iter=200,
+def SqrtYARDGP(kernel='matern32', n_restarts=10, device='auto', max_iter=200,
                with_noise=True, **_unused):
     """Construct ``sqrt(Y) ∘ ARDGP``. Returned object exposes the same
     ``fit/predict`` interface as the previous standalone class."""
