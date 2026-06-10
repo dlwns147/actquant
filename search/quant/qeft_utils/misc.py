@@ -82,6 +82,11 @@ def get_model_config(model_name):
             meta['post_layers'].append('model.model.decoder.final_layer_norm')
     elif 'llama' in model_name.lower() or 'vicuna' in model_name.lower() or 'StableBeluga' in model_name.lower():
         meta = metas['llama']
+    elif 'qwen' in model_name.lower():
+        # Qwen2/2.5 shares Llama's module layout (q/k/v/o_proj, up/gate/down_proj,
+        # input_layernorm/post_attention_layernorm); q/k/v bias is irrelevant to
+        # outlier-column extraction.
+        meta = metas['qwen2']
     elif 'gemma' in model_name.lower():
         meta = metas['gemma']
     elif 'phi' in model_name.lower():
