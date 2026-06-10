@@ -3,6 +3,13 @@ import torch
 import torch.nn as nn
 import torch
 import gc
+
+
+def _resolve_device(device):
+    """'auto'/None → cuda if visible else cpu; otherwise pass through."""
+    if device is None or device == 'auto':
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
+    return device
 # from utils import get_correlation
 # from torch.nn import DataParallel
 # import numpy as np
@@ -47,21 +54,25 @@ class Net(nn.Module):
 
 class MLP:
     """ Multi Layer Perceptron """
-    def __init__(self, device='cpu', **kwargs):
+    def __init__(self, device='auto', **kwargs):
+        device = _resolve_device(device)
         self.model = Net(**kwargs)
         self.model.to(device)
         self.name = 'mlp'
         self.device = device
 
     def fit(self, **kwargs):
+        if 'device' in kwargs:
+            kwargs['device'] = _resolve_device(kwargs['device'])
         self.model = train(self.model, **kwargs)
 
     def predict(self, test_data):
         return predict(self.model, test_data, device=self.device)
 
 
-def train(net, x, y, trn_split=0.8, pretrained=None, device='cpu', batch_size=128,
+def train(net, x, y, trn_split=0.8, pretrained=None, device='auto', batch_size=128,
           lr=8e-4, epochs=2000, verbose=False):
+    device = _resolve_device(device)
 
     n_samples = x.shape[0]
     target = torch.zeros(n_samples, 1)

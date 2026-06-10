@@ -61,6 +61,24 @@ PREFILL_PROMPT=True
 LAST_TOKENS=512
 METRIC=loss
 
+# ── QEFT outlier-column axis on the HQQ backend (COMP_OBJ=wbits only) ─────────
+# QEFT_OUTLIER=1 turns each weight linear's option into a (w_bits, n_outlier)
+# tuple: the HQQ bank at w_bits is loaded and n_outlier FP16 columns are
+# OVERWRITTEN on top (insert_fp16_channel_hqq). This is the CHEAP weight-swap
+# proxy for QEFT-direct quant (no per-arch GPTQ/AWQ requant), so the per-module
+# marginal sweep stays HQQ-fast. Outlier indices/values come from the multi-rank
+# dict {key:{n_out:[cols]}} from extract_outidx.py (its ranks must cover the
+# N_QEFT_COLUMN values). The wbits cost folds the FP16 columns in automatically.
+# NOTE: HQQ uniform 2-bit gs128 ~collapses, so QEFT-direct (w_method qeft) is
+# better in the aggressive low-bit corner; this HQQ proxy is for fast search.
+QEFT_OUTLIER=0
+N_QEFT_COLUMN="0 32 64 96 128"
+BASE_OUTLIER_BITS="2 3 4"
+OUTLIER_RANK=128   # extract_outidx.py target_rank max; must be >= max(N_QEFT_COLUMN)
+OUTLIER_PATH=/NAS/SJ/actquant/outlier/${MODEL_NAME}/w16_r32_64_96_128_${DATASET}/outlier.pth
+QEFT_TAG=""
+[ ${QEFT_OUTLIER} -eq 1 ] && QEFT_TAG="_qeftout${N_QEFT_COLUMN// /-}"
+
 # MCKP knobs
 # 0 = MEASURE the ENTIRE DP-MCKP Pareto frontier (no subsampling). The resulting
 # iter_mckp.stats is directly consumable by post_search.py as a per-axis archive,
@@ -70,7 +88,7 @@ MCKP_FRONT_POINTS=0
 # Abbreviated attention-sink tag (e.g. _sk8), only when on so sink=0 names stay comparable.
 SINK_TAG=""
 [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
-SAVE=save/search/mckp/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${METRIC}_w_${W_METHOD}_kv_${KV_METHOD}_w${W_BITS// /}kv${KV_BITS// /}bits_${RESIDUAL_LENGTH}res${SINK_TAG}_obj_${COMP_OBJ_MIN}_${COMP_OBJ_MAX}_${LOSS_FUNC}_${DATASET}_${N_SAMPLE}sample_${SEQLEN}seq_${STRIDE}stride_pp${LAST_TOKENS}
+SAVE=save/search/mckp/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${METRIC}_w_${W_METHOD}${QEFT_TAG}_kv_${KV_METHOD}_w${W_BITS// /}kv${KV_BITS// /}bits_${RESIDUAL_LENGTH}res${SINK_TAG}_obj_${COMP_OBJ_MIN}_${COMP_OBJ_MAX}_${LOSS_FUNC}_${DATASET}_${N_SAMPLE}sample_${SEQLEN}seq_${STRIDE}stride_pp${LAST_TOKENS}
 
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
@@ -109,6 +127,11 @@ for g in "${KV_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 
 if [ ${STRIDE} -gt 0 ]; then ARGS+=" --stride ${STRIDE} "; else ARGS+=" --quant_kv_output "; fi
 if [ ${PREFILL_PROMPT} == 'True' ]; then ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "; fi
+
+# HQQ-based QEFT outlier-column search axis (cheap insert-on-top proxy).
+if [ ${QEFT_OUTLIER} -eq 1 ]; then
+    ARGS+=" --n_qeft_column ${N_QEFT_COLUMN} --base_outlier_bits ${BASE_OUTLIER_BITS} --outlier_path ${OUTLIER_PATH} --n_outlier ${OUTLIER_RANK} "
+fi
 
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=1 --num_machines=1 \
     --main_process_port=${PORT_NUM} search_mckp.py ${ARGS}

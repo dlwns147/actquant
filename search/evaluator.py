@@ -113,12 +113,26 @@ class LlamaEvaluator:
             # and may carry the multi-rank {n_out: [idx]} form, which would break the
             # get_fp16_channel indexing below — so skip this transform for non-HQQ.
             if outlier is not None and 'hqq' in method['w']:
+                # Build the per-layer FP16 outlier payload(s) for the HQQ path. Each
+                # payload is [col_indices, fp16_cols] (consumed by hqq dequant:
+                # W_r[:, idx] = fp16_cols). Two source formats:
+                #   * multi-rank {key: {n_out: [idx]}}  → {n_out: [idx, fp16_cols]}
+                #     (searchable QEFT outlier-column axis; w arch = (bits, n_outlier))
+                #   * flat {key: [idx]}                 → [idx, fp16_cols] (legacy)
                 for blk_idx in range(n_block):
                     for linear_group in config['linear']:
                         for linear in linear_group.split(','):
                             key = f'{config["layers"]}.{blk_idx}.{linear}'
-                            if key in outlier:
-                                self.outlier[f'{blk_idx}.{linear}'] = [outlier[key], get_fp16_channel(getsubattr(getblock(model, config)[blk_idx], linear), outlier[key])]
+                            if key not in outlier:
+                                continue
+                            tlinear = getsubattr(getblock(model, config)[blk_idx], linear)
+                            entry = outlier[key]
+                            if isinstance(entry, dict):
+                                self.outlier[f'{blk_idx}.{linear}'] = {
+                                    int(n): [idx, get_fp16_channel(tlinear, idx)]
+                                    for n, idx in entry.items()}
+                            else:
+                                self.outlier[f'{blk_idx}.{linear}'] = [entry, get_fp16_channel(tlinear, entry)]
 
             if need_keytok:
                 key_token_path_list = {dataset: os.path.join(key_token_path, dataset) for dataset in self.train_loaders}
@@ -268,23 +282,33 @@ class LlamaEvaluator:
             n_block = len(next(iter(q_arch['w'].values())))
             for blk_idx in range(n_block):
                 for linear_group in self.config['linear']:
-                    bits = q_arch['w'][linear_group][blk_idx]
+                    entry = q_arch['w'][linear_group][blk_idx]
+                    # (bits, n_outlier) tuple (QEFT outlier-column axis) or scalar bits.
+                    # Outlier trigger: n_outlier>0 (tuple) or fractional bits (legacy).
+                    if isinstance(entry, (list, tuple)):
+                        bits, n_out = int(entry[0]), int(entry[1])
+                        want_outlier = n_out > 0
+                    else:
+                        bits, n_out = int(entry), 0
+                        want_outlier = not math.isclose(entry - int(entry), 0)
+
                     flag = False
                     for q_bits, q_model in zip(self.quant_model_bits, self.quant_models):
-                        if math.isclose(int(bits), q_bits) and q_bits > 0:
+                        if math.isclose(bits, q_bits) and q_bits > 0:
                             for linear in linear_group.split(','):
                                 setsubattr(getblock(self.model, self.config)[blk_idx], linear, getsubattr(getblock(q_model, self.config)[blk_idx], linear))
                             flag = True
-
-                    if not math.isclose(bits - int(bits), 0):
-                        for linear in linear_group.split(','):
-                            insert_fp16_channel_hqq(getsubattr(getblock(self.model, self.config)[blk_idx], linear), self.outlier[f'{blk_idx}.{linear}'])
-                    else:
-                        for linear in linear_group.split(','):
-                            remove_fp16_channel_hqq(getsubattr(getblock(self.model, self.config)[blk_idx], linear))
-
                     if not flag:
-                        raise NotImplementedError(f'{linear_group}: {bits} is not available')
+                        raise NotImplementedError(f'{linear_group}: {entry} is not available')
+
+                    # Insert FP16 outlier columns on top of the HQQ bank (or clear).
+                    for linear in linear_group.split(','):
+                        ln = getsubattr(getblock(self.model, self.config)[blk_idx], linear)
+                        if want_outlier:
+                            od = self.outlier[f'{blk_idx}.{linear}']
+                            insert_fp16_channel_hqq(ln, od[n_out] if isinstance(od, dict) else od)
+                        else:
+                            remove_fp16_channel_hqq(ln)
 
         elif 'awq' in self.method['w'] or 'gptq' in self.method['w'] or 'qeft' in self.method['w']:
             w_method = 'awq' if 'awq' in self.method['w'] else 'gptq' if 'gptq' in self.method['w'] else 'qeft'

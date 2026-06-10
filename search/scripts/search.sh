@@ -56,6 +56,17 @@ RESIDUAL_LENGTH=128
 ATTN_SINK=0
 
 if [ ${COMP_OBJ} == 'wbits' ]; then
+    # ---- QEFT outlier columns ON TOP OF the (fast) HQQ wbits search: per-layer
+    #      FP16 outlier columns (32-multiples, incl. 0=off) become a searchable
+    #      (w_bits, n_outlier) weight axis. w_method stays hqq — each arch just
+    #      swaps the pre-quantized HQQ bank + inserts the FP16 outlier columns
+    #      (no per-arch re-quant). Needs the multi-rank outlier dict from
+    #      extract_outidx.py (run scripts/extract_outidx.sh --target_rank 32 64 96 128).
+    N_QEFT_COLUMN="0 32 64 96 128"   # per-layer outlier-column options
+    BASE_OUTLIER_BITS="2 3 4"        # which W bit-widths get the outlier ladder
+    N_OUTLIER=128                    # only to satisfy search.py's outlier-arg assert
+    QEFT_RANK_TEXT=32_64_96_128      # non-zero ranks → outlier-dict dirname
+
     W_BITS="2 3 4"
     W_BITS_TEXT="234"
     W_GROUP_SIZE=128
@@ -285,7 +296,15 @@ if [ ${ATTN_SINK} -ne 0 ]; then
     SINK_TAG="_sk${ATTN_SINK}"
 fi
 
-SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_w_${W_METHOD_TEXT}_kv_${KV_METHOD}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}bits_w${W_GROUP_SIZE}kv${KV_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len${SINK_TAG}_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_kdim${K_PRUNING_DIM_TEXT}_vdim${V_PRUNING_DIM_TEXT}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${DATA_BATCH_SIZE}bs_${N_SAMPLE}sample_${SEQLEN}seq_${N_TOKEN}token_${PREDICTOR}_${STRIDE}stride${PP_TAG}
+# Abbreviated QEFT-outlier tag, appended ONLY when the outlier-column axis is on
+# (N_QEFT_COLUMN set, wbits search): the searchable ladder + eligible bit-widths.
+# e.g. _qc0-32-64-96-128_ob234.
+QEFT_TAG=""
+if [ -n "${N_QEFT_COLUMN}" ]; then
+    QEFT_TAG="_qc$(echo ${N_QEFT_COLUMN} | sed 's/ /-/g')_ob$(echo ${BASE_OUTLIER_BITS} | sed 's/ //g')"
+fi
+
+SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_w_${W_METHOD_TEXT}${QEFT_TAG}_kv_${KV_METHOD}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}bits_w${W_GROUP_SIZE}kv${KV_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len${SINK_TAG}_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_kdim${K_PRUNING_DIM_TEXT}_vdim${V_PRUNING_DIM_TEXT}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${DATA_BATCH_SIZE}bs_${N_SAMPLE}sample_${SEQLEN}seq_${N_TOKEN}token_${PREDICTOR}_${STRIDE}stride${PP_TAG}
 
 N_PROC=1
 
@@ -329,6 +348,17 @@ ARGS="--gpu_id ${DEVICES} \
 --min_seqlen ${MIN_SEQLEN} \
 --dataset ${DATASET} \
 --save_iter ${SAVE_ITER}"
+
+# QEFT outlier-column axis (wbits search): searchable per-layer FP16 outlier
+# counts + the multi-rank outlier dict from extract_outidx.py. The dataset/ranks
+# in the path must match how extract_outidx.sh was run. (w_method stays hqq.)
+if [ -n "${N_QEFT_COLUMN}" ]; then
+    OUTLIER_PATH=/NAS/SJ/actquant/outlier/${MODEL_NAME}/w16_r${QEFT_RANK_TEXT}_${DATASET}/outlier.pth
+    ARGS+=" --n_qeft_column ${N_QEFT_COLUMN} \
+    --base_outlier_bits ${BASE_OUTLIER_BITS} \
+    --outlier_path ${OUTLIER_PATH} \
+    --n_outlier ${N_OUTLIER} "
+fi
 
 # --sensitivity_result_path ${SENSITIVITY_RESULT_PATH} \
 if [ ${USE_KEY_TOKEN} == 'True' ]; then
