@@ -19,9 +19,9 @@ CONFIG=config/llama.json
 
 
 # COMP_OBJ=wbits
-COMP_OBJ=kvbits
+# COMP_OBJ=kvbits
 # COMP_OBJ=kvdim
-# COMP_OBJ=eff_kvbits
+COMP_OBJ=eff_kvbits
 # COMP_OBJ=memory
 
 # USE_KEY_TOKEN=True
@@ -47,6 +47,13 @@ V_QUANT_SCHEME=token
 
 RESIDUAL_LENGTH=128
 # RESIDUAL_LENGTH=0
+
+# Attention-sink: keep the first S KV tokens in FP (KVSink/KIVI-K2V2*). 0=off.
+# Near-free (~0.2% mem), monotone-beneficial; recommend 8 when enabling (the
+# first ~4 tokens carry the bulk). NOTE: it is NOT a searched axis (per-layer S is
+# flat) — a fixed global primitive like RESIDUAL_LENGTH. Kept 0 by default so
+# existing archives stay comparable; set to 8 for new sink-enabled runs.
+ATTN_SINK=0
 
 if [ ${COMP_OBJ} == 'wbits' ]; then
     W_BITS="2 3 4"
@@ -146,7 +153,8 @@ elif [ ${COMP_OBJ} == 'eff_kvbits' ]; then
     KV_GROUP_SIZE_TEXT=3264128x3
 
     K_PRUNING_DIM="0 16 32 48 64"
-    V_PRUNING_DIM="0"
+    V_PRUNING_DIM="0 16 32 48 64"
+    # V_PRUNING_DIM="0"
     K_PRUNING_DIM_TEXT=$(echo ${K_PRUNING_DIM} | sed 's/ /_/g')
     V_PRUNING_DIM_TEXT=$(echo ${V_PRUNING_DIM} | sed 's/ /_/g')
 
@@ -270,7 +278,14 @@ if [ ${PREFILL_PROMPT} == 'True' ]; then
     PP_TAG="_pp${LAST_TOKENS}"
 fi
 
-SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_w_${W_METHOD_TEXT}_kv_${KV_METHOD}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}bits_w${W_GROUP_SIZE}kv${KV_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_kdim${K_PRUNING_DIM_TEXT}_vdim${V_PRUNING_DIM_TEXT}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${DATA_BATCH_SIZE}bs_${N_SAMPLE}sample_${SEQLEN}seq_${N_TOKEN}token_${PREDICTOR}_${STRIDE}stride${PP_TAG}
+# Abbreviated attention-sink tag, appended ONLY when sink is on so sink=0 runs
+# keep byte-identical SAVE names (comparable with existing archives). e.g. _sk8.
+SINK_TAG=""
+if [ ${ATTN_SINK} -ne 0 ]; then
+    SINK_TAG="_sk${ATTN_SINK}"
+fi
+
+SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_w_${W_METHOD_TEXT}_kv_${KV_METHOD}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}bits_w${W_GROUP_SIZE}kv${KV_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len${SINK_TAG}_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_kdim${K_PRUNING_DIM_TEXT}_vdim${V_PRUNING_DIM_TEXT}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${DATA_BATCH_SIZE}bs_${N_SAMPLE}sample_${SEQLEN}seq_${N_TOKEN}token_${PREDICTOR}_${STRIDE}stride${PP_TAG}
 
 N_PROC=1
 
@@ -290,6 +305,7 @@ ARGS="--gpu_id ${DEVICES} \
 --comp_obj_max ${COMP_OBJ_MAX} \
 --n_token ${N_TOKEN} \
 --residual_length ${RESIDUAL_LENGTH} \
+--attn_sink ${ATTN_SINK} \
 --k_quant_scheme ${K_QUANT_SCHEME} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
 --k_pruning_dim ${K_PRUNING_DIM} \

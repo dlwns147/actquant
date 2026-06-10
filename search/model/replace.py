@@ -20,7 +20,8 @@ def replace_kv_cache(model,
                     packing=False,
                     quant_kv_output=False,
                     k_pruning_dim=0,
-                    v_pruning_dim=0):
+                    v_pruning_dim=0,
+                    sink=0):
     
     methods = method if isinstance(method, list) else [method]
     if 'hqq' in methods:
@@ -47,6 +48,7 @@ def replace_kv_cache(model,
             v_quant_scheme=v_quant_scheme,
             residual_length=residual_length,
             packing=packing,
+            sink=sink,
         )
         # ThinK options (stored in config for cache/attention path)
         model.config.kv_method = methods
@@ -118,6 +120,7 @@ def set_cache_config(model,
             v_quant_scheme=v_quant_scheme,
             residual_length=residual_length,
             packing=packing,
+            sink=sink,
         )
     else:
         raise NotImplementedError(f"Unsupported kv cache method: {method}")

@@ -689,6 +689,7 @@ def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
         datasets=datasets, device_map=ctx.device_map, dtype=ctx.dtype,
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
         group_size=ctx.group_size, residual_length=args.residual_length,
+        attn_sink=args.attn_sink,
         k_quant_scheme=args.k_quant_scheme, v_quant_scheme=args.v_quant_scheme,
         k_pruning_dim=kpd, v_pruning_dim=vpd,
         loss_func=loss_func, last_tokens=last_tokens,
@@ -1470,6 +1471,8 @@ def build_parser():
     p.add_argument('--v_group_size', type=int, nargs='+', action='append',
                    default=[])
     p.add_argument('--residual_length', type=int, default=128)
+    p.add_argument('--attn_sink', type=int, default=0,
+                   help='Keep first S KV tokens in FP (KVSink). 0=off. Match the search-time value.')
     p.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'])
     p.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'])
     # ThinK channel-pruning options (pruned-channel count; matches search.py

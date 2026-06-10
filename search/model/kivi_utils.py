@@ -201,14 +201,27 @@ def forward_for_kivi_gemv(
     else:
         att_qkquant = None
 
+    # Attention-sink: first S tokens kept FP at the FRONT (KVSink / KIVI-K2V2*).
+    # K_sink is km-centered like the rest (softmax-invariant), so q·K_sink^T is
+    # consistent with the quant/residual logits. Positions stay ordered
+    # [sink | quant | back-residual], so attn weights remain position-aligned.
+    key_states_sink = getattr(past_key_value, "key_states_sink_cache", [None])[module.layer_idx] \
+        if hasattr(past_key_value, "key_states_sink_cache") else None
+    value_states_sink = getattr(past_key_value, "value_states_sink_cache", [None])[module.layer_idx] \
+        if hasattr(past_key_value, "value_states_sink_cache") else None
+    sink_len = key_states_sink.shape[-2] if isinstance(key_states_sink, torch.Tensor) else 0
+
+    att_qksink = None
+    if sink_len > 0:
+        att_qksink = torch.matmul(
+            query_states, repeat_kv(key_states_sink, module.num_key_value_groups).transpose(2, 3))
+
     # calculate full query-key attention
     att_qkfull = torch.matmul(query_states, repeat_kv(key_states_full, module.num_key_value_groups).transpose(2, 3))
 
-    # concatenate quantized and full query-key attention
-    if att_qkquant is not None:
-        attn_weights = torch.cat([att_qkquant, att_qkfull], dim=-1) * scaling
-    else:
-        attn_weights = att_qkfull * scaling
+    # concatenate [sink | quantized | full] query-key attention (in position order)
+    parts = [p for p in (att_qksink, att_qkquant, att_qkfull) if p is not None]
+    attn_weights = (torch.cat(parts, dim=-1) if len(parts) > 1 else parts[0]) * scaling
 
     # add attention mask
     if attention_mask is not None and attention_mask.dim() == 4:
@@ -222,10 +235,17 @@ def forward_for_kivi_gemv(
 
     value_full_length = value_states_full.shape[-2]
     value_keep_mask = getattr(past_key_value, "value_keep_mask_cache", [None])[module.layer_idx] if hasattr(past_key_value, "value_keep_mask_cache") else None
+    # Attention-sink value contribution (FP, full head_dim): weights at the FRONT.
+    attn_output_sink = None
+    if sink_len > 0:
+        attn_output_sink = torch.matmul(
+            attn_weights[:, :, :, :sink_len], repeat_kv(value_states_sink, module.num_key_value_groups))
     if value_states_quant is None:
-        attn_output = torch.matmul(attn_weights, repeat_kv(value_states_full, module.num_key_value_groups))
+        # only [sink | full] present; the post-sink weights map to the full residual
+        attn_output = torch.matmul(attn_weights[:, :, :, sink_len:], repeat_kv(value_states_full, module.num_key_value_groups))
     else:
-        attn_output = cuda_bmm_fA_qB_outer(kivi_config.v_group_size[module.layer_idx], attn_weights[:, :, :, :-value_full_length], value_states_quant,
+        # quantized value weights are the middle slice [sink_len : -value_full_length]
+        attn_output = cuda_bmm_fA_qB_outer(kivi_config.v_group_size[module.layer_idx], attn_weights[:, :, :, sink_len:-value_full_length], value_states_quant,
                                         value_scale, value_mn, kivi_config.v_bits[module.layer_idx])
         # ThinK: zero-fill pruned V dims back to full head_dim before adding full-precision output
         if value_keep_mask is not None and isinstance(value_keep_mask, torch.Tensor):
@@ -235,6 +255,8 @@ def forward_for_kivi_gemv(
             attn_out_full[mask_h.unsqueeze(2).expand(-1, -1, t, -1)] = attn_output.reshape(-1)
             attn_output = attn_out_full
         attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], repeat_kv(value_states_full, module.num_key_value_groups))
+    if attn_output_sink is not None:
+        attn_output = attn_output + attn_output_sink
 
     attn_output = attn_output.transpose(1, 2).contiguous()
 

@@ -19,7 +19,7 @@ from pymoo.operators.crossover.binx import BinomialCrossover
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.operators.mutation.pm import PolynomialMutation
 
-from search_space.llama_think import LlamaThinKSearchSpace
+from search_space.llama import LlamaSearchSpace
 from predictor.factory import get_predictor
 from utils.func import get_net_info, init_accelerator, set_seed, get_correlation, process_dtype
 from utils.ga import MySampling, BinaryCrossover, MyMutation, IntPolynomialMutation, MyTwoPointCrossover, MyUniformCrossover, IntegerFromFloatMutation, IntMutation
@@ -58,6 +58,11 @@ class SearchThink:
         outlier_path = kwargs.pop('outlier_path' , '')
         base_outlier_bits = sorted(kwargs.pop('base_outlier_bits', []))
         n_outlier = kwargs.pop('n_outlier' , 0)
+        # QEFT searchable per-layer outlier-column counts (multiples of 32). When
+        # set (non-[0]), the W axis becomes (bits, n_outlier) tuples in the search
+        # space and QEFT keeps that many FP16 columns per layer (looked up from the
+        # multi-rank outlier dict produced by extract_outidx.py).
+        self.n_qeft_column = kwargs.pop('n_qeft_column', [0])
         
         assert (outlier_path and base_outlier_bits and n_outlier > 0) or (not outlier_path and not base_outlier_bits and n_outlier == 0), "must use outlier_path, outlier_bits and n_outlier together when using outlier channel"
         
@@ -87,6 +92,7 @@ class SearchThink:
         self.v_pruning_dim = kwargs.pop('v_pruning_dim', None)
 
         self.residual_length = kwargs.pop('residual_length', 128)
+        self.attn_sink = kwargs.pop('attn_sink', 0)
         self.verbosity = kwargs.pop('verbosity', 'FATAL')
         self.task_manager = TaskManager(self.verbosity) if self.metric not in ['ppl', 'loss'] else None
         self.task_dict = get_task_dict([self.metric], self.task_manager) if self.metric not in ['ppl', 'loss'] else None
@@ -158,6 +164,7 @@ class SearchThink:
             bits=bits,
             group_size=self.group_size,
             residual_length=self.residual_length,
+            attn_sink=self.attn_sink,
             quant_kv_output=kwargs.pop('quant_kv_output', True),
             k_quant_scheme=kwargs.pop('k_quant_scheme', 'channel'),
             v_quant_scheme=kwargs.pop('v_quant_scheme', 'token'),
@@ -176,7 +183,7 @@ class SearchThink:
             beta=self.beta,
             key_token_path=self.key_token_path,
         )
-        self.search_space = LlamaThinKSearchSpace(
+        self.search_space = LlamaSearchSpace(
             bits=self.bits,
             group_size=self.group_size,
             pass_module=self.pass_module,
@@ -189,6 +196,8 @@ class SearchThink:
             only_outlier_bits=kwargs.pop('only_outlier_bits', False),
             k_pruning_dim=self.k_pruning_dim,
             v_pruning_dim=self.v_pruning_dim,
+            n_qeft_column=self.n_qeft_column,
+            qeft_outlier_bits=base_outlier_bits if base_outlier_bits else None,
         )
         self.ga_pop_size = kwargs.pop('ga_pop_size', 40)
         self.subset_pop_size = kwargs.pop('subset_pop_size', 100)
@@ -470,9 +479,9 @@ class SearchThink:
                     for kp in ss.k_pruning_dim_option:
                         for vp in ss.v_pruning_dim_option:
                             arch = ss.sample(
-                                w=[[w_o] for _ in self.config['linear']],
+                                w=ss.boundary_w_per_linear(w_o),
                                 k=[k_o], v=[v_o], k_dim=[kp], v_dim=[vp])[0]
-                            info = get_net_info(arch, self.config, self.group_size, n_token=self.n_token)
+                            info = get_net_info(arch, self.config, self.group_size, n_token=self.n_token, attn_sink=self.attn_sink)
                             for obj in self.comp_obj:
                                 vals[obj].append(info[obj])
         self._obj_range = {obj: (float(min(v)), float(max(v))) for obj, v in vals.items()}
@@ -544,7 +553,7 @@ class AuxiliarySingleLevelProblemThink(Problem):
 
         for i, (_x, metric) in enumerate(zip(x, metrics)):
             arch = self.ss.decode(_x)
-            info = get_net_info(arch, self.config, self.group_size, n_token=self.n_token)
+            info = get_net_info(arch, self.config, self.group_size, n_token=self.n_token, attn_sink=self.attn_sink)
             f[i, 0] = metric
             for j in range(len(self.comp_obj)):
                 f[i, 1 + j] = info[self.comp_obj[j]]
@@ -641,8 +650,14 @@ if __name__ == '__main__':
     parser.add_argument('--v_group_size', type=int, nargs='+', action='append', default=[],
                         help='')
     
-    parser.add_argument('--residual_length', type=int, default=128, 
+    parser.add_argument('--residual_length', type=int, default=128,
                         help='')
+
+    parser.add_argument('--attn_sink', type=int, default=0,
+                        help='Attention-sink: keep the first S tokens of the KV cache in FP '
+                             '(KVSink/KIVI-K2V2*, excluded from quant groups). 0=off. Recommend 8. '
+                             'NOTE: packed cache rounds S up to a residual_length multiple; '
+                             'FakeCache rounds K up to k_group_size (V is exact).')
 
     parser.add_argument('--quant_kv_output', action='store_true', help='')
     parser.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'], 
@@ -713,8 +728,12 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--outlier_path', type=str, default='',
                         help='')
-    parser.add_argument('--n_outlier', type=int, default=0, 
+    parser.add_argument('--n_outlier', type=int, default=0,
                         help='')
+    parser.add_argument('--n_qeft_column', type=int, nargs='+', default=[0],
+                        help='QEFT searchable per-layer FP16 outlier-column counts '
+                             '(multiples of 32, e.g. 0 32 64 96 128). Each must be a '
+                             'rank present in the extract_outidx_multi outlier dict.')
     parser.add_argument('--only_outlier_bits', action='store_true', help='')
     parser.add_argument('--sensitivity_result_path', type=str, default='',
                         help='')

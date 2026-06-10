@@ -37,6 +37,9 @@ V_BITS_TEXT="24"
 V_GROUP_SIZE=("128" "128")
 
 RESIDUAL_LENGTH=128
+# Attention-sink (KVSink): keep first S KV tokens FP. 0=off. MUST match the
+# search-time --attn_sink so the final eval/benchmark mirrors what was searched.
+ATTN_SINK=0
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
@@ -128,8 +131,12 @@ TASKS="coqa truthfulqa gsm8k"
 LM_EVAL_BATCH_SIZE=1
 
 LONGBENCH_CONFIG=utils/longbench_config
-LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}
-MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}
+# Abbreviated attention-sink tag (e.g. _sk8), only when sink is on so sink=0
+# result-dir names stay comparable. MUST match the search-time ATTN_SINK.
+SINK_TAG=""
+[ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
+LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}${SINK_TAG}
+MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}${SINK_TAG}
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
 # RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
@@ -144,10 +151,10 @@ RULER_LENGTH=16384
 RULER_SAMPLE=5
 # RULER_SAMPLE=50
 RULER_BATCH_SIZE=1
-RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs_${SEED}seed
+RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}${SINK_TAG}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs_${SEED}seed
 
 
-SAVE=save/post_search/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${SURROGATE}
+SAVE=save/post_search/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${SURROGATE}${SINK_TAG}
 
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
@@ -161,6 +168,7 @@ ARGS="--gpu_id ${DEVICES} \
 --v_bits ${V_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
+--attn_sink ${ATTN_SINK} \
 --k_quant_scheme ${K_QUANT_SCHEME} \
 --v_quant_scheme ${V_QUANT_SCHEME} \
 --n_token ${N_TOKEN} \

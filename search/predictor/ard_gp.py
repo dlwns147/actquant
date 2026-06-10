@@ -201,7 +201,11 @@ class ARDGP:
         rows = int(self.predict_mem_budget // max(1, n * 8 * 4))
         return int(min(m, max(4096, rows)))
 
-    def predict(self, X):
+    def predict(self, X, return_std=False):
+        """Posterior mean (1-D numpy). With ``return_std=True`` also returns
+        the posterior standard deviation of the LATENT function (observation
+        noise NOT added), on the original (un-standardized) Y scale — used by
+        active-learning acquisitions (ALM / UCB)."""
         assert self._fitted, "ARDGP not fitted; call fit() first"
         Xq = np.atleast_2d(np.asarray(X, dtype=np.float64))
         dev = self.device
@@ -211,6 +215,7 @@ class ARDGP:
         step = self._chunk_rows(m, n)
 
         out = np.empty(m, dtype=np.float64)
+        std = np.empty(m, dtype=np.float64) if return_std else None
         with torch.no_grad():
             for s in range(0, m, step):
                 e = min(m, s + step)
@@ -220,4 +225,31 @@ class ARDGP:
                                                  hp.get('rq_alpha'))
                 mean = (Ks @ self._alpha_vec).reshape(-1)   # standardized
                 out[s:e] = mean.detach().cpu().numpy()
+                if return_std:
+                    # prior var = k(x*,x*) = constant (core diag == 1 for
+                    # rbf/matern/rq); posterior var = prior - ks^T K^-1 ks.
+                    v = torch.cholesky_solve(Ks.t(), self._L)     # (n, chunk)
+                    qf = (Ks * v.t()).sum(dim=1)                  # ks^T K^-1 ks
+                    pv = (hp['constant'] - qf).clamp_min(0.0)
+                    std[s:e] = pv.sqrt().detach().cpu().numpy()
+        if return_std:
+            return out * self._ystd + self._ymu, std * self._ystd
         return out * self._ystd + self._ymu
+
+    def predict_cov(self, X):
+        """Full posterior covariance over the query set X (un-standardized Y
+        scale), latent (no observation noise). O(m^2 + m·n); the caller must
+        keep m bounded (used by the IMSE/ALC acquisition on a capped pool)."""
+        assert self._fitted, "ARDGP not fitted; call fit() first"
+        Xq = np.atleast_2d(np.asarray(X, dtype=np.float64))
+        dev = self.device
+        hp = self._hp
+        with torch.no_grad():
+            Xt = torch.as_tensor(Xq, dtype=torch.float64, device=dev)
+            Kaa = hp['constant'] * self._core(Xt, Xt, hp['lengthscale'],
+                                              hp.get('rq_alpha'))
+            Ks = hp['constant'] * self._core(Xt, self._X, hp['lengthscale'],
+                                             hp.get('rq_alpha'))   # (m, n)
+            v = torch.cholesky_solve(Ks.t(), self._L)              # (n, m)
+            cov = Kaa - Ks @ v
+        return (cov.detach().cpu().numpy()) * (self._ystd ** 2)

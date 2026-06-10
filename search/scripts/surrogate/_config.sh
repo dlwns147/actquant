@@ -7,15 +7,17 @@
 # python so relative paths (config/, save/, …) resolve identically.
 
 # ── Model / config ─────────────────────────────────────────────────────────
-MODEL_PATH=/SSD/huggingface/meta-llama
-MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
-CONFIG=config/llama.json
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=Llama-3.1-8B-Instruct
+# CONFIG=config/llama.json
 
-# MODEL_PATH=/SSD/huggingface/Qwen
-# MODEL_NAME=Qwen2.5-7B-Instruct
-# DTYPE=float16
-# CONFIG=config/qwen2.json
+MODEL_PATH=/SSD/huggingface/Qwen
+MODEL_NAME=Qwen2.5-7B-Instruct
+CONFIG=config/qwen2.json
+# HQQ banks on disk are bfloat16 (no float16 build exists); QMODEL_PATHS embeds
+# ${DTYPE} in the dir name, so this MUST be bfloat16 for the hqq path to resolve.
+# Qwen2.5-7B-Instruct banks regenerated via tests/gen_hqq_banks.py (deterministic).
+DTYPE=bfloat16
 
 # ── Quantisation ───────────────────────────────────────────────────────────
 W_METHOD=hqq
@@ -66,9 +68,9 @@ BETA=-2
 KEY_TOKEN_PATH=
 
 # ── Per-axis search archives (must contain MODEL_NAME) ─────────────────────
-W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
-KV_EXPR=save/search/think/2605112033_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_100.stats
-KVDIM_EXPR=save/search/think/2605112036_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
+W_EXPR=save/search/think/2605112127_Qwen2.5-7B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
+KV_EXPR=save/search/think/2605112126_Qwen2.5-7B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
+KVDIM_EXPR=save/search/think/2605112128_Qwen2.5-7B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
 
 for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR; do
     VAR_VALUE="${!VAR_NAME}"
@@ -95,6 +97,16 @@ COVERAGE_PARETO_SELECT=knee
 SURROGATE=ard_gp
 ARD_KERNEL=matern32
 GP_N_RESTARTS=10
+
+# AL acquisition selector (used when METHOD=al, or the al_<acq> shorthand in
+# sample.sh). One of: ei ucb (objective B = lowest-JSD arch in band) |
+# alm imse maximin qbc rank (objective A = global surrogate-ranking accuracy).
+# imse needs SURROGATE=ard_gp; maximin/qbc/rank also work with rbf/tps.
+ACQ=imse
+AL_UCB_KAPPA=2.0
+AL_QBC_B=20
+AL_POOL_CAP=8000
+AL_DIVERSE=True
 
 # Per-method extras (random / ga / al_ei total = same).
 N_EXTRAS=31
@@ -190,5 +202,9 @@ build_sample_args() {
     A+=" --surrogate ${SURROGATE}"
     A+=" --ard_kernel ${ARD_KERNEL}"
     A+=" --gp_n_restarts ${GP_N_RESTARTS}"
+    A+=" --al_ucb_kappa ${AL_UCB_KAPPA}"
+    A+=" --al_qbc_B ${AL_QBC_B}"
+    A+=" --al_pool_cap ${AL_POOL_CAP}"
+    [ "${AL_DIVERSE}" = "True" ] && A+=" --al_diverse"
     echo "${A}"
 }

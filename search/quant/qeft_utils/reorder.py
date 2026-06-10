@@ -5,8 +5,11 @@ from .misc import parsing_layers, find_layers
 from tqdm import tqdm
     
 def sparse_to_dense_ids(sparse_ids, length):
+    # out_ids may arrive as the default float buffer (torch.zeros(1)) when a
+    # layer has no outliers (n_out=0); index tensors must be integer.
+    sparse_ids = sparse_ids.long()
     assert len(sparse_ids) < length
-    
+
     temp_mask = torch.full([length], True, device=sparse_ids.device)
     temp_mask[sparse_ids] = False
     dense_ids = torch.cat([torch.arange(length, device=sparse_ids.device)[temp_mask], sparse_ids])
