@@ -444,7 +444,7 @@ def init_accelerator(gpu_id, config):
 def load_hqq_model(model_id,
                    device_map,
                    use_cache=False,
-                   attn_implementation='flash_attention_2',
+                   attn_implementation='sdpa',
                    inference=False,
                    compute_dtype=None):
     """Load a pre-quantised HQQ model.
@@ -516,7 +516,7 @@ def get_hfmodel(model_name_or_path: str,
                 dtype='auto',
                 trust_remote_code=False,
                 use_cache=False,
-                attn_implementation='flash_attention_2',
+                attn_implementation='sdpa',
                 **kwargs):
     from transformers import AutoModelForCausalLM
 

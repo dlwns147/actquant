@@ -75,7 +75,7 @@ from utils.func import (build_expr_map, build_nd, evaluate_metric,
                         comp_key_order, get_net_info)
 from utils.select import (build_arch, draw_random, assemble_F,
                           select_valid_nd_idx, quantile_select, axis_of_map,
-                          coverage_subset_nsga2_extras)
+                          coverage_subset_nsga2_extras, maximin_extras)
 
 from correlation import _build_ctx
 from post_search import _make_surrogate, _resolve_surrogate_device
@@ -88,10 +88,117 @@ SURROGATES = _all_surrogates()
 # back-compat alias of --method al --acq ei). Objective tag: 'A' = global
 # surrogate-ranking accuracy (uncertainty / coverage / disagreement), 'B' =
 # find the lowest-JSD arch within the band (improvement-based).
-ACQS = ['ei', 'ucb', 'alm', 'imse', 'maximin', 'qbc', 'rank']
+ACQS = ['ei', 'ucb', 'alm', 'imse', 'maximin', 'qbc', 'rank', 'eigf', 'mepe']
 ACQ_OBJECTIVE = {'ei': 'B', 'ucb': 'B', 'alm': 'A', 'imse': 'A',
-                 'maximin': 'A', 'qbc': 'A', 'rank': 'A'}
-METHODS = ['quantile', 'random', 'ga', 'al', 'al_ei', 'ga_imse']
+                 'maximin': 'A', 'qbc': 'A', 'rank': 'A', 'eigf': 'A',
+                 'mepe': 'A'}
+METHODS = ['quantile', 'random', 'ga', 'maximin', 'al', 'al_ei', 'ga_imse']
+
+# Per-axis comp_obj key (mirrors utils.func.build_expr_map's spec order).
+AXIS_COMP_KEY = {'w': 'wbits', 'kv': 'kvbits',
+                 'kvdim': 'kvdim', 'eff_kv': 'eff_kvbits'}
+
+
+def _val_band_key(args, expr_keys):
+    """Deployment-band comp axis for --val_method band/front and the
+    aggregate region split: --val_band_obj if given, else the first non-w
+    axis's comp key (eff_kvbits / kvbits / kvdim)."""
+    if getattr(args, 'val_band_obj', ''):
+        return args.val_band_obj
+    return next((AXIS_COMP_KEY[k] for k in expr_keys if k != 'w'),
+                AXIS_COMP_KEY[expr_keys[0]])
+
+
+def _band_edges(vals, n_bands):
+    return np.linspace(np.min(vals), np.max(vals) + 1e-9, n_bands + 1)
+
+
+def _validation_picks(args, F, expr_keys, existing_pos, rng):
+    """Positions for --validation under --val_method.
+
+    F layout (assemble_F): [combined | (metric, comp) per axis | comp_obj…];
+    per-axis comp col i = F[:, 2 + 2*i] (real values only with --expr_front).
+
+    random  uniform over the full feasible pool (bulk-weighted — the per-axis-
+            front product is ~uniformly mid-pool in band-local quality).
+    band    stratified-uniform: --n_val split evenly over --val_bands
+            equal-width bands of the band comp axis → equal per-band precision
+            regardless of pool density.
+    front   deployment-selection locus: 2D cells (wbits bands × band-obj
+            bands), round-robin per cell by ascending predicted combined
+            metric → the near-band-best ("Pareto-front combo") shell that
+            post_search's argmin-in-band actually picks from. NOTE: in the
+            full (JSD, wbits, kv-comp) 3-obj space NOTHING is dominated
+            (monotone per-axis fronts × additive metric ⇒ every combo is
+            Pareto-optimal), so the meaningful front is per-band argmin.
+    """
+    vm = getattr(args, 'val_method', 'random')
+    n_val = int(args.n_val)
+    if vm == 'random':
+        pos = draw_random(n_val, len(F), exclude=existing_pos.tolist(),
+                          rng=rng)
+        return [int(p) for p in pos], 'validation'
+
+    if not args.expr_front:
+        raise SystemExit(f"--val_method {vm} needs --expr_front "
+                         "(per-axis comp cols in F)")
+    excl = set(int(p) for p in existing_pos.tolist())
+    comp_col = {AXIS_COMP_KEY[k]: F[:, 2 + 2 * i]
+                for i, k in enumerate(expr_keys)}
+    band_key = _val_band_key(args, expr_keys)
+    if band_key not in comp_col:
+        raise SystemExit(f"--val_band_obj {band_key} not a per-axis comp key "
+                         f"of {expr_keys} ({sorted(comp_col)})")
+    bv = comp_col[band_key]
+    edges = _band_edges(bv, int(args.val_bands))
+
+    if vm == 'band':
+        picks = []
+        n_b = int(args.val_bands)
+        quota = [n_val // n_b + (1 if b < n_val % n_b else 0)
+                 for b in range(n_b)]
+        for b in range(n_b):
+            cand = np.where((bv >= edges[b]) & (bv < edges[b + 1]))[0]
+            cand = np.array([c for c in cand if c not in excl], dtype=np.int64)
+            take = min(quota[b], len(cand))
+            if take < quota[b]:
+                print(f"[validation:band] band {b} has only {len(cand)} "
+                      f"candidates (< quota {quota[b]})")
+            if take:
+                sel = rng.choice(len(cand), size=take, replace=False)
+                picks += [int(c) for c in cand[sel]]
+                excl.update(int(c) for c in cand[sel])
+        return picks, 'validation_band'
+
+    if vm == 'front':
+        wv = comp_col.get('wbits')
+        if wv is None or band_key == 'wbits':
+            cells = [(bv >= edges[b]) & (bv < edges[b + 1])
+                     for b in range(int(args.val_bands))]
+        else:
+            w_edges = _band_edges(wv, int(args.val_front_wbands))
+            cells = [(bv >= edges[b]) & (bv < edges[b + 1]) &
+                     (wv >= w_edges[w]) & (wv < w_edges[w + 1])
+                     for b in range(int(args.val_bands))
+                     for w in range(int(args.val_front_wbands))]
+        # per-cell candidate lists sorted by predicted combined (ascending)
+        queues = []
+        for m in cells:
+            cand = np.where(m)[0]
+            if not len(cand):
+                continue
+            cand = cand[np.argsort(F[cand, 0])]
+            queues.append([int(c) for c in cand if int(c) not in excl])
+        picks = []
+        rank = 0
+        while len(picks) < n_val and any(rank < len(q) for q in queues):
+            for q in queues:
+                if rank < len(q) and len(picks) < n_val:
+                    picks.append(q[rank])
+            rank += 1
+        return picks, 'validation_front'
+
+    raise SystemExit(f"unknown --val_method {vm}")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -420,6 +527,67 @@ def _acquire(args, X_train, y_train, M_cand, K, acq):
         info.update(signal='model_free_distance')
         return np.asarray(sel, np.int64), info
 
+    if acq == 'eigf':
+        # EIGF (Lam & Notz 2008): score = (μ(x) − y_nearest_sample)² + σ²(x).
+        # Genuinely LABEL-DRIVEN — uses the measured y of the nearest sampled
+        # point (exploit: where the surrogate prediction departs from nearby
+        # measured loss) + posterior variance (explore). GP fit on y_train
+        # (sqrt-transformed if --al_transform sqrt).
+        mu, sd, _ = _gp_mu_std(args, X_train, y_train, M_cand)
+        Xtr = np.asarray(X_train, float); Mc = np.asarray(M_cand, float)
+        s_ = Xtr.std(0); s_[s_ < 1e-12] = 1.0
+        Zt = (Xtr - Xtr.mean(0)) / s_; Zc = (Mc - Xtr.mean(0)) / s_
+        nn = np.argmin(np.linalg.norm(Zc[:, None] - Zt[None], axis=2), axis=1)
+        ynear = np.asarray(y_train, float)[nn]
+        score = (mu - ynear) ** 2 + sd ** 2
+        sel = _topk_diverse(score, M_cand, K, diverse)
+        info.update(signal='eigf_label_driven', score_max=float(score.max()))
+        return np.asarray(sel, np.int64), info
+
+    if acq == 'mepe':
+        # MEPE (Liu et al. 2017): exploit = LOO/CV residual (where the surrogate
+        # is actually WRONG — uses measured y), explore = distance; balance α
+        # SELF-ADAPTS round-to-round (via mepe_state.json) from the model's
+        # error trend. The label-driven method that beat coverage on ranking-τ.
+        import os as _os, json as _json
+        Xtr = np.asarray(X_train, float); ytr = np.asarray(y_train, float)
+        Mc = np.asarray(M_cand, float); n = len(ytr)
+        bounds = np.vstack([Xtr, Mc]) if len(Mc) else Xtr
+        loo = np.zeros(n)
+        for i in range(n):
+            mk = np.ones(n, bool); mk[i] = False
+            try:
+                mdl = _make_surrogate(args, Xtr[mk], ytr[mk], bounds)
+                loo[i] = abs(ytr[i] - float(np.asarray(mdl.predict(Xtr[i:i+1])).ravel()[0]))
+            except Exception:                                # noqa: BLE001
+                loo[i] = 0.0
+        s_ = Xtr.std(0); s_[s_ < 1e-12] = 1.0
+        Zt = (Xtr - Xtr.mean(0)) / s_; Zc = (Mc - Xtr.mean(0)) / s_
+        D = np.linalg.norm(Zc[:, None] - Zt[None], axis=2)
+        dist = D.min(1); nn = D.argmin(1)
+        # adaptive α from the error trend (smoothed MEPE balance)
+        sp = _os.path.join(args.save or '.', 'mepe_state.json')
+        alpha, prev = 0.5, None
+        if _os.path.exists(sp):
+            try:
+                st = _json.load(open(sp)); alpha = float(st.get('alpha', 0.5)); prev = st.get('prev')
+            except Exception:                                # noqa: BLE001
+                pass
+        if prev and prev.get('mean_cverr'):
+            ratio = float(np.mean(loo)) / max(float(prev['mean_cverr']), 1e-9)
+            alpha = float(np.clip(0.5 * alpha + 0.5 * (0.99 * 0.5 * ratio), 0.2, 0.95))
+        cverr = loo[nn]
+        score = alpha * (cverr / (cverr.max() + 1e-12)) + (1 - alpha) * (dist / (dist.max() + 1e-9))
+        sel = _topk_diverse(score, M_cand, K, True)
+        try:
+            _json.dump({'alpha': alpha, 'prev': {'mean_cverr': float(cverr.mean())}},
+                       open(sp, 'w'))
+        except Exception:                                    # noqa: BLE001
+            pass
+        info.update(signal='mepe_cv_balanced', alpha=round(alpha, 3),
+                    loo_mean=float(loo.mean()))
+        return np.asarray(sel, np.int64), info
+
     if acq == 'imse':
         if _strip_transform(args.surrogate)[1] != 'ard_gp':
             print(f"[al imse] surrogate '{args.surrogate}' has no posterior "
@@ -520,10 +688,13 @@ def cmd_sample(args):
 
     if args.validation:
         rng = np.random.default_rng(int(args.val_seed))
-        pos = draw_random(int(args.n_val), len(valid_nd_idx),
-                          exclude=existing_pos.tolist(), rng=rng)
-        new_positions += [int(p) for p in pos]
-        new_sources += ['validation'] * len(pos)
+        pos, src_tag = _validation_picks(args, F, expr_keys,
+                                         existing_pos, rng)
+        new_positions += pos
+        new_sources += [src_tag] * len(pos)
+        print(f"[validation] method={getattr(args, 'val_method', 'random')} "
+              f"→ {len(pos)} new rows (source={src_tag}, "
+              f"existing={len(existing_pos)})")
 
     elif args.method == 'quantile':
         if not args.quantile_sample:
@@ -574,6 +745,19 @@ def cmd_sample(args):
         I_extra = [int(p) for p in I_extra]
         new_positions += I_extra
         new_sources += ['ga'] * len(I_extra)
+
+    elif args.method == 'maximin':
+        # Model-free farthest-point coverage (validated best global-
+        # representation sampler; no surrogate/y needed, works at round 0 and
+        # with any deployed surrogate incl. rbf-tps). M = F per-axis metric cols.
+        M = F[:, [1 + 2 * i for i in range(len(expr_keys))]]
+        I_extra = maximin_extras(M, anchor_idx=existing_pos.tolist(),
+                                 K=int(args.batch), seed=int(args.seed))
+        I_extra = [int(p) for p in I_extra]
+        print(f"[maximin] {len(I_extra)} farthest-point coverage extras "
+              f"(anchors={len(existing_pos)}, pool={len(valid_nd_idx)})")
+        new_positions += I_extra
+        new_sources += ['maximin'] * len(I_extra)
 
     elif args.method in ('al', 'al_ei'):
         # al_ei is the back-compat alias of `--method al --acq ei`; otherwise
@@ -793,16 +977,51 @@ def cmd_eval(args):
 # ════════════════════════════════════════════════════════════════════════════
 # cmd_aggregate
 # ════════════════════════════════════════════════════════════════════════════
-def _validation_metrics(args, X_tr, y_tr, X_val, y_val):
+def _fit_predict_val(args, X_tr, y_tr, X_val):
+    """Fit the deployed surrogate on the train rows, predict the val pool."""
     M_bounds = np.vstack([X_tr, X_val]) if len(X_val) else X_tr
     m = _make_surrogate(args, X_tr, y_tr, M_bounds)
-    yp = np.asarray(m.predict(X_val)).reshape(-1).astype(float)
-    ss_r = float(np.sum((y_val - yp) ** 2))
-    ss_t = float(np.sum((y_val - y_val.mean()) ** 2))
-    r2 = 1.0 - ss_r / max(ss_t, 1e-30)
-    rho = float(stats.spearmanr(yp, y_val).correlation)
-    tau = float(stats.kendalltau(yp, y_val).correlation)
-    return r2, rho, tau
+    return np.asarray(m.predict(X_val)).reshape(-1).astype(float)
+
+
+def _slice_metrics(y, yp):
+    """(rmse, r2, rho, tau, max_abs_err) on one validation slice. Rank
+    metrics are NaN on tiny slices; R² can be negative inside a narrow band
+    (small y-variance) — judge bands primarily by RMSE / max|err|."""
+    n = len(y)
+    if n == 0:
+        return (float('nan'),) * 5
+    rmse = float(np.sqrt(np.mean((y - yp) ** 2)))
+    mae = float(np.max(np.abs(y - yp)))
+    if n >= 2:
+        ss_t = float(np.sum((y - y.mean()) ** 2))
+        r2 = 1.0 - float(np.sum((y - yp) ** 2)) / max(ss_t, 1e-30)
+    else:
+        r2 = float('nan')
+    rho = float(stats.spearmanr(yp, y).correlation) if n >= 3 else float('nan')
+    tau = float(stats.kendalltau(yp, y).correlation) if n >= 3 else float('nan')
+    return rmse, r2, rho, tau, mae
+
+
+def _val_regions(args, val_rows, expr_keys):
+    """Ordered {region: bool mask} over the completed validation rows:
+    'all', one 'src:<tag>' slice per validation source (random / band /
+    front), and --val_bands equal-width bands of the band comp axis (read
+    from the comp column archs.csv already stores per row)."""
+    src = np.array([r['source'] for r in val_rows])
+    regions = {'all': np.ones(len(val_rows), dtype=bool)}
+    for s in sorted(set(src.tolist())):
+        tag = 'random' if s == 'validation' else s.replace('validation_', '')
+        regions[f'src:{tag}'] = src == s
+    band_key = _val_band_key(args, expr_keys)
+    if band_key in val_rows[0]:
+        bv = np.array([float(r[band_key]) for r in val_rows])
+        edges = _band_edges(bv, int(args.val_bands))
+        for b in range(int(args.val_bands)):
+            m = (bv >= edges[b]) & (bv < edges[b + 1])
+            if m.any():
+                regions[f'{band_key}[{edges[b]:.2f},{edges[b + 1]:.2f})'] = m
+    return regions
 
 
 def cmd_aggregate(args):
@@ -898,8 +1117,18 @@ def cmd_aggregate(args):
     y_val = np.asarray([res['measured_metric'][0]
                         for _, _, res in val_data], dtype=float)
 
-    # ── validation_metrics.csv (per method) ──
+    # ── region masks over the val pool ──
+    # Back-compat: validation_metrics.csv / learning_curve.csv are computed on
+    # the RANDOM-source slice only, so numbers stay comparable with studies
+    # that pre-date --val_method front/band. Region metrics land in
+    # validation_region_metrics.csv / learning_curve_regions.csv.
+    regions = _val_regions(args, [r for _, r, _ in val_data], expr_keys)
+    rand_mask = regions.get('src:random', regions['all'])
+    n_rand = int(rand_mask.sum())
+
+    # ── validation_metrics.csv (per method, fit once → slice) ──
     val_metrics_rows = []
+    region_rows = []   # (method, n_train, region, n, rmse, r2, rho, tau, mae)
     for method, srcs in method_groups.items():
         rs = [(i, r, res) for i, r, res in train_data if r['source'] in srcs]
         if len(rs) < 5:
@@ -911,29 +1140,49 @@ def cmd_aggregate(args):
         y_tr = np.asarray([res['measured_metric'][0] for _, _, res in rs],
                           dtype=float)
         try:
-            r2, rho, tau = _validation_metrics(args, X_tr, y_tr, X_val, y_val)
+            yp = _fit_predict_val(args, X_tr, y_tr, X_val)
         except Exception as e:                              # noqa: BLE001
             print(f"[aggregate] {method}: surrogate fit failed: {e!r}")
             continue
+        _, r2, rho, tau, _ = _slice_metrics(y_val[rand_mask], yp[rand_mask])
         val_metrics_rows.append((method, len(rs), r2, rho, tau))
+        for reg, m in regions.items():
+            region_rows.append((method, len(rs), reg, int(m.sum()))
+                               + _slice_metrics(y_val[m], yp[m]))
 
     out_path = os.path.join(save, 'validation_metrics.csv')
     with open(out_path, 'w', newline='') as f:
         w = csv.writer(f)
         w.writerow(['method', 'n_train', 'n_val', 'R2', 'Spearman', 'Kendall'])
         for method, n_tr, r2, rho, tau in val_metrics_rows:
-            w.writerow([method, n_tr, len(val_data),
+            w.writerow([method, n_tr, n_rand,
                         f"{r2:.6f}", f"{rho:.6f}", f"{tau:.6f}"])
     print(f"[aggregate] wrote {out_path}")
-    print(f"[aggregate] validation summary (n_val={len(val_data)}):")
+    print(f"[aggregate] validation summary (n_val={n_rand} random-src):")
     for method, n_tr, r2, rho, tau in val_metrics_rows:
         print(f"  {method:<8}  n_tr={n_tr:<3}  R²={r2:+.4f}  "
               f"ρ={rho:+.4f}  τ={tau:+.4f}")
 
+    if len(regions) > 1 and region_rows:
+        out_path = os.path.join(save, 'validation_region_metrics.csv')
+        with open(out_path, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['method', 'n_train', 'region', 'n_val',
+                        'RMSE', 'R2', 'Spearman', 'Kendall', 'max_abs_err'])
+            for method, n_tr, reg, n, rmse, r2, rho, tau, mae in region_rows:
+                w.writerow([method, n_tr, reg, n, f"{rmse:.6f}", f"{r2:.6f}",
+                            f"{rho:.6f}", f"{tau:.6f}", f"{mae:.6f}"])
+        print(f"[aggregate] wrote {out_path}")
+        print(f"[aggregate] region summary (RMSE | max|err|):")
+        for method, n_tr, reg, n, rmse, r2, rho, tau, mae in region_rows:
+            print(f"  {method:<10} {reg:<28} n={n:<3} RMSE={rmse:.4f} "
+                  f"max|e|={mae:.4f} τ={tau:+.3f}")
+
     # ── learning_curve.csv (per non-quantile source, cumulative-by-round) ──
     # Covers al_<acq> AND the random / ga baselines so every method has a curve.
     al_sources = sorted(s for s in sources_present if s != 'quantile')
-    curve = []   # (source, round, n_train, r2, rho, tau)
+    curve = []          # (source, round, n_train, r2, rho, tau)
+    curve_regions = []  # (source, round, n_train, region, n, rmse, r2, tau)
     for al_src in al_sources:
         al_rs = [(i, r, res) for i, r, res in train_data
                  if r['source'] in ('quantile', al_src)]
@@ -948,10 +1197,16 @@ def cmd_aggregate(args):
             y_tr = np.asarray([res['measured_metric'][0] for _, _, res in rs],
                               dtype=float)
             try:
-                r2, rho, tau = _validation_metrics(args, X_tr, y_tr, X_val, y_val)
+                yp = _fit_predict_val(args, X_tr, y_tr, X_val)
             except Exception:                               # noqa: BLE001
                 continue
+            _, r2, rho, tau, _ = _slice_metrics(y_val[rand_mask],
+                                                yp[rand_mask])
             curve.append((al_src, R, len(rs), r2, rho, tau))
+            for reg, m in regions.items():
+                rmse, r2r, _, taur, _ = _slice_metrics(y_val[m], yp[m])
+                curve_regions.append((al_src, R, len(rs), reg, int(m.sum()),
+                                      rmse, r2r, taur))
     if not curve:
         return
 
@@ -961,10 +1216,20 @@ def cmd_aggregate(args):
         w.writerow(['acq', 'round', 'n_train', 'n_val', 'R2', 'Spearman',
                     'Kendall'])
         for acq_src, R, n_tr, r2, rho, tau in curve:
-            w.writerow([acq_src, R, n_tr, len(val_data),
+            w.writerow([acq_src, R, n_tr, n_rand,
                         f"{r2:.6f}", f"{rho:.6f}", f"{tau:.6f}"])
     print(f"[aggregate] wrote {out_path}")
-    print(f"[aggregate] AL learning curve (n_val={len(val_data)}):")
+    if len(regions) > 1 and curve_regions:
+        out_path = os.path.join(save, 'learning_curve_regions.csv')
+        with open(out_path, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['acq', 'round', 'n_train', 'region', 'n_val',
+                        'RMSE', 'R2', 'Kendall'])
+            for acq_src, R, n_tr, reg, n, rmse, r2, tau in curve_regions:
+                w.writerow([acq_src, R, n_tr, reg, n,
+                            f"{rmse:.6f}", f"{r2:.6f}", f"{tau:.6f}"])
+        print(f"[aggregate] wrote {out_path}")
+    print(f"[aggregate] AL learning curve (n_val={n_rand} random-src):")
     for acq_src, R, n_tr, r2, rho, tau in curve:
         print(f"  {acq_src:<10} round {R}  n_tr={n_tr:<3}  R²={r2:+.4f}  "
               f"ρ={rho:+.4f}  τ={tau:+.4f}")
@@ -1031,6 +1296,25 @@ def build_parser():
     p.add_argument('--val_seed', type=int, default=1000,
                    help='(sample --validation / eval --validation) RNG seed; '
                         'kept disjoint from --seed.')
+    p.add_argument('--val_method', choices=['random', 'band', 'front'],
+                   default='random',
+                   help='(sample --validation) random = uniform over the full '
+                        'combo pool (bulk-weighted); band = stratified-uniform '
+                        'over --val_bands bands of the band comp axis; front = '
+                        'per-(wbits×band)-cell lowest-predicted-JSD picks (the '
+                        'post_search argmin-in-band selection locus). Sources '
+                        'are tagged validation / validation_band / '
+                        'validation_front so the pools can be extended and '
+                        'sliced independently at aggregate.')
+    p.add_argument('--val_bands', type=int, default=6,
+                   help='(sample --validation band/front + aggregate) number '
+                        'of equal-width bands of --val_band_obj.')
+    p.add_argument('--val_band_obj', type=str, default='',
+                   help='per-axis comp key for banding (wbits/kvbits/kvdim/'
+                        'eff_kvbits). Default: first non-w axis.')
+    p.add_argument('--val_front_wbands', type=int, default=4,
+                   help='(sample --validation front) wbits sub-bands per band '
+                        'cell.')
     p.add_argument('--al_dataset_idx', type=int, default=0,
                    help='(sample al_ei / aggregate) which --datasets column '
                         'to use as y. Default 0 = first dataset.')

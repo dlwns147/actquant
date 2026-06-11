@@ -24,6 +24,22 @@ class JSD(nn.Module):
         m = (0.5 * (p.softmax(-1) + q.softmax(-1))).clamp_min(self.eps).log()
         return 0.5 * (self.kl(m, p.log_softmax(-1)) + self.kl(m, q.log_softmax(-1)))
 
+
+class ForwardKL(nn.Module):
+    """Directional forward KL( teacher ‖ student ) = KL(FP16 ‖ candidate).
+    eval_loss calls forward(p=candidate_logits, q=FP16_logits) -> teacher is q.
+    KLDivLoss(input=log student, target=log teacher, log_target=True)
+      = sum softmax(teacher)*(log_softmax(teacher) - log_softmax(student)) = KL(Q‖P).
+    Downstream-aware proxy study (2026-06): beats symmetric JSD for final SELECTION
+    on Llama-3.1-8B (EntropyGatedJSD on Qwen2.5-7B). LOWER IS BETTER (== JSD)."""
+    def __init__(self, reduction='batchmean', eps=1e-7):
+        super(ForwardKL, self).__init__()
+        self.kl = nn.KLDivLoss(reduction=reduction, log_target=True)
+
+    def forward(self, p: torch.tensor, q: torch.tensor):
+        return self.kl(p.log_softmax(-1), q.log_softmax(-1))
+
+
 def TopK(p: torch.tensor, q: torch.tensor, k: int):
     p_topk, q_topk = p.topk(k, dim=-1, largest=True), q.topk(k, dim=-1, largest=True)
     pq = torch.cat((p_topk, q_topk), dim=-1)

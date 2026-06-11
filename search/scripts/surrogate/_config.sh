@@ -7,16 +7,16 @@
 # python so relative paths (config/, save/, …) resolve identically.
 
 # ── Model / config ─────────────────────────────────────────────────────────
-# MODEL_PATH=/SSD/huggingface/meta-llama
-# MODEL_NAME=Llama-3.1-8B-Instruct
-# CONFIG=config/llama.json
+MODEL_PATH=/SSD/huggingface/meta-llama
+MODEL_NAME=Llama-3.1-8B-Instruct
+CONFIG=config/llama.json
+# 2-axis (W, eff_kv) study: eff_kv search archive exists only for Llama.
 
-MODEL_PATH=/SSD/huggingface/Qwen
-MODEL_NAME=Qwen2.5-7B-Instruct
-CONFIG=config/qwen2.json
+# MODEL_PATH=/SSD/huggingface/Qwen
+# MODEL_NAME=Qwen2.5-7B-Instruct
+# CONFIG=config/qwen2.json
 # HQQ banks on disk are bfloat16 (no float16 build exists); QMODEL_PATHS embeds
 # ${DTYPE} in the dir name, so this MUST be bfloat16 for the hqq path to resolve.
-# Qwen2.5-7B-Instruct banks regenerated via tests/gen_hqq_banks.py (deterministic).
 DTYPE=bfloat16
 
 # ── Quantisation ───────────────────────────────────────────────────────────
@@ -52,6 +52,11 @@ QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 DATASETS="wikitext2"
 METRIC=loss
 LOSS_FUNC=jsd
+# Protocol matched to the save/think eff_kvbits archive (pp512, stride 32,
+# 128 sample, 2048 seq, 0 token). NOTE: the W archive (2606070017) is stride
+# 128, the eff_kv archive (2606091743) is stride 32 — eval here uses stride 32
+# (the more answer-sensitive eff_kv axis); the W-axis per-axis X is the only
+# slightly cross-protocol piece (all methods share it → comparison still fair).
 N_SAMPLE=128
 SEQLEN=2048
 MIN_SEQLEN=2048
@@ -68,11 +73,16 @@ BETA=-2
 KEY_TOKEN_PATH=
 
 # ── Per-axis search archives (must contain MODEL_NAME) ─────────────────────
-W_EXPR=save/search/think/2605112127_Qwen2.5-7B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
-KV_EXPR=save/search/think/2605112126_Qwen2.5-7B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
-KVDIM_EXPR=save/search/think/2605112128_Qwen2.5-7B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
+# 2-axis (W, eff_kv): eff_kv collapses KV-bits+KV-dim into ONE eff_kvbits axis.
+# Both from save/search/think at the SAME protocol (pp512, stride 32, 128 sample,
+# 2048 seq, 0 token) → per-axis X and eval y are the same flavour. eff_kv search
+# varied KV bits+gs+prune (W fixed 4); W search varied W bits (KV fixed 4).
+W_EXPR=save/search/think/2605290210_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_32stride_pp512/iter_200.stats
+KV_EXPR=
+KVDIM_EXPR=
+EFF_KV_EXPR=save/search/think/2606091743_Llama-3.1-8B-Instruct_eff_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0.1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_32stride_pp512/iter_200.stats
 
-for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR; do
+for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR EFF_KV_EXPR; do
     VAR_VALUE="${!VAR_NAME}"
     if [ -n "${VAR_VALUE}" ] && [[ "${VAR_VALUE}" != *"${MODEL_NAME}"* ]]; then
         echo "ERROR: ${VAR_NAME} does not contain MODEL_NAME (${MODEL_NAME})"
@@ -82,10 +92,10 @@ done
 
 # ── Comparison study knobs ─────────────────────────────────────────────────
 SEED=0
-N_TOKEN=16384
+N_TOKEN=0
 
-# Shared quantile warm-start (round 0, all 3 methods use the same anchors).
-QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.01,0.5,0.99"
+# Shared quantile warm-start (round 0 = AL initial values; all methods share it).
+QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_eff_kv#0.01,0.5,0.99"
 
 # GA-based sampling (when --method ga).
 SAMPLING_METHOD=coverage_nsga2_combined
@@ -93,8 +103,14 @@ COVERAGE_COORD=rank
 COVERAGE_PER_AXIS_AGG=max
 COVERAGE_PARETO_SELECT=knee
 
-# AL EI surrogate (mean predictor; σ via brute-force LOOCV residual q0.95).
-SURROGATE=ard_gp
+# Surrogate for the aggregate validation fit (and AL-EI mean / σ_conf LOOCV).
+# RECIPE: rbf (tps kernel) — maximin × rbf-tps is the TOP combo (multi-seed
+# R² 0.9694). Pair with the maximin coverage sampler (run_compare_local … maximin).
+# sqrty_ard_gp is the robust alternative. ⚠️ NEVER pair rbf-tps with an
+# uncertainty acquisition (ACQ=alm/imse/qbc/rank) — interpolant extrapolates
+# wildly on clustered picks (R² went negative); rbf-tps is for maximin/coverage only.
+SURROGATE=rbf
+RBF_KERNEL=tps
 ARD_KERNEL=matern32
 GP_N_RESTARTS=10
 
@@ -110,8 +126,8 @@ AL_DIVERSE=True
 # Improvement knobs: AL_CAND front = Pareto-frontier-focused candidate pool (1);
 # AL_TRANSFORM sqrt = stabilise heavy-tailed JSD for the acquisition surrogate (2).
 # (ga_imse method = GA-coverage + front/sqrt IMSE-refine = improvements 1+2+3.)
-AL_CAND=front
-AL_TRANSFORM=sqrt
+AL_CAND=random
+AL_TRANSFORM=none
 
 # Per-method extras (random / ga / al_ei total = same).
 N_EXTRAS=31
@@ -122,6 +138,14 @@ AL_ROUNDS=4
 # Validation hold-out (uniform random over feasible set, disjoint seed).
 N_VAL=100
 VAL_SEED=1000
+# Region-validation knobs (sample.sh validation_band / validation_front +
+# aggregate region split). VAL_BAND_OBJ empty = auto (first non-w axis comp,
+# e.g. eff_kvbits). The random pool is bulk-weighted (pool density follows the
+# per-axis-front product), so band/front pools add equal-per-band precision +
+# the argmin-in-band ("Pareto-front combo") locus post_search selects from.
+VAL_BANDS=6
+VAL_BAND_OBJ=
+VAL_FRONT_WBANDS=4
 
 # SLURM concurrency (override per-call as needed).
 SLURM_ARRAY_CONCURRENCY=4
@@ -166,9 +190,10 @@ build_model_args() {
     [ -n "${K_PRUNING_DIM}" ] && A+=" --k_pruning_dim ${K_PRUNING_DIM}"
     [ -n "${V_PRUNING_DIM}" ] && A+=" --v_pruning_dim ${V_PRUNING_DIM}"
     [ "${W_METHOD}" = "hqq" ] && A+=" --quant_model_paths ${QMODEL_PATHS}"
-    [ -n "${W_EXPR}" ]     && A+=" --w_expr ${W_EXPR}"
-    [ -n "${KV_EXPR}" ]    && A+=" --kv_expr ${KV_EXPR}"
-    [ -n "${KVDIM_EXPR}" ] && A+=" --kvdim_expr ${KVDIM_EXPR}"
+    [ -n "${W_EXPR}" ]      && A+=" --w_expr ${W_EXPR}"
+    [ -n "${KV_EXPR}" ]     && A+=" --kv_expr ${KV_EXPR}"
+    [ -n "${KVDIM_EXPR}" ]  && A+=" --kvdim_expr ${KVDIM_EXPR}"
+    [ -n "${EFF_KV_EXPR}" ] && A+=" --eff_kv_expr ${EFF_KV_EXPR}"
     if [ -n "${COMP_OBJ_STR}" ]; then
         A+=" --comp_obj ${COMP_OBJ_STR}"
         A+=" --comp_obj_min ${MIN_COMP_OBJ}"
@@ -205,6 +230,7 @@ build_sample_args() {
     A+=" --coverage_per_axis_agg ${COVERAGE_PER_AXIS_AGG}"
     A+=" --coverage_pareto_select ${COVERAGE_PARETO_SELECT}"
     A+=" --surrogate ${SURROGATE}"
+    A+=" --rbf_kernel ${RBF_KERNEL}"
     A+=" --ard_kernel ${ARD_KERNEL}"
     A+=" --gp_n_restarts ${GP_N_RESTARTS}"
     A+=" --al_ucb_kappa ${AL_UCB_KAPPA}"

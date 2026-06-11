@@ -118,8 +118,14 @@ for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR SAMPLE_PATH; do
     fi
 done
 
-SURROGATE=rbf
 SURROGATE=ard_gp
+SURROGATE=sqrty_ard_gp
+# RECIPE: rbf (tps kernel) — maximin × rbf-tps was the TOP combo (multi-seed
+# R² 0.9694, best worst-bin), pair with maximin coverage sampling
+# (sample_surrogate.sh SAMPLING_METHOD=maximin). sqrty_ard_gp is the robust
+# alternative. ⚠️ NEVER pair rbf-tps with uncertainty-AL (interpolant has no
+# noise reg → clustered picks make it extrapolate wildly, R² went negative).
+SURROGATE=rbf
 RBF_KERNEL=tps
 # device for the pure-PyTorch rbf / ard_gp surrogate:
 # auto (cuda if visible else cpu) | cpu | cuda | cuda:N

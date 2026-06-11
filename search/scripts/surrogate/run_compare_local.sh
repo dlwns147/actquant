@@ -45,12 +45,17 @@ NV=$(( $(wc -l < "${VAL_DIR}/validation_archs.csv") - 1 ))
 echo "[compare_local] validation pool = ${NV}; evaluating…"
 bash "${HERE}/eval_local.sh" "${VAL_DIR}" 0 $(( NV - 1 )) --validation
 
-# ── Stage B: shared quantile warm-start ─────────────────────────────────────
+# ── Stage B: shared warm-start = quantile [+ INIT_RANDOM random] ────────────
+# INIT_RANDOM env (default 0) appends N random archs to the quantile anchors so
+# the shared initial = "quantile + random N" (all round 0), per the LC protocol.
 if [ ! -f "${SEED_DIR}/archs.csv" ]; then
     bash "${HERE}/sample.sh" "${SEED_DIR}" quantile 0
+    if [ "${INIT_RANDOM:-0}" -gt 0 ]; then
+        bash "${HERE}/sample.sh" "${SEED_DIR}" random 0 "${INIT_RANDOM}"
+    fi
 fi
 NSEED=$(( $(wc -l < "${SEED_DIR}/archs.csv") - 1 ))
-echo "[compare_local] warm-start anchors = ${NSEED}; evaluating…"
+echo "[compare_local] warm-start (quantile + ${INIT_RANDOM:-0} random) = ${NSEED}; evaluating…"
 bash "${HERE}/eval_local.sh" "${SEED_DIR}" 0 $(( NSEED - 1 ))
 
 # ── Stage C: per-method AL rounds ───────────────────────────────────────────
