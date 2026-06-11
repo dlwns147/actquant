@@ -40,6 +40,7 @@ class Search:
         self.iterations = kwargs.pop('iterations', 30)  # number of iterations to run search
         self.n_doe = kwargs.pop('n_doe', 100)  # number of architectures to train before fit surrogate model
         self.n_iter = kwargs.pop('n_iter', 8)  # number of architectures to train in each iteration
+        self.anchor_levels = kwargs.pop('anchor_levels', 0)  # DOE anchor grid thinning (0 = full cartesian product)
         self.predictor = kwargs.pop('predictor', 'rbf')  # which surrogate model to fit
         self.dataset = kwargs.pop('dataset', 'wikitext2')  # which dataset to run search on
         self.loss_func = kwargs.pop('loss_func', 'jsd')
@@ -226,7 +227,7 @@ class Search:
                         n_samples=self.n_doe,
                         pool=[x[0] for x in archive])
                 else:
-                    arch_doe = self.search_space.initialize(self.n_doe, pool=[x[0] for x in archive])
+                    arch_doe = self.search_space.initialize(self.n_doe, pool=[x[0] for x in archive], anchor_levels=self.anchor_levels)
             else:
                 arch_doe = list()
             arch_doe = accelerator.gather_for_metrics(arch_doe, use_gather_object=True)
@@ -615,6 +616,11 @@ if __name__ == '__main__':
                         help='initial sample size for DOE')
     parser.add_argument('--n_iter', type=int, default=8,
                         help='number of architectures to high-fidelity eval (low level) in each iteration')
+    parser.add_argument('--anchor_levels', type=int, default=0,
+                        help='thin each axis of the DOE anchor grid (w x k x v x kdim x vdim) to this many '
+                             'evenly spaced options (3 = min/mid/max) before the cartesian product; '
+                             '0 = full grid (legacy). Use when the full product exceeds n_doe '
+                             '(e.g. eff_kvbits 9x9x5x5=2025).')
     parser.add_argument('--predictor', type=str, default='rbf',
                         help='which accuracy predictor model to fit (rbf/gp/cart/mlp/as)')
     parser.add_argument('--gpu_id', type=str, default='0',

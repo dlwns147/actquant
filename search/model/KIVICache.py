@@ -2,7 +2,20 @@ import torch
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from transformers.utils.deprecation import deprecate_kwarg
-from transformers.cache_utils import DynamicCache, CacheConfig
+try:
+    from transformers.cache_utils import DynamicCache, CacheConfig
+except ImportError:  # transformers >=4.46 removed CacheConfig (a thin base dataclass)
+    from transformers.cache_utils import DynamicCache
+
+    class CacheConfig:  # minimal compat shim (KIVICacheConfig only subclasses it)
+        cache_implementation = None
+
+        def to_dict(self):
+            return {k: v for k, v in self.__dict__.items()}
+
+        def to_json_string(self):
+            import json
+            return json.dumps(self.to_dict())
 from transformers.configuration_utils import PretrainedConfig
 
 from quant.kivi_utils.new_pack import triton_quantize_and_pack_along_last_dim, fake_quant, unpack_and_dequant_kcache, unpack_and_dequant_vcache

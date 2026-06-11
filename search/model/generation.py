@@ -2,11 +2,15 @@ import warnings
 from typing import Dict
 
 import torch
-from transformers.generation.configuration_utils import (
-    GenerationConfig,
-    NEED_SETUP_CACHE_CLASSES_MAPPING,
-    QUANT_BACKEND_CLASSES_MAPPING,
-)
+from transformers.generation.configuration_utils import GenerationConfig
+# transformers >=4.5x removed these generation cache-setup mappings; they are only
+# used by the .generate() cache-setup path, NOT by the eval/search forward path.
+try:
+    from transformers.generation.configuration_utils import (
+        NEED_SETUP_CACHE_CLASSES_MAPPING, QUANT_BACKEND_CLASSES_MAPPING)
+except ImportError:
+    NEED_SETUP_CACHE_CLASSES_MAPPING = {}
+    QUANT_BACKEND_CLASSES_MAPPING = {}
 from transformers.cache_utils import (
     DynamicCache,
     EncoderDecoderCache,
@@ -15,7 +19,10 @@ from transformers.cache_utils import (
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging, is_hqq_available, is_optimum_quanto_available
 from transformers.generation.utils import GenerationMixin
-from transformers.generation.configuration_utils import CACHE_CONFIG_MAPPING, QUANT_BACKEND_CLASSES_MAPPING
+try:
+    from transformers.generation.configuration_utils import CACHE_CONFIG_MAPPING
+except ImportError:
+    CACHE_CONFIG_MAPPING = {}
 
 from model.KIVICache import KIVICacheConfig, KIVIDynamicCache, KIVIFakeCache, ThinkKIVIDynamicCache, ThinkKIVIFakeCache
 from model.HQQCache import QuantizedCacheConfig, HQQQuantizedCache

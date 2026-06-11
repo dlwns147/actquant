@@ -55,6 +55,13 @@ RESIDUAL_LENGTH=128
 # existing archives stay comparable; set to 8 for new sink-enabled runs.
 ATTN_SINK=0
 
+# DOE anchor grid thinning: initialize() seeds anchors from the cartesian
+# product of per-axis options (w x k x v x kdim x vdim), which explodes past
+# N_DOE for eff_kvbits/memory (e.g. 9x9x5x5=2025 > 600 -> no random samples
+# left). ANCHOR_LEVELS=N keeps only N evenly spaced options per axis
+# (3 = min/mid/max; list ends are always kept); 0 = full grid (legacy).
+ANCHOR_LEVELS=0
+
 if [ ${COMP_OBJ} == 'wbits' ]; then
     # ---- QEFT outlier columns ON TOP OF the (fast) HQQ wbits search: per-layer
     #      FP16 outlier columns (32-multiples, incl. 0=off) become a searchable
@@ -102,10 +109,10 @@ elif [ ${COMP_OBJ} == 'kvbits' ]; then
     KV_BITS_TEXT="234"
     # KV_GROUP_SIZE=("32 64 128" "32 64 128" "32 64 128")
     # KV_GROUP_SIZE_TEXT=3264128x3
-    # KV_GROUP_SIZE=("32 64 128" "32 64 128" "128")
-    # KV_GROUP_SIZE_TEXT=3264128x2_128
-    KV_GROUP_SIZE=("64 128" "64 128" "128")
-    KV_GROUP_SIZE_TEXT=64128x2_128
+    KV_GROUP_SIZE=("32 64 128" "32 64 128" "128")
+    KV_GROUP_SIZE_TEXT=3264128x2_128
+    # KV_GROUP_SIZE=("64 128" "64 128" "128")
+    # KV_GROUP_SIZE_TEXT=64128x2_128
 
     K_PRUNING_DIM="0"
     # V_PRUNING_DIM="0 16 32 48 64"
@@ -160,8 +167,10 @@ elif [ ${COMP_OBJ} == 'eff_kvbits' ]; then
 
     KV_BITS="2 3 4"
     KV_BITS_TEXT="234"
-    KV_GROUP_SIZE=("32 64 128" "32 64 128" "32 64 128")
-    KV_GROUP_SIZE_TEXT=3264128x3
+    # KV_GROUP_SIZE=("32 64 128" "32 64 128" "32 64 128")
+    # KV_GROUP_SIZE_TEXT=3264128x3
+    KV_GROUP_SIZE=("32 64 128" "32 64 128" "128")
+    KV_GROUP_SIZE_TEXT=3264128x2_128
 
     K_PRUNING_DIM="0 16 32 48 64"
     V_PRUNING_DIM="0 16 32 48 64"
@@ -175,7 +184,10 @@ elif [ ${COMP_OBJ} == 'eff_kvbits' ]; then
     COMP_OBJ_MAX=5
     COMP_OBJ_MAX_TEXT=5
 
-    N_DOE=600
+    # full anchor grid = k7 x v7 x kdim5 x vdim5 = 1225 > N_DOE; thin to 3^4 = 81
+    ANCHOR_LEVELS=3
+
+    N_DOE=300
     ITER=200
     N_ITER=50
 
@@ -200,6 +212,9 @@ elif [ ${COMP_OBJ} == 'memory' ]; then
     COMP_OBJ_MIN_TEXT=1
     COMP_OBJ_MAX=1e99
     COMP_OBJ_MAX_TEXT=1e99
+
+    # full anchor grid = w3 x k9 x v9 x kdim5 = 1215 > N_DOE; thin to 3^4 = 81
+    ANCHOR_LEVELS=3
 
     N_DOE=600
     ITER=200
@@ -334,6 +349,7 @@ ARGS="--gpu_id ${DEVICES} \
 --iterations ${ITER} \
 --n_doe ${N_DOE} \
 --n_iter ${N_ITER} \
+--anchor_levels ${ANCHOR_LEVELS} \
 --metric ${METRIC} \
 --ga_pop_size ${GA_POP_SIZE} \
 --config ${CONFIG} \

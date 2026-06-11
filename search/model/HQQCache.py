@@ -12,7 +12,20 @@ from transformers.pytorch_utils import is_torch_greater_or_equal_than_2_6
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import is_hqq_available, is_optimum_quanto_available, is_torch_greater_or_equal, logging
-from transformers.cache_utils import CacheConfig, DynamicCache
+try:
+    from transformers.cache_utils import CacheConfig, DynamicCache
+except ImportError:  # transformers >=4.5x removed CacheConfig (thin base dataclass)
+    from transformers.cache_utils import DynamicCache
+
+    class CacheConfig:  # minimal compat shim (subclassed by QuantizedCacheConfig)
+        cache_implementation = None
+
+        def to_dict(self):
+            return {k: v for k, v in self.__dict__.items()}
+
+        def to_json_string(self):
+            import json
+            return json.dumps(self.to_dict())
 
 
 if is_hqq_available():

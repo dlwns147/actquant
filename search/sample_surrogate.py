@@ -27,7 +27,7 @@ from utils.func import (init_run, build_expr_map, build_nd, evaluate_metric,
                         comp_key_order, get_net_info)
 from utils.select import (
     LazyPs, build_arch, draw_random, assemble_F, select_valid_nd_idx,
-    quantile_select, axis_of_map, coverage_subset_nsga2_extras)
+    quantile_select, axis_of_map, coverage_subset_nsga2_extras, maximin_extras)
 
 warnings.simplefilter("ignore")
 
@@ -98,6 +98,16 @@ def main(args):
                 print(f'[random_sample] adding {len(I_extra)} additional random '
                       f'samples (excluding {len(I_quant)} quantile-selected; '
                       f'pool={len(valid_nd_idx) - len(I_quant)})')
+            elif args.sampling_method == 'maximin':
+                # model-free farthest-point coverage on the per-axis metric
+                # space (validated best global-representation sampler; works
+                # with any surrogate incl. rbf-tps). M = F per-axis metric cols.
+                _M = pf[:, [1 + 2 * i for i in range(len(expr_keys))]]
+                I_extra = maximin_extras(_M, anchor_idx=list(I_quant),
+                                         K=args.random_sample, seed=args.seed)
+                print(f'[maximin] adding {len(I_extra)} farthest-point coverage '
+                      f'samples (excluding {len(I_quant)} quantile-selected; '
+                      f'pool={len(valid_nd_idx) - len(I_quant)})')
             else:
                 fit_mode = args.sampling_method.replace('coverage_nsga2_', '')
                 I_extra = coverage_subset_nsga2_extras(
@@ -125,6 +135,8 @@ def main(args):
             samp_desc = 'quantile-only (no extras)'
         elif args.sampling_method == 'random':
             samp_desc = 'random'
+        elif args.sampling_method == 'maximin':
+            samp_desc = 'maximin (model-free farthest-point coverage)'
         else:
             samp_desc = (f"{args.sampling_method} ("
                          f"coord={args.coverage_coord}, "
@@ -272,10 +284,13 @@ def build_parser():
                    help='metric#q1,q2,...  e.g. metric_w#0.01,0.5,0.99')
     p.add_argument('--sampling_method', type=str,
                    default='coverage_nsga2_marginal',
-                   choices=['random', 'coverage_nsga2_joint',
+                   choices=['random', 'maximin', 'coverage_nsga2_joint',
                             'coverage_nsga2_marginal',
                             'coverage_nsga2_combined'],
-                   help='default = sampling_design FINAL DEFAULT (N4: '
+                   help='maximin = model-free farthest-point coverage '
+                        '(validated best global-representation sampler, works '
+                        'with any surrogate incl. rbf-tps). default = '
+                        'sampling_design FINAL DEFAULT (N4: '
                         'marginal + --coverage_coord rank + '
                         '--coverage_per_axis_agg max). coverage_nsga2_combined '
                         '= 2-obj (cov_rad, std_max); use with '

@@ -40,6 +40,11 @@ case "${METHOD}" in
         BATCH=${BATCH_ARG:-${N_EXTRAS}}
         ARGS+=" --method ga --batch ${BATCH}"
         ;;
+    maximin)
+        # validated best global-representation sampler (model-free coverage)
+        BATCH=${BATCH_ARG:-${N_EXTRAS}}
+        ARGS+=" --method maximin --batch ${BATCH}"
+        ;;
     al_ei)
         BATCH=${BATCH_ARG:-${AL_BATCH}}
         # al_ei needs the calibration y-column to refit on completed results
@@ -65,6 +70,22 @@ case "${METHOD}" in
     validation)
         NV=${BATCH_ARG:-${N_VAL}}
         ARGS+=" --validation --n_val ${NV} --val_seed ${VAL_SEED}"
+        ;;
+    validation_band)
+        # stratified-uniform: NV split evenly over VAL_BANDS bands of the
+        # band comp axis (equal per-band precision; random val is bulk-weighted)
+        NV=${BATCH_ARG:-${N_VAL}}
+        ARGS+=" --validation --val_method band --n_val ${NV} --val_seed ${VAL_SEED}"
+        ARGS+=" --val_bands ${VAL_BANDS:-6}"
+        [ -n "${VAL_BAND_OBJ:-}" ] && ARGS+=" --val_band_obj ${VAL_BAND_OBJ}"
+        ;;
+    validation_front)
+        # per-(wbits×band)-cell argmin-predicted picks = the post_search
+        # selection locus ("Pareto-front combos")
+        NV=${BATCH_ARG:-${N_VAL}}
+        ARGS+=" --validation --val_method front --n_val ${NV} --val_seed ${VAL_SEED}"
+        ARGS+=" --val_bands ${VAL_BANDS:-6} --val_front_wbands ${VAL_FRONT_WBANDS:-4}"
+        [ -n "${VAL_BAND_OBJ:-}" ] && ARGS+=" --val_band_obj ${VAL_BAND_OBJ}"
         ;;
     *)
         echo "ERROR: unknown METHOD '${METHOD}'"

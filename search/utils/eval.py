@@ -7,7 +7,7 @@ import gc
 import torch
 import torch.nn as nn
 from .data import *
-from .loss import JSD, TopK
+from .loss import JSD, TopK, ForwardKL
 from .func import clean_up
 
 
@@ -387,7 +387,13 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
                 # Compute JSD on selected tokens
                 loss_fct = JSD()
                 loss = loss_fct(seq_shift_logits[mask], dense_logits_seq)
-            
+
+            elif loss_func == 'forward_kl':
+                # directional KL(FP16 teacher ‖ candidate); same dense-logits path as jsd
+                dense_logits_seq = dense_logits_list[batch_idx][seq_idx].contiguous()
+                loss_fct = ForwardKL()
+                loss = loss_fct(seq_shift_logits[mask], dense_logits_seq)
+
             else:
                 raise NotImplementedError(f'{loss_func} is not implemented')
             

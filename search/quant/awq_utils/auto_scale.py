@@ -167,11 +167,19 @@ def auto_scale_block(module, module_kwargs, q_config, input_feat, do_owq, module
             scales = x_max.pow(ratio).clamp(min=1e-4).view(-1)
             scales = scales / (scales.max() * scales.min()).sqrt()
             for fc_name, fc in linears2scale.items():
-                if do_owq and is_owq(module_bit[fc_name]) and fc_name in outlier:
+                # OWQ/QEFT: outlier columns are kept FP16, so they must NOT bias the
+                # AWQ scale (alpha) search — zero them before quantizing, then restore
+                # the FP16 values so the loss reflects only the quantized columns.
+                # NOTE: gate on `fc_name in outlier` (a layer has searched outliers),
+                # NOT is_owq(module_bit): run_awq passes integer module_bit, so
+                # is_owq(int) is always False and this exclusion would never fire
+                # (true for both the QEFT (bits, n_outlier) axis and legacy do_owq).
+                has_outlier = do_owq and fc_name in outlier
+                if has_outlier:
                     fc.weight.data[:, outlier[fc_name]] = 0
                 fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))
                 fc.weight.data = w_quantize_func(fc.weight.data, bit=int(module_bit[fc_name])) / (scales.view(1, -1))
-                if do_owq and is_owq(module_bit[fc_name]) and fc_name in outlier:
+                if has_outlier:
                     fc.weight[:, outlier[fc_name]] = original[fc_name]
 
             out = block(x, **kwargs)

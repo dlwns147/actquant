@@ -20,5 +20,8 @@ ARGS="--mode aggregate --save ${SAVE}"
 ARGS+=" $(build_model_args)"
 ARGS+=" --datasets ${DATASETS} --metric ${METRIC} --loss_func ${LOSS_FUNC}"
 ARGS+=" --surrogate ${SURROGATE} --ard_kernel ${ARD_KERNEL} --gp_n_restarts ${GP_N_RESTARTS}"
+# region split of the val pool (validation_region_metrics.csv)
+ARGS+=" --val_bands ${VAL_BANDS:-6}"
+[ -n "${VAL_BAND_OBJ:-}" ] && ARGS+=" --val_band_obj ${VAL_BAND_OBJ}"
 
 python surrogate_pipeline.py ${ARGS}

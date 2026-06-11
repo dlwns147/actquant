@@ -280,24 +280,40 @@ class LlamaSearchSpace:
             data.append(new_arch)
         return data
 
-    def initialize(self, n_doe, pool=[]):
+    def anchor_options(self, options, n_levels=0):
+        """Thin an ordered option list to n_levels evenly spaced anchors
+        (n_levels=3 → both ends + middle). Option lists are monotone in
+        effective complexity (k/v: bits asc with gs desc within each bit;
+        pruning dims asc), so the true extremes are always kept.
+        n_levels=0 (or a list no longer than n_levels) keeps the full list."""
+        if n_levels <= 0 or len(options) <= n_levels:
+            return list(options)
+        idx = np.unique(np.linspace(0, len(options) - 1, n_levels).round().astype(int))
+        return [options[i] for i in idx]
+
+    def initialize(self, n_doe, pool=[], anchor_levels=0):
         """Seed the archive with boundary configs (w × k × v × k_dim × v_dim),
-        then fill the remaining budget with random samples."""
+        then fill the remaining budget with random samples.
+
+        anchor_levels > 0 thins each axis to that many evenly spaced options
+        (3 = min/mid/max) before taking the cartesian product, keeping the
+        anchor count well under n_doe (e.g. eff_kvbits 9×9×5×5=2025 → 81);
+        0 keeps the legacy full grid."""
         data = []
         first_linear_option = getattr(self, f'{self.config["linear"][0].split(".")[-1]}_option')
 
-        for w_option in first_linear_option:
-            for k_option in self.k_option:
-                for v_option in self.v_option:
-                    for kp in self.k_pruning_dim_option:
-                        for vp in self.v_pruning_dim_option:
+        for w_option in self.anchor_options(first_linear_option, anchor_levels):
+            for k_option in self.anchor_options(self.k_option, anchor_levels):
+                for v_option in self.anchor_options(self.v_option, anchor_levels):
+                    for kp in self.anchor_options(self.k_pruning_dim_option, anchor_levels):
+                        for vp in self.anchor_options(self.v_pruning_dim_option, anchor_levels):
                             data.append(self.sample(
                                 w=self.boundary_w_per_linear(w_option),
                                 k=[k_option], v=[v_option], k_dim=[kp], v_dim=[vp],
                             )[0])
                             n_doe -= 1
 
-        data.extend(self.sample(n_samples=n_doe, pool=pool + data))
+        data.extend(self.sample(n_samples=max(n_doe, 0), pool=pool + data))
         return data
 
     # ------------------------------------------------------------------ encode / decode

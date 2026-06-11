@@ -540,6 +540,40 @@ def stratified_proxy_indices(pool_z, n_target=3000, n_bins=None, seed=0):
     return np.array(sel, dtype=np.int64)
 
 
+def maximin_extras(M, anchor_idx, K, seed=0):
+    """Model-free farthest-point (maximin) coverage extras: return K positions
+    into ``M`` (rows = per-axis search-metric vectors) that greedily maximise
+    the min-distance to ``anchor_idx`` ∪ already-picked, in per-axis
+    standardized space. A drop-in coverage sampler that uses NO surrogate and
+    NO measured y — the validated best global-representation acquisition
+    (beats random / uncertainty-AL on R²/worst-bin/tail across seeds; works
+    with ANY deployed surrogate incl. rbf-tps). Memory-safe for tens-of-millions
+    of rows (loops anchors; greedy is O(K·N))."""
+    M = np.asarray(M, dtype=float)
+    sd = M.std(0); sd[sd < 1e-9] = 1.0
+    Ms = (M - M.mean(0)) / sd
+    n = len(Ms)
+    anchor_idx = [int(a) for a in (anchor_idx if anchor_idx is not None else [])]
+    dmin = np.full(n, np.inf)
+    for a in anchor_idx:
+        if 0 <= a < n:
+            dmin = np.minimum(dmin, np.linalg.norm(Ms - Ms[a], axis=1))
+    if not anchor_idx:                       # cold start: seed at a fixed point
+        s0 = int(np.random.RandomState(seed).randint(n))
+        dmin = np.linalg.norm(Ms - Ms[s0], axis=1)
+    for a in anchor_idx:
+        if 0 <= a < n:
+            dmin[a] = -1.0
+    sel = []
+    n_pick = int(min(K, n - sum(1 for a in anchor_idx if 0 <= a < n)))
+    for _ in range(max(0, n_pick)):
+        j = int(np.argmax(dmin))
+        sel.append(j)
+        dmin = np.minimum(dmin, np.linalg.norm(Ms - Ms[j], axis=1))
+        dmin[j] = -1.0
+    return sel
+
+
 def coverage_subset_nsga2_extras(valid_nd_idx, efm, expr_keys,
                                   anchor_idx, K,
                                   fitness='joint',

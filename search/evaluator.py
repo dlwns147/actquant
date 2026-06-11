@@ -103,7 +103,7 @@ class LlamaEvaluator:
         # Only spin up the FP teacher for work that is NOT already injected:
         # outlier fp16-channels (always needs it), key tokens, dense_logits.
         need_keytok = use_key_token and precomputed_key_token_list is None
-        need_dense = (loss_func in ['jsd', 'kld', 'topk']) and precomputed_dense_logits is None
+        need_dense = (loss_func in ['jsd', 'kld', 'topk', 'forward_kl']) and precomputed_dense_logits is None
         if need_dense or need_keytok or outlier is not None:
             # model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', device_map=device_map, low_cpu_mem_usage=True)
             model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
@@ -402,7 +402,7 @@ class LlamaEvaluator:
                 stride=stride,
                 last_tokens=self.last_tokens,
                 prefill_prompt=prefill_prompt,
-                dense_logits_list=self.dense_logits[dataset] if (self.loss_func in ['jsd', 'kld', 'topk']) else None,
+                dense_logits_list=self.dense_logits[dataset] if (self.loss_func in ['jsd', 'kld', 'topk', 'forward_kl']) else None,
                 key_token_list=self.key_token_list[dataset] if self.use_key_token else None, 
                 tokenizer=self.tokenizer,
                 num_fewshot=self.num_fewshot, 

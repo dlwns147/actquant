@@ -16,13 +16,22 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
     apply_rotary_pos_emb,
     repeat_kv,
-    _CONFIG_FOR_DOC,
-    LLAMA_START_DOCSTRING,
-    LLAMA_INPUTS_DOCSTRING,
-    add_start_docstrings_to_model_forward,
-    replace_return_docstrings,
     eager_attention_forward,
 )
+# transformers >=4.5x removed these doc-only symbols from modeling_llama.
+try:
+    from transformers.models.llama.modeling_llama import (
+        _CONFIG_FOR_DOC, LLAMA_START_DOCSTRING, LLAMA_INPUTS_DOCSTRING)
+except ImportError:
+    _CONFIG_FOR_DOC = "LlamaConfig"
+    LLAMA_START_DOCSTRING = ""
+    LLAMA_INPUTS_DOCSTRING = ""
+try:
+    from transformers.models.llama.modeling_llama import (
+        add_start_docstrings_to_model_forward, replace_return_docstrings)
+except ImportError:
+    from transformers.utils import (
+        add_start_docstrings_to_model_forward, replace_return_docstrings)
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
@@ -264,5 +273,9 @@ def replace_model_forward(self):
 
 def convert_model_kivi(self):
     replace_model_forward(self.model)
+    # transformers 4.57.6 removed LlamaModel._update_causal_mask; the KIVI forward
+    # still calls it — bind the 4.50-identical impl onto the LlamaModel instance.
+    from model._mask_compat import bind_mask_compat
+    bind_mask_compat(self.model)
     for layer in self.model.layers:
         replace_attention_forward(layer.self_attn)

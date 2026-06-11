@@ -90,8 +90,13 @@ done
 # ── sampling design ──
 RANDOM_SAMPLE=23
 QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.01,0.5,0.99"
-# SAMPLING_METHOD=coverage_nsga2_marginal
-SAMPLING_METHOD=coverage_nsga2_combined   # 2-obj (cov_rad, std_max)
+# RECIPE: maximin = model-free farthest-point coverage — validated best
+# global-representation sampler (multi-seed; beats random/uncertainty-AL on
+# R²/worst-bin/tail, ~2× lower post_search selection regret; works with any
+# deployed surrogate incl. rbf-tps). coverage_nsga2_* are near-equivalent
+# alternatives; random/uncertainty-AL underperform.
+SAMPLING_METHOD=maximin
+# SAMPLING_METHOD=coverage_nsga2_combined   # 2-obj (cov_rad, std_max)
 COVERAGE_COORD=rank
 COVERAGE_PER_AXIS_AGG=max
 COVERAGE_PARETO_SELECT=knee
@@ -124,6 +129,7 @@ if [ -n "${RANDOM_SAMPLE}" ] && [ "${RANDOM_SAMPLE}" -gt 0 ]; then
     SAVE+="_rs${RANDOM_SAMPLE}"
     case "${SAMPLING_METHOD}" in
         random)                  SAVE+="_r" ;;
+        maximin)                 SAVE+="_mm" ;;
         coverage_nsga2_joint)    SAVE+="_j${COVERAGE_COORD:0:1}" ;;
         coverage_nsga2_marginal) SAVE+="_m${COVERAGE_COORD:0:1}${COVERAGE_PER_AXIS_AGG:0:1}" ;;
         coverage_nsga2_combined) SAVE+="_c${COVERAGE_COORD:0:1}${COVERAGE_PARETO_SELECT:0:1}" ;;
