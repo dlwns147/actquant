@@ -272,6 +272,50 @@ def get_minilongbench(tokenizer, cache_dir=None, require_answer=True, ignore_ind
     # dataset = _MiniLongBenchDataset(all_examples)
     # return DataLoader(dataset, batch_size=1, drop_last=False, shuffle=False)
 
+def get_task3(tokenizer, n_sample=129, ignore_index=-100, max_len=2048):
+    """Downstream-aware calibration: prompt+answer from FP16-correct gsm8k_cot/ifeval/mbpp
+    samples (the proxy-study sample set). labels=ignore_index on the prompt so the
+    search objective (JSD/forward_kl) is measured ONLY on the answer tokens — i.e. the
+    search calibrates on the 3 downstream tasks rather than wikitext2. ~n_sample/3 per task."""
+    import json as _json, glob as _glob
+    SAMP = "/NAS/SJ/actquant/poc/benchmark_proxy/analyse_metric/samples/Llama-3.1-8B-Instruct"
+    TASKS = {"gsm8k_cot": ("exact_match", "strict-match"),
+             "ifeval": ("prompt_level_strict_acc", None),
+             "mbpp": ("pass_at_1", None)}
+    per = max(1, n_sample // len(TASKS))
+    ex = []
+    for task, (field, filt) in TASKS.items():
+        fs = sorted(_glob.glob(f"{SAMP}/samples_{task}_*.jsonl"))
+        if not fs:
+            continue
+        n = 0
+        for line in open(fs[-1]):
+            r = _json.loads(line)
+            if filt is not None and r.get("filter") != filt:
+                continue
+            if not bool(r.get(field)):
+                continue
+            prompt = r["arguments"]["gen_args_0"]["arg_0"]
+            ans = r["resps"][0][0]
+            if not isinstance(ans, str) or not ans:
+                continue
+            ids = tokenizer(prompt + ans, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+            if ids.numel() < 2 or ids.numel() > max_len:
+                continue
+            plen = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)["input_ids"][0].numel()
+            labels = ids.clone()
+            labels[:plen] = ignore_index
+            if (labels != ignore_index).sum() == 0:
+                continue
+            am = torch.ones_like(ids)
+            ex.append((ids, am, labels))
+            n += 1
+            if n >= per:
+                break
+    print(f"[get_task3] {len(ex)} calibration seqs (prompt+answer, answer-only loss) over {len(TASKS)} tasks")
+    return DataLoader(ex, batch_size=1)
+
+
 def get_trainloaders(name, n_sample=128, seed=0, seqlen=2048, model='', batch_size=1, cache_dir=None):
     tokenizer = get_tokenizer(model)
     if 'wikitext2' in name:
@@ -286,6 +330,8 @@ def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0
         tokenizer = get_tokenizer(model, cache_dir=cache_dir)
     if "minilongbench" in name:
         return get_minilongbench(tokenizer=tokenizer, cache_dir=cache_dir, require_answer=require_answer)
+    if "task3" in name:  # downstream-aware calibration (gsm8k+ifeval+mbpp answer tokens)
+        return get_task3(tokenizer=tokenizer, n_sample=n_sample)
     if train:
         if 'wikitext2' in name:
             return get_wikitext2_trainenc(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, cache_dir=cache_dir)

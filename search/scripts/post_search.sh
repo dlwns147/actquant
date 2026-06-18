@@ -80,7 +80,13 @@ MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
 PREFER="metric#0.0"
+# RECIPE: top-k verify — JSD-screen the predicted top-VERIFY_TOPK in the band,
+# benchmark only the measured-best N. k=5 recovers the true band-best 96-100%
+# (top-1 alone 50-73%; in-band tau ~0.5-0.7 near-ties) at (k-N) extra JSD evals.
+# N keeps its original meaning = number of final architectures to benchmark.
 N=1
+SELECT_MEASURED_BEST=True
+VERIFY_TOPK=5
 
 DATASETS="wikitext2"
 METRIC="loss"
@@ -204,6 +210,7 @@ fi
 [ -n "${KVDIM_EXPR}" ]  && ARGS+=" --kvdim_expr ${KVDIM_EXPR}"
 [ -n "${EFF_KV_EXPR}" ] && ARGS+=" --eff_kv_expr ${EFF_KV_EXPR}"
 [ -n "${SAMPLE_PATH}" ] && ARGS+=" --sample_path ${SAMPLE_PATH} --surrogate ${SURROGATE} --rbf_kernel ${RBF_KERNEL} --surrogate_device ${SURROGATE_DEVICE}"
+[ "${SELECT_MEASURED_BEST:-False}" = "True" ] && ARGS+=" --select_measured_best --verify_topk ${VERIFY_TOPK:-5}"
 
 # ARGS+=" --datasets ${DATASETS} --seqlen ${SEQLEN} --min_seqlen ${MIN_SEQLEN} --n_sample ${N_SAMPLE} --data_batch_size ${DATA_BATCH_SIZE}"
 # ARGS+=" --zeroshot --tasks ${TASKS} --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE}"

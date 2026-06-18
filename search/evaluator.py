@@ -369,9 +369,15 @@ class LlamaEvaluator:
                     self.model.config.kivi_config.k_pruning_dim = [int(d) for d in p_arch['k']]
                 if 'v' in p_arch:
                     self.model.config.kivi_config.v_pruning_dim = [int(d) for d in p_arch['v']]
+                # Enable ThinK whenever EITHER K or V has a non-zero pruning dim.
+                # (Previously checked only K, so a V-only-pruned arch ran with
+                # ThinK off -> the V pruning was a silent no-op while eff_kvbits
+                # still credited the discount -> phantom "free" archs dominated
+                # the high-eff_kvbits Pareto corner. See tests/test_vprune_gate.py.)
                 self.model.config.kivi_config.enable_think = (
                     ('think' in kv_methods)
                     or any(int(d) > 0 for d in p_arch.get('k', [0]))
+                    or any(int(d) > 0 for d in p_arch.get('v', [0]))
                 )
         elif active_kv == 'fp16':
             pass

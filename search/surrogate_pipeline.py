@@ -88,10 +88,11 @@ SURROGATES = _all_surrogates()
 # back-compat alias of --method al --acq ei). Objective tag: 'A' = global
 # surrogate-ranking accuracy (uncertainty / coverage / disagreement), 'B' =
 # find the lowest-JSD arch within the band (improvement-based).
-ACQS = ['ei', 'ucb', 'alm', 'imse', 'maximin', 'qbc', 'rank', 'eigf', 'mepe']
+ACQS = ['ei', 'ucb', 'alm', 'imse', 'maximin', 'qbc', 'rank', 'eigf', 'mepe',
+        'cvvor', 'sfcvt', 'neyman']
 ACQ_OBJECTIVE = {'ei': 'B', 'ucb': 'B', 'alm': 'A', 'imse': 'A',
                  'maximin': 'A', 'qbc': 'A', 'rank': 'A', 'eigf': 'A',
-                 'mepe': 'A'}
+                 'mepe': 'A', 'cvvor': 'A', 'sfcvt': 'A', 'neyman': 'A'}
 METHODS = ['quantile', 'random', 'ga', 'maximin', 'al', 'al_ei', 'ga_imse']
 
 # Per-axis comp_obj key (mirrors utils.func.build_expr_map's spec order).
@@ -469,9 +470,12 @@ def _topk_diverse(scores, M_cand, K, enable, mult=4):
 # ════════════════════════════════════════════════════════════════════════════
 # Unified acquisition dispatch (all --acq choices)
 # ════════════════════════════════════════════════════════════════════════════
-def _acquire(args, X_train, y_train, M_cand, K, acq):
+def _acquire(args, X_train, y_train, M_cand, K, acq,
+             band_tr=None, band_cand=None):
     """Return (selected positions into M_cand, info dict) for the chosen
-    acquisition. Minimization objective (lower JSD = better)."""
+    acquisition. Minimization objective (lower JSD = better). band_tr /
+    band_cand (only used by acq=neyman) carry the deployment-band comp value
+    (e.g. eff_kvbits) of the train rows / candidates."""
     K = int(min(K, len(M_cand)))
     info = dict(acq=acq, objective=ACQ_OBJECTIVE[acq],
                 n_train=int(len(y_train)), n_cand=int(len(M_cand)))
@@ -587,6 +591,127 @@ def _acquire(args, X_train, y_train, M_cand, K, acq):
         info.update(signal='mepe_cv_balanced', alpha=round(alpha, 3),
                     loo_mean=float(loo.mean()))
         return np.asarray(sel, np.int64), info
+
+    if acq in ('cvvor', 'sfcvt', 'neyman'):
+        # ── coverage × measured-y hybrids with a STRUCTURAL anti-clustering
+        # guarantee — the failure mode that sank per-point exploit (EIGF/MEPE
+        # real-sampling collapse) is blocked by construction, while measured y
+        # enters only through the validated signal (LOO/CV |residual| = where
+        # the surrogate is WRONG, never raw response magnitude):
+        #   cvvor   CV-Voronoi (Xu et al. 2014, JMD 136(7)): rank Voronoi cells
+        #           by their train point's LOO error, batch = K worst cells,
+        #           each contributes its in-cell FARTHEST candidate (the batch
+        #           K-fold CV-Voronoi variant).
+        #   sfcvt   SFCVT (Aute et al. 2013, SMO 48): surrogate fitted on LOO
+        #           errors, maximize predicted error SUBJECT TO a min-distance
+        #           (space-filling) constraint; greedy batch.
+        #   neyman  stratified σ-allocation (Neyman; TS-Neyman-style floor):
+        #           band quota ∝ band-local LOO-RMS with an exploration floor
+        #           (≥1/band) and a 2×even-share cap, then maximin WITHIN the
+        #           band — "complexity-even, y-aware" by construction.
+        Xtr = np.asarray(X_train, float); ytr = np.asarray(y_train, float)
+        Mc = np.asarray(M_cand, float)
+        bounds = np.vstack([Xtr, Mc]) if len(Mc) else Xtr
+        loo = np.abs(_loocv_residuals(args, Xtr, ytr, bounds))
+        mu_, sd_ = bounds.mean(0), bounds.std(0); sd_[sd_ < 1e-12] = 1.0
+        Zt = (Xtr - mu_) / sd_; Zc = (Mc - mu_) / sd_
+        D = np.linalg.norm(Zc[:, None] - Zt[None], axis=2)   # n_cand × n_train
+        info.update(loo_mean=float(loo.mean()), loo_max=float(loo.max()))
+
+        if acq == 'cvvor':
+            nn_t = D.argmin(1)
+            cells = {}
+            for c, t in enumerate(nn_t):
+                cells.setdefault(int(t), []).append(c)
+            order_cells = sorted(cells, key=lambda t: -loo[t])
+            sel, rank = [], 0
+            while len(sel) < K:
+                added = False
+                for t in order_cells:
+                    if len(sel) >= K:
+                        break
+                    mem = sorted(cells[t], key=lambda c: -D[c, t])
+                    if rank < len(mem):
+                        sel.append(mem[rank])
+                        added = True
+                if not added:
+                    break
+                rank += 1
+            info.update(signal='cv_voronoi_loo', n_cells=len(cells))
+            return np.asarray(sel[:K], np.int64), info
+
+        if acq == 'sfcvt':
+            err_m = _make_surrogate(args, Xtr, loo, bounds)
+            ehat = np.asarray(err_m.predict(Mc)).reshape(-1)
+            Dt = np.linalg.norm(Zt[:, None] - Zt[None], axis=2)
+            np.fill_diagonal(Dt, np.inf)
+            theta0 = float(np.median(Dt.min(1)))   # train NN spacing
+            dmin = D.min(1).copy()
+            sel = []
+            for _ in range(K):
+                th = theta0
+                feas = np.where(dmin >= th)[0]
+                while len(feas) == 0 and th > 1e-6:
+                    th *= 0.5
+                    feas = np.where(dmin >= th)[0]
+                if len(feas) == 0:
+                    break
+                j = int(feas[np.argmax(ehat[feas])])
+                sel.append(j)
+                dmin = np.minimum(dmin, np.linalg.norm(Zc - Zc[j], axis=1))
+                dmin[j] = -1.0
+            info.update(signal='sfcvt_loo_surrogate', theta=round(theta0, 4),
+                        ehat_max=float(np.max(ehat)))
+            return np.asarray(sel, np.int64), info
+
+        # neyman
+        if band_tr is None or band_cand is None:
+            raise SystemExit("[al neyman] band comp values missing — neyman "
+                             "needs the band column (run via --method al; the "
+                             "band axis comes from --val_band_obj / auto).")
+        B = int(args.al_bands)
+        band_tr = np.asarray(band_tr, float)
+        band_cand = np.asarray(band_cand, float)
+        edges = _band_edges(np.concatenate([band_tr, band_cand]), B)
+        bid_t = np.clip(np.searchsorted(edges, band_tr, 'right') - 1, 0, B - 1)
+        bid_c = np.clip(np.searchsorted(edges, band_cand, 'right') - 1, 0, B - 1)
+        sig = np.full(B, np.nan)
+        for b in range(B):
+            m = bid_t == b
+            if m.sum() >= 2:
+                sig[b] = float(np.sqrt(np.mean(loo[m] ** 2)))
+        # unseen/thin band → assume worst (explore it)
+        fill = np.nanmax(sig) if np.isfinite(np.nanmax(sig)) else 1.0
+        sig[np.isnan(sig)] = fill
+        nonempty = [b for b in range(B) if (bid_c == b).any()]
+        if not nonempty:
+            return np.asarray([], np.int64), info
+        cap = max(1, int(np.ceil(2.0 * K / len(nonempty))))
+        quota = {b: 0 for b in nonempty}
+        for b in sorted(nonempty, key=lambda b: -sig[b])[:K]:
+            quota[b] = 1                       # exploration floor
+        left = K - sum(quota.values())
+        while left > 0:
+            avail = [b for b in nonempty
+                     if quota[b] < min(cap, int((bid_c == b).sum()))]
+            if not avail:
+                break
+            b = max(avail, key=lambda b: sig[b] / (quota[b] + 1))
+            quota[b] += 1
+            left -= 1
+        sel = []
+        seed = Zt
+        for b in sorted(nonempty, key=lambda b: -sig[b]):
+            if quota[b] <= 0:
+                continue
+            mem = np.where(bid_c == b)[0]
+            pick = mem[_maximin_pick(Zc[mem], seed, quota[b])]
+            sel += [int(p) for p in pick]
+            seed = np.vstack([seed, Zc[pick]])
+        info.update(signal='neyman_band_alloc',
+                    sigma_bands=[round(float(s), 5) for s in sig],
+                    quota={int(b): int(q) for b, q in quota.items()})
+        return np.asarray(sel[:K], np.int64), info
 
     if acq == 'imse':
         if _strip_transform(args.surrogate)[1] != 'ard_gp':
@@ -787,8 +912,21 @@ def cmd_sample(args):
         if len(M_cand) < int(args.batch):
             print(f"[{src_tag}] only {len(M_cand)} candidates left, "
                   f"reducing batch from {args.batch}")
+        # neyman needs the deployment-band comp value per train row/candidate
+        band_tr = band_cand = None
+        if acq == 'neyman':
+            band_key = _val_band_key(args, expr_keys)
+            axis_keys = [AXIS_COMP_KEY[k] for k in expr_keys]
+            if band_key not in axis_keys:
+                raise SystemExit(f"[al neyman] band obj {band_key} not a "
+                                 f"per-axis comp key of {expr_keys}")
+            ax = axis_keys.index(band_key)
+            band_tr = np.asarray([float(r[band_key]) for r in existing_rows
+                                  if int(r['idx']) in completed], float)
+            band_cand = F[cand_pos, 2 + 2 * ax].astype(float)
         sel, info = _acquire(args, X_train, y_train, M_cand,
-                             K=int(args.batch), acq=acq)
+                             K=int(args.batch), acq=acq,
+                             band_tr=band_tr, band_cand=band_cand)
         I_extra = [int(cand_pos[s]) for s in sel]
         print(f"[{src_tag}] acq={acq} objective={info.get('objective')} "
               f"train={info['n_train']} cand={info['n_cand']} "
@@ -932,6 +1070,7 @@ def cmd_eval(args):
         method={'w': args.w_method, 'kv': args.kv_method},
         quant_model_paths=args.quant_model_paths,
         outlier=torch.load(args.outlier_path) if args.outlier_path else None,
+        seed=args.seed,   # calib loader shuffle seed (was silently fixed at 0)
         seqlen=args.seqlen, min_seqlen=args.min_seqlen, n_sample=args.n_sample,
         datasets=args.datasets, device_map=ctx.device_map, dtype=ctx.dtype,
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
@@ -1275,6 +1414,10 @@ def build_parser():
                         'front = Pareto-frontier-focused (lowest combined metric '
                         'per complexity bin) — parity with GA so uncertainty '
                         'refinement adds value on the deployment curve.')
+    p.add_argument('--al_bands', type=int, default=6,
+                   help='(sample --method al --acq neyman) number of '
+                        'equal-width deployment bands (--val_band_obj axis) '
+                        'for the stratified σ-allocation.')
     p.add_argument('--al_transform', choices=['none', 'sqrt', 'log'],
                    default='none',
                    help='target transform applied to y when fitting the '

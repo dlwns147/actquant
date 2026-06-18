@@ -309,6 +309,13 @@ def main(args):
     separable = (not args.sample_path and bool(args.comp_obj)
                  and all(p is not None for p in _pa))
 
+    # top-k verify: materialise the predicted top-`n_verify` so the cheap-JSD
+    # screen has a pool, then keep the measured-best `-n` for the (expensive)
+    # benchmarks. Without --select_measured_best, n_verify == args.n (the final
+    # arch count keeps its original meaning).
+    n_verify = (max(int(args.n), int(args.verify_topk))
+                if args.select_measured_best else int(args.n))
+
     if separable:
         ranked = {}                       # axis -> subnet idx, best→worst JSD
         for i, o in enumerate(args.comp_obj):
@@ -326,7 +333,7 @@ def main(args):
         for a, k in enumerate(expr_keys):             # uncovered axis: global
             if a not in ranked:                       # lowest JSD, no window
                 ranked[a] = np.argsort(_efm[k][:, 0], kind='stable')
-        n_sel = min(int(args.n), min(len(v) for v in ranked.values()))
+        n_sel = min(n_verify, min(len(v) for v in ranked.values()))
         valid_nd_idx = np.empty((n_sel, K), np.int64)
         for a in range(K):
             valid_nd_idx[:, a] = ranked[a][:n_sel]
@@ -345,7 +352,10 @@ def main(args):
                   f"JSD={_efm[expr_keys[ax]][valid_nd_idx[0, ax], 0]:.5f}")
         print(f"[post_search] no --sample_path + separable comp_obj "
               f"{args.comp_obj} → per-axis lowest-JSD combination "
-              f"(NO Σ; -n={args.n} → {n_sel} combo(s))")
+              f"(NO Σ; -n={args.n}"
+              + (f", verify_topk={args.verify_topk}" if args.select_measured_best
+                 else "")
+              + f" → {n_sel} combo(s))")
     else:
         valid_nd_idx = select_valid_nd_idx(
             nd.nd_shape, nd.new_metric_nd, nd.comp_nd_list,
@@ -419,8 +429,9 @@ def main(args):
         pf = F
         ps = LazyPs(lambda row: build_arch(ctx.default_arch, expr_keys,
                                            _esm, row), valid_nd_idx)
-        I = list(range(min(args.n, len(valid_nd_idx))))
-        sel_mode = f'top-{args.n}'
+        I = list(range(min(n_verify, len(valid_nd_idx))))
+        sel_mode = (f'verify top-{len(I)} → best-{args.n}'
+                    if args.select_measured_best else f'top-{args.n}')
 
     # ─────────────────────── final architecture selection ───────────────────────
     # NOTE: --prefer (ASF) and --high_tradeoff (NonDominatedSorting) final
@@ -463,6 +474,37 @@ def main(args):
         use_key_token=args.use_key_token, trunc_len=args.trunc_len,
         sliding_window=args.sliding_window, alpha=args.alpha, beta=args.beta,
         key_token_path=args.key_token_path)
+
+    # ── top-k verify (racing-lite): cheaply MEASURE the predicted top-k JSD
+    # (k = --verify_topk), then benchmark only the measured-best `-n`. Within a
+    # narrow COMP_OBJ band the surrogate's in-band τ is ~0.5-0.7 (near-tie y),
+    # so argmin-pred top-1 finds the true best only ~50-73% of the time; the
+    # measured-best of the predicted top-5 recovers it 96-100% with worst-band
+    # regret ≈ 0 (band-val-1000 study). Costs (k − n) extra metric evals.
+    if args.select_measured_best and len(I) > 1:
+        if not args.datasets:
+            raise SystemExit('--select_measured_best needs --datasets '
+                             '(the verification metric).')
+        measured = {}
+        for idx in tqdm(I, desc=f'verify top-{len(I)}'):
+            arch = ps[idx]
+            model = evaluator.sample(arch)
+            metric = evaluate_metric(args, arch, model, evaluator,
+                                     ctx.accelerator)
+            measured[idx] = float(list(metric.values())[0])
+            print(f'[verify] idx={idx} measured={measured[idx]:.6f} '
+                  f'pred={pf[idx, 0]:.6f}')
+            if ('awq' in args.w_method or 'gptq' in args.w_method
+                    or 'qeft' in args.w_method):
+                del model, evaluator.model
+                clean_up()
+        # keep the measured-best `-n` (original meaning of -n = #archs desired)
+        ranked_by_meas = sorted(measured, key=measured.get)
+        I = ranked_by_meas[:max(1, int(args.n))]
+        print(f'[verify] measured-best-{len(I)} of top-{len(measured)}: '
+              + ', '.join(f'idx={i}(y={measured[i]:.6f},'
+                          f'pred-rank={ranked_by_meas.index(i)})' for i in I)
+              + ' — benchmarks run on these only')
 
     for idx in tqdm(I):
         arch = ps[idx]
@@ -574,6 +616,17 @@ def build_parser():
     p.add_argument('--high_tradeoff', type=str, nargs='+', default=[])
     p.add_argument('-n', type=int, default=1,
                    help='number of architectures desired')
+    p.add_argument('--select_measured_best', action='store_true',
+                   help='top-k verify: cheaply measure the predicted top-'
+                        '`--verify_topk` archs (--datasets metric), then keep '
+                        'the measured-best `-n` for the expensive benchmarks. '
+                        'verify_topk=5 recovers the true band-best 96-100%% '
+                        '(vs 50-73%% for argmin-pred top-1) at (k-n) extra '
+                        'metric evals. -n keeps its meaning = #archs output.')
+    p.add_argument('--verify_topk', type=int, default=5,
+                   help='(with --select_measured_best) how many predicted-best '
+                        'archs to JSD-screen before keeping the measured-best '
+                        '-n. Clamped up to >= -n.')
     # long-ppl key-token options (consumed by the evaluator)
     p.add_argument('--use_key_token', action='store_true')
     p.add_argument('--trunc_len', type=int, default=512)

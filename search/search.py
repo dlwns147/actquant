@@ -18,6 +18,8 @@ from pymoo.operators.crossover.pntx import TwoPointCrossover
 from pymoo.operators.crossover.binx import BinomialCrossover
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.operators.mutation.pm import PolynomialMutation
+from pymoo.core.population import Population
+from pymoo.core.evaluator import Evaluator
 
 from search_space.llama import LlamaSearchSpace
 from predictor.factory import get_predictor
@@ -202,6 +204,7 @@ class Search:
         )
         self.ga_pop_size = kwargs.pop('ga_pop_size', 40)
         self.subset_pop_size = kwargs.pop('subset_pop_size', 100)
+        self.anchor_endpoints = kwargs.pop('anchor_endpoints', False)
         self.debug = kwargs.pop('debug', False)
         self.ga_algorithm = kwargs.pop('ga_algorithm', 'nsga2')
         self.max_value = kwargs.pop('max_value', 50)
@@ -412,26 +415,50 @@ class Search:
         # non-dominated arch bit-strings
         nd_X = np.array([self.search_space.encode(x[0]) for x in archive])[front]
 
+        # Budget-feasible comp_obj endpoint (boundary-corner) archs to always keep
+        # both edges represented. Seeded into the NSGA2 sampling here, re-merged
+        # into the result pool below, and anchored in subset selection -- each with
+        # an existence check so an already-present edge is never duplicated.
+        endpoint_archs = self._get_endpoint_archs() if self.anchor_endpoints else []
+        if endpoint_archs:
+            n_before = len(nd_X)
+            nd_X = self._inject_endpoint_rows(nd_X, endpoint_archs)
+            print(f'anchor_endpoints: {len(endpoint_archs)} endpoint archs, '
+                  f'seeded {len(nd_X) - n_before} new into NSGA2 sampling')
+
         # initiate a multi-objective solver to optimize the problem
         method = NSGA2(pop_size=self.ga_pop_size, sampling=nd_X,
             crossover=BinomialCrossover(prob=self.crossover_prob, n_offsprings=1),
             mutation=IntMutation(prob=self.mut_prob),
             eliminate_duplicates=True)
-        
+
         # initialize the candidate finding optimization problem
         problem = AuxiliarySingleLevelProblemThink(self.search_space, predictor, self.config, self.comp_obj, self.comp_obj_max, self.comp_obj_min, self.group_size, self.n_token, self.attn_sink)
-        
+
         # kick-off the search
         res = minimize(problem, method, termination=('n_gen', 20), save_history=True, verbose=True)
-        
+
+        # re-inject any endpoint arch NSGA2 dropped so both edges survive into the
+        # candidate pool (no-op for endpoints already in the population).
+        res_pop = res.pop
+        if endpoint_archs:
+            n_before = len(res_pop)
+            res_pop = self._merge_endpoint_pop(res_pop, endpoint_archs, problem)
+            print(f'anchor_endpoints: re-merged {len(res_pop) - n_before} '
+                  f'dropped endpoint archs into candidate pool')
+
         # check for duplicates
         not_duplicate = np.logical_not(
-            [x in [x[0] for x in archive] for x in [self.search_space.decode(x) for x in res.pop.get("X")]])
+            [x in [x[0] for x in archive] for x in [self.search_space.decode(x) for x in res_pop.get("X")]])
         print(f'not_duplicate : {sum(not_duplicate)}')
 
-        pop = res.pop[not_duplicate]
+        pop = res_pop[not_duplicate]
         if sum(not_duplicate) >= K:
-            indices = self._subset_selection(pop, F[front, 1:], K, self.subset_pop_size)
+            # Anchor the subset-spacing score to the achievable comp_obj endpoints
+            # so edge (esp. right-end) candidates are kept rather than pruned away
+            # when they don't improve spacing over the archive range.
+            endpoints = self._subset_endpoints() if self.anchor_endpoints else None
+            indices = self._subset_selection(pop, F[front, 1:], K, self.subset_pop_size, endpoints)
             pop = pop[indices]
 
         candidates = []
@@ -441,8 +468,24 @@ class Search:
         # decode integer bit-string to config and also return predicted top1_err
         return candidates, predictor.predict(self.search_space.decode_encode_predictor(pop.get("X")))
 
-    def _subset_selection(self, pop, nd_F, K, pop_size):
-        problem = SubsetProblem(pop.get("F")[:, 1:], nd_F, K, len(self.comp_obj))
+    def _subset_endpoints(self):
+        """Both edges per comp_obj as a (2, n_comp_obj) array [lo_row, hi_row].
+
+        The achievable full range (`_objective_full_range`, the same uniform
+        boundary corners the front-coverage diagnostic uses) clamped to the
+        search budget [comp_obj_min, comp_obj_max] so the anchors are always
+        attainable by a candidate. Passed to `_subset_selection` to force both
+        edges to be represented when scoring Pareto-front spacing."""
+        full = self._objective_full_range()
+        lo, hi = [], []
+        for j, obj in enumerate(self.comp_obj):
+            fmin, fmax = full[obj]
+            lo.append(max(fmin, self.comp_obj_min[j]))
+            hi.append(min(fmax, self.comp_obj_max[j]))
+        return np.array([lo, hi], dtype=float)
+
+    def _subset_selection(self, pop, nd_F, K, pop_size, endpoints=None):
+        problem = SubsetProblem(pop.get("F")[:, 1:], nd_F, K, len(self.comp_obj), endpoints=endpoints)
         algorithm = GA(
             pop_size=pop_size, sampling=MySampling(), crossover=BinaryCrossover(),
             mutation=MyMutation(), eliminate_duplicates=True)
@@ -474,6 +517,7 @@ class Search:
         first_linear = self.config['linear'][0].split('.')[-1]
         w_opts = getattr(ss, f'{first_linear}_option')
         vals = {obj: [] for obj in self.comp_obj}
+        corner_archs, corner_infos = [], []
         for w_o in w_opts:
             for k_o in ss.k_option:
                 for v_o in ss.v_option:
@@ -483,10 +527,65 @@ class Search:
                                 w=ss.boundary_w_per_linear(w_o),
                                 k=[k_o], v=[v_o], k_dim=[kp], v_dim=[vp])[0]
                             info = get_net_info(arch, self.config, self.group_size, n_token=self.n_token, attn_sink=self.attn_sink)
+                            corner_archs.append(arch)
+                            corner_infos.append(info)
                             for obj in self.comp_obj:
                                 vals[obj].append(info[obj])
         self._obj_range = {obj: (float(min(v)), float(max(v))) for obj, v in vals.items()}
+        # archs sitting at each comp_obj's min/max corner (all are budget-feasible:
+        # search_space.sample() only returns archs inside [comp_obj_min, comp_obj_max]).
+        self._endpoint_arch_cache = self._collect_endpoint_archs(corner_archs, corner_infos)
         return self._obj_range
+
+    def _collect_endpoint_archs(self, archs, infos):
+        """Unique archs achieving each comp_obj's min and max over the (feasible)
+        boundary corners -- the 'both edges' anchors to inject into the search."""
+        out, seen = [], set()
+        for obj in self.comp_obj:
+            col = [info[obj] for info in infos]
+            for idx in (int(np.argmin(col)), int(np.argmax(col))):
+                key = tuple(self.search_space.encode(archs[idx]).tolist())
+                if key not in seen:
+                    seen.add(key)
+                    out.append(archs[idx])
+        return out
+
+    def _get_endpoint_archs(self):
+        """Endpoint (boundary-corner) archs, computed lazily alongside the cached
+        objective full range."""
+        self._objective_full_range()
+        return getattr(self, '_endpoint_arch_cache', [])
+
+    def _inject_endpoint_rows(self, X, archs):
+        """Append the encodings of `archs` to the NSGA2 sampling matrix `X`,
+        skipping any whose encoding is already present (existence check)."""
+        rows = [np.asarray(r) for r in X]
+        seen = {tuple(r.tolist()) for r in rows}
+        for arch in archs:
+            code = np.asarray(self.search_space.encode(arch))
+            key = tuple(code.tolist())
+            if key not in seen:
+                seen.add(key)
+                rows.append(code)
+        return np.array(rows)
+
+    def _merge_endpoint_pop(self, pop, archs, problem):
+        """Evaluate the endpoint archs missing from `pop` through `problem` (so
+        they carry predicted metric / comp_obj / constraints) and merge them in.
+        Endpoints already in the population are skipped (existence check)."""
+        existing = {tuple(np.asarray(x).tolist()) for x in pop.get("X")}
+        new_rows = []
+        for arch in archs:
+            code = np.asarray(self.search_space.encode(arch))
+            key = tuple(code.tolist())
+            if key not in existing:
+                existing.add(key)
+                new_rows.append(code)
+        if not new_rows:
+            return pop
+        new_pop = Population.new(X=np.array(new_rows))
+        Evaluator().eval(problem, new_pop)
+        return Population.merge(pop, new_pop)
 
     def _front_coverage(self, archive):
         """Per-comp_obj fraction of the achievable objective range spanned by
@@ -573,20 +672,49 @@ class AuxiliarySingleLevelProblemThink(Problem):
 
 class SubsetProblem(Problem):
     """ select a subset to diversify the pareto front """
-    def __init__(self, candidates, archive, K, n_obj):
+    def __init__(self, candidates, archive, K, n_obj, endpoints=None):
         super().__init__(n_var=len(candidates), n_obj=1,
                          n_constr=1, xl=0, xu=1, type_var=bool)
         self.archive = archive
         self.candidates = candidates
         self.n_max = K
+        # (2, n_obj) array [lo_row, hi_row] of comp_obj endpoints to always
+        # represent when scoring spacing, or None to keep the legacy behaviour.
+        self.endpoints = endpoints
 
     def _evaluate(self, x, out, *args, **kwargs):
         f = np.full((x.shape[0], 1), np.nan)
         g = np.full((x.shape[0], 1), np.nan)
 
         for i, _x in enumerate(x):
-            tmp = np.sort(np.concatenate((self.archive, self.candidates[_x])), axis=0)
-            f[i, 0] = np.std(np.diff(tmp, axis=0))
+            base = np.concatenate((self.archive, self.candidates[_x]), axis=0)
+            if self.endpoints is None:
+                tmp = np.sort(base, axis=0)
+                f[i, 0] = np.std(np.diff(tmp, axis=0))
+            else:
+                # Sort/diff per comp_obj column (== the legacy axis=0 pooling),
+                # conditionally injecting each edge so the spacing score always
+                # spans the full achievable range. Two cases per edge:
+                #   - already present  -> skip (a duplicate adds a 0 gap that
+                #                          would inflate std and fight the anchor)
+                #   - not present      -> inject it as a virtual point so a large
+                #                          gap up to the edge penalises subsets
+                #                          that leave that edge unrepresented.
+                diffs = []
+                for j in range(base.shape[1]):
+                    col = base[:, j]
+                    lo, hi = self.endpoints[0, j], self.endpoints[1, j]
+                    if hi > lo:
+                        tol = 1e-6 * (hi - lo)
+                        extra = []
+                        if not np.any(np.abs(col - lo) <= tol):
+                            extra.append(lo)
+                        if not np.any(np.abs(col - hi) <= tol):
+                            extra.append(hi)
+                        if extra:
+                            col = np.concatenate((col, np.asarray(extra, dtype=col.dtype)))
+                    diffs.append(np.diff(np.sort(col)))
+                f[i, 0] = np.std(np.concatenate(diffs))
             g[i, 0] = (self.n_max - np.sum(_x)) ** 2
 
         out["F"] = f
@@ -717,6 +845,14 @@ if __name__ == '__main__':
                         help='population size of the NSGA stage')
     parser.add_argument('--subset_pop_size', type=int, default=100,
                         help='population size of the subset selection stage')
+    parser.add_argument('--anchor_endpoints', action='store_true',
+                        help='Keep both achievable comp_obj edges represented during candidate '
+                             'search (full range clamped to comp_obj_min/max), so the right-end '
+                             'region is explored instead of pruned. Injects the budget-feasible '
+                             'boundary-corner archs into the NSGA2 sampling, re-merges any NSGA2 '
+                             'drops into the candidate pool, and anchors the subset-selection '
+                             'spacing score to both edges. Every stage existence-checks first, so '
+                             'an already-present endpoint is never duplicated.')
     parser.add_argument('--debug', action='store_true', help='visualization of each iteration results')
     parser.add_argument('--result_file', type=str, default='results.txt',
                         help='')
