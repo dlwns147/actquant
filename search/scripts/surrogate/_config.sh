@@ -150,10 +150,20 @@ VAL_FRONT_WBANDS=4
 # SLURM concurrency (override per-call as needed).
 SLURM_ARRAY_CONCURRENCY=4
 
-# Optional comp_obj pre-filter (leave empty for full PF combo).
-COMP_OBJ=()
-COMP_OBJ_VAL=()
-COMP_OBJ_THRESHOLD_LIST=()
+# Optional comp_obj pre-filter (empty = full PF combo pool).
+# HARD_BAND=1 env → aggressive low-bit deployment band eff_kvbits ∈ [2.0, 2.7]
+# (llama_effkv_hard study: in-band SAMPLING pool). Leave unset for the normal
+# global pool — the deployment protocol is GLOBAL-train → band-local validate,
+# so only the in-band-training upper-bound study sets this.
+if [ -n "${HARD_BAND:-}" ]; then
+    COMP_OBJ=(eff_kvbits)
+    COMP_OBJ_VAL=(2.35)
+    COMP_OBJ_THRESHOLD_LIST=(0.35)
+else
+    COMP_OBJ=()
+    COMP_OBJ_VAL=()
+    COMP_OBJ_THRESHOLD_LIST=()
+fi
 
 MIN_COMP_OBJ_LIST=()
 MAX_COMP_OBJ_LIST=()

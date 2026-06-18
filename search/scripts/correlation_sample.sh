@@ -33,10 +33,16 @@ K_BITS="2 3 4"
 K_BITS_TEXT="234"
 V_BITS="2 3 4"
 V_BITS_TEXT="234"
-K_GROUP_SIZE=("32 64 128" "32 64 128" "128")
-V_GROUP_SIZE=("32 64 128" "32 64 128" "128")
-K_GROUP_SIZE_TEXT=3264128x2_128
-V_GROUP_SIZE_TEXT=3264128x2_128
+# eff_kvbits archive (EFF_KV_EXPR below) searched gs 32/64/128 at ALL bit
+# widths; the old kvbits archive restricted 4-bit to gs128.
+K_GROUP_SIZE=("32 64 128" "32 64 128" "32 64 128")
+V_GROUP_SIZE=("32 64 128" "32 64 128" "32 64 128")
+K_GROUP_SIZE_TEXT=3264128x3
+V_GROUP_SIZE_TEXT=3264128x3
+# K_GROUP_SIZE=("32 64 128" "32 64 128" "128")
+# V_GROUP_SIZE=("32 64 128" "32 64 128" "128")
+# K_GROUP_SIZE_TEXT=3264128x2_128
+# V_GROUP_SIZE_TEXT=3264128x2_128
 
 RESIDUAL_LENGTH=128
 # Attention-sink (KVSink): keep first S KV tokens FP. 0=off. Match the eval config.
@@ -72,7 +78,10 @@ N_ARCHS=50
 #
 # Recommended for correlation studies: cover the per-axis extremes so the
 # regression sees high-loss / low-loss archs, not a random clump.
-QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.01,0.5,0.99"
+# metric_eff_kv replaces metric_kv + metric_kvdim (eff_kv axis carries both;
+# a metric_kv/metric_kvdim anchor would abort — its axis is no longer in expr_keys).
+QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_eff_kv#0.01,0.5,0.99"
+# QUANTILE_SAMPLE="metric_w#0.01,0.5,0.99 metric_kv#0.01,0.5,0.99 metric_kvdim#0.01,0.5,0.99"
 # QUANTILE_SAMPLE="metric_w#0.01,0.25,0.5,0.75,0.99 metric_kv#0.01,0.25,0.5,0.75,0.99 metric_kvdim#0.01,0.25,0.5,0.75,0.99"
 # QUANTILE_SAMPLE=""
 
@@ -85,11 +94,17 @@ COVERAGE_PER_AXIS_AGG=max
 COVERAGE_PARETO_SELECT=knee               # auto | strategy3 | knee
 
 # ── per-axis search archives (Llama-3.1-8B-Instruct, same as scripts/sample_surrogate.sh) ──
+# eff_kvbits archive replaces the separate kvbits + kvdim archives: the eff_kv
+# axis carries BOTH the per-layer (bits, gs) and the ThinK prune dims in one
+# subnet (utils/select.py build_arch merges q['k'/'v'] AND p['k'/'v'] from it).
+# Do NOT pass --kv_expr/--kvdim_expr together with --eff_kv_expr — kvbits/kvdim
+# would enter the combo space as separate axes on top of eff_kv.
 W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
-KV_EXPR=save/search/think/2605112033_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_100.stats
-KVDIM_EXPR=save/search/think/2605112036_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
+# KV_EXPR=save/search/think/2605112033_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_100.stats
+# KVDIM_EXPR=save/search/think/2605112036_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
+EFF_KV_EXPR=save/search/think/2606091743_Llama-3.1-8B-Instruct_eff_kvbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w4kv234bits_w128kv3264128x3gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0.1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_32stride_pp512/iter_200.stats
 
-for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR; do
+for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR EFF_KV_EXPR; do
     VAR_VALUE="${!VAR_NAME}"
     if [ -n "${VAR_VALUE}" ] && [[ "${VAR_VALUE}" != *"${MODEL_NAME}"* ]]; then
         echo "ERROR: ${VAR_NAME} does not contain MODEL_NAME (${MODEL_NAME}): ${VAR_VALUE}"
@@ -177,9 +192,12 @@ for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 [ -n "${V_PRUNING_DIM}" ] && ARGS+=" --v_pruning_dim ${V_PRUNING_DIM}"
 
 [ "${W_METHOD}" = "hqq" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS} "
-[ -n "${W_EXPR}" ]     && ARGS+=" --w_expr ${W_EXPR}"
-[ -n "${KV_EXPR}" ]    && ARGS+=" --kv_expr ${KV_EXPR}"
-[ -n "${KVDIM_EXPR}" ] && ARGS+=" --kvdim_expr ${KVDIM_EXPR}"
+[ -n "${W_EXPR}" ]      && ARGS+=" --w_expr ${W_EXPR}"
+# kvbits/kvdim must not enter as separate axes alongside eff_kvbits — keep
+# these commented while EFF_KV_EXPR is set (and vice versa).
+# [ -n "${KV_EXPR}" ]    && ARGS+=" --kv_expr ${KV_EXPR}"
+# [ -n "${KVDIM_EXPR}" ] && ARGS+=" --kvdim_expr ${KVDIM_EXPR}"
+[ -n "${EFF_KV_EXPR}" ] && ARGS+=" --eff_kv_expr ${EFF_KV_EXPR}"
 
 if [ -n "${COMP_OBJ_STR}" ]; then
     ARGS+=" --comp_obj ${COMP_OBJ_STR} --comp_obj_min ${MIN_COMP_OBJ} --comp_obj_max ${MAX_COMP_OBJ}"
