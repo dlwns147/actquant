@@ -495,7 +495,10 @@ def load_hqq_model(model_id,
     return model
 
 def insert_fp16_channel_hqq(linear, outlier):
-    # import pdb; pdb.set_trace()
+    # Store the FP16 outlier columns as meta['outlier'] = [idx, fp16_cols]; the
+    # patched hqq dequantize (hqq/core/quantize.py:195 `W_r[:, idx] = fp16`) writes
+    # them back over the dequantised HQQ bank, so those input columns are effectively
+    # FP16 while the rest stay quantised — QEFT outliers ON TOP OF HQQ, no re-quant.
     linear.meta['outlier'] = outlier
 
 def remove_fp16_channel_hqq(linear):

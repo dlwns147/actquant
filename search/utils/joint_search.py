@@ -116,13 +116,24 @@ def _select_blocks(j, c, encode_fn, eps, eps_rel, per_bin_q, n_bins, window_h, d
     return f, idx, blocks[di], c[idx][di]      # also per-block comp (for budget-box filtering)
 
 
+def _w_bits_of(b):
+    """A W-arch entry is scalar bits (plain HQQ) OR [bits, n_outlier] (QEFT-on-HQQ)."""
+    return int(b[0]) if isinstance(b, (list, tuple)) else int(b)
+
+
+def _archs(*exprs):
+    out = []
+    for p in exprs:
+        d = json.load(open(_last_stats(p))); out += [e[0] for e in d['archive'] + d.get('candidates', [])]
+    return out
+
+
 def derive_options(w_expr, kv_expr):
     """auto-derive the joint search-space options from the 1st-stage archives so ss.encode()
-    covers EVERY arch in both (model/archive-general; no hardcoded bit/gs/prune grids)."""
-    def archs(p):
-        d = json.load(open(_last_stats(p))); return [e[0] for e in d['archive'] + d.get('candidates', [])]
-    A = archs(w_expr) + archs(kv_expr)
-    wbits = sorted({int(b) for a in A for mod in a['q']['w'].values() for b in mod})
+    covers EVERY arch in both (model/archive-general; no hardcoded bit/gs/prune grids).
+    Handles QEFT W entries [bits, n_outlier] — the bit-widths are read off b[0]."""
+    A = _archs(w_expr, kv_expr)
+    wbits = sorted({_w_bits_of(b) for a in A for mod in a['q']['w'].values() for b in mod})
     kvbits = sorted({int(p[0]) for a in A for p in a['q']['k']} | {int(p[0]) for a in A for p in a['q']['v']})
     gsfor = {b: set() for b in kvbits}
     for a in A:
@@ -131,6 +142,26 @@ def derive_options(w_expr, kv_expr):
     kprune = sorted({int(d) for a in A for d in a['p']['k']})
     vprune = sorted({int(d) for a in A for d in a['p']['v']})
     return wbits, kvbits, gs_lists, kprune, vprune
+
+
+def derive_qeft(w_expr, kv_expr):
+    """QEFT outlier-column options from the 1st-stage archives. W entries are either scalar
+    bits (plain HQQ) or [bits, n_outlier] (QEFT-on-HQQ). Returns (n_qeft_column, qeft_bits):
+      n_qeft_column = sorted distinct n_outlier values seen (always incl 0), so ss rebuilds the
+                      SAME (bits, n_outlier) W option ladder the archive used → ss.encode covers it.
+      qeft_bits     = the bit-widths that actually carry outliers (the eligible/ladder bits).
+    Defaults ([0], None) for a plain (non-QEFT) archive → unchanged scalar-bit behaviour."""
+    A = _archs(w_expr, kv_expr)
+    nqc, qbits = set(), set()
+    for a in A:
+        for mod in a['q']['w'].values():
+            for b in mod:
+                if isinstance(b, (list, tuple)):
+                    nqc.add(int(b[1]))
+                    if int(b[1]) > 0: qbits.add(int(b[0]))
+    n_qeft_column = sorted(nqc | {0}) if nqc else [0]
+    qeft_bits = sorted(qbits) if qbits else None
+    return n_qeft_column, qeft_bits
 
 
 def load_block_pools(w_expr, kv_expr, ss, w_eps=0.0, kv_eps=0.0, eps_rel=0.0,
@@ -170,16 +201,24 @@ class JointComp:
         cfg, nb = ss.config, ss.n_block
         self.nl, self.nb, self.nw = ss.n_linear, nb, ss.n_linear * nb
         wgs = ss.group_size['w']; hd = int(cfg['head_dim']); self.hd = hd
-        # W: per-module numel, fp scale-overhead const, and option→bits LUT
-        self.w_numel, self.w_scale, self.w_bits_lut = [], [], []
+        # W: per-module option→total-weight-bits LUT (matches compute_bits('w'): out·in·bits
+        # + scale/zp (bits<16) + out·n_outlier·16 for QEFT FP16 columns). Options are scalar
+        # bits (plain HQQ) OR (bits, n_outlier) tuples (QEFT-on-HQQ) — handled uniformly.
+        self.w_numel, self.w_mem_lut = [], []
         for linear in cfg['linear']:
             out_dim, in_dim = map(int, cfg['linear_shape'][linear])
             lgs = in_dim if wgs == -1 else wgs
             self.w_numel.append(out_dim * in_dim)
-            self.w_scale.append((in_dim // lgs) * out_dim * 32)   # scale+zp, only when bits<16
-            self.w_bits_lut.append(np.asarray(getattr(ss, f"{linear.split('.')[-1]}_option"), float))
+            mem = []
+            for o in getattr(ss, f"{linear.split('.')[-1]}_option"):
+                b, no = (int(o[0]), int(o[1])) if isinstance(o, (list, tuple)) else (int(o), 0)
+                m = out_dim * in_dim * b
+                if b < 16:
+                    m += (in_dim // lgs) * out_dim * 32        # scale + zero point
+                m += out_dim * no * 16                          # FP16 outlier columns (QEFT)
+                mem.append(m)
+            self.w_mem_lut.append(np.asarray(mem, float))
         self.w_numel = np.asarray(self.w_numel, float)
-        self.w_scale = np.asarray(self.w_scale, float)
         self.w_nparam_total = float((self.w_numel * nb).sum())
         # KV: option→(bits + 32/gs) effective-bits LUT, and option→retain-factor / retain-dim LUT
         eff = lambda opt: np.asarray([b + (32.0 / g if g else 0.0) for b, g in opt], float)
@@ -192,8 +231,7 @@ class JointComp:
     def _wbits(self, Xr):
         mem = np.zeros(len(Xr))
         for m in range(self.nl):
-            bits = self.w_bits_lut[m][Xr[:, m, :]]                # (N, nb)
-            mem += (self.w_numel[m] * bits).sum(1) + np.where(bits < 16, self.w_scale[m], 0.0).sum(1)
+            mem += self.w_mem_lut[m][Xr[:, m, :]].sum(1)          # (N,) total weight bits-memory
         return mem / self.w_nparam_total
 
     def batch(self, X, keys):
