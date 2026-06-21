@@ -117,6 +117,7 @@ def main(args):
         group_size=group_size,
         packing=args.packing,
         residual_length=args.residual_length,
+        attn_sink=args.attn_sink,
         # use_flash=args.use_flash,
         k_quant_scheme=args.k_quant_scheme,
         v_quant_scheme=args.v_quant_scheme,
@@ -416,8 +417,10 @@ if __name__ == '__main__':
                         help='')
     parser.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'], 
                         help='')
-    parser.add_argument('--residual_length', type=int, default=128, 
+    parser.add_argument('--residual_length', type=int, default=128,
                         help='')
+    parser.add_argument('--attn_sink', type=int, default=0,
+                        help='Keep first S KV tokens in FP (KVSink). 0=off. Match the search-time value.')
     # parser.add_argument('--use_flash', action='store_true', help='')
 
     parser.add_argument('--k_pruning_dim', type=int, default=0,

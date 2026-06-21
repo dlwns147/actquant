@@ -70,6 +70,8 @@ KV_GROUP_SIZE=128
 
 
 RESIDUAL_LENGTH=128
+# Attention-sink (KVSink): keep first S KV tokens FP. 0=off. Match the eval config.
+ATTN_SINK=0
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
@@ -141,12 +143,17 @@ LM_EVAL_BATCH_SIZE=1
 # NUM_FEWSHOT=5
 
 
+# Abbreviated attention-sink tag (e.g. _sk8), only when sink is on so sink=0
+# result-dir names stay byte-comparable with existing archives.
+SINK_TAG=""
+[ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
+
 # SAVE=save/result/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${METHOD}_${BITS}
 SAVE=save/result/${TODAY}_test
 
-LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}
+LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_w${W_BITS}bits_w${W_GROUP_SIZE}gs_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}${SINK_TAG}
 LONGBENCH_CONFIG=utils/longbench_config
-MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_k${K_BITS}bits_v${V_BITS}bits_r${RESIDUAL_LENGTH}
+MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_k${K_BITS}bits_v${V_BITS}bits_r${RESIDUAL_LENGTH}${SINK_TAG}
 
 # RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
 RULER_TASK="niah_single_3"
@@ -163,7 +170,7 @@ N_TOKEN=16384
 # RULER_SAMPLE=5
 RULER_SAMPLE=50
 RULER_BATCH_SIZE=1
-RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs
+RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}${SINK_TAG}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs
 
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
@@ -201,6 +208,7 @@ ARGS="
 --w_bits ${W_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
+--attn_sink ${ATTN_SINK} \
 --k_bits ${K_BITS} \
 --v_bits ${V_BITS} \
 --k_group_size ${KV_GROUP_SIZE} \
