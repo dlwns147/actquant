@@ -29,7 +29,7 @@ from predictor.factory import get_predictor
 from utils.func import set_seed, get_correlation, get_net_info
 from utils.select import maximin_extras
 from utils.joint_search import (
-    encoding_xu, nw_split, load_block_pools, gene_weights, freeze_mask, block_segments, derive_options,
+    encoding_xu, nw_split, load_block_pools, gene_weights, freeze_mask, block_segments, derive_options, derive_qeft,
     FrontierProductSampling, AxisBlockCrossover, WeightedIntMutation, KnowledgeMutation, JointAuxProblem, JointComp)
 
 
@@ -54,14 +54,20 @@ class SecondSearch:
         # unified joint search space — options AUTO-DERIVED from the 1st-stage archives so
         # ss.encode() covers every arch (model/archive-general; no hardcoded grids).
         wbits, kvbits, gs_lists, kprune, vprune = derive_options(args.w_expr, args.eff_kv_expr)
+        # QEFT-on-HQQ: if the W archive used a (bits, n_outlier) outlier-column axis, rebuild the
+        # SAME ladder so ss.encode covers it (else W entries [bits,n_out] vs scalar options mismatch).
+        n_qeft_column, qeft_bits = derive_qeft(args.w_expr, args.eff_kv_expr)
+        self._uses_qeft = qeft_bits is not None
         self.wbits, self.kvbits = wbits, kvbits
-        print(f"[options] w_bits={wbits} kv_bits={kvbits} gs={gs_lists} k_prune={kprune} v_prune={vprune}")
+        print(f"[options] w_bits={wbits} kv_bits={kvbits} gs={gs_lists} k_prune={kprune} v_prune={vprune}"
+              + (f" | QEFT n_outlier={n_qeft_column} on bits={qeft_bits}" if qeft_bits else ""))
         self.ss = LlamaSearchSpace(
             bits={'w': wbits, 'k': kvbits, 'v': kvbits},
             group_size={'w': args.w_group_size, 'k': [list(g) for g in gs_lists], 'v': [list(g) for g in gs_lists]},
             pass_module={'w': [], 'k': [], 'v': []}, config=config,
             comp_obj=self.comp_obj, comp_obj_min=[0.0, 0.0], comp_obj_max=[1e9, 1e9],  # placeholder; real box set after pools (ss box only gates ss.sample, unused here)
-            n_token=self.n_token, k_pruning_dim=kprune, v_pruning_dim=vprune)
+            n_token=self.n_token, k_pruning_dim=kprune, v_pruning_dim=vprune,
+            n_qeft_column=n_qeft_column, qeft_outlier_bits=qeft_bits)
         self.xu = encoding_xu(self.ss); self.nw = nw_split(self.ss); self.n_var = len(self.xu)
         self._comp = JointComp(self.ss)   # vectorized comp_obj (batch over genomes; skips decode+get_net_info)
         self.ref_dirs = get_reference_directions("das-dennis", 3, n_partitions=12)
@@ -116,13 +122,21 @@ class SecondSearch:
         self._build_evaluator(args)
 
     def _build_evaluator(self, args):
+        import torch
         from evaluator import LlamaEvaluator
         from utils.func import init_accelerator, process_dtype
         self.accelerator, device_map = init_accelerator(args.gpu_id, self.config)
+        # QEFT-on-HQQ: archs with n_outlier>0 need the multi-rank outlier dict so the evaluator
+        # can insert the FP16 columns per-arch. Required whenever the W archive used outliers.
+        outlier = torch.load(args.outlier_path) if getattr(args, 'outlier_path', '') else None
+        if outlier is None and getattr(self, '_uses_qeft', False):
+            raise SystemExit("[QEFT] the W archive uses outlier columns (n_outlier>0) but no "
+                             "--outlier_path was given; pass the extract_outidx.py multi-rank dict.")
         self.evaluator = LlamaEvaluator(
             self.config, accelerator=self.accelerator, device_map=device_map,
             model_id=f'{args.model_path}/{args.model_name}',
             method={'w': args.w_method, 'kv': args.kv_method}, quant_model_paths=args.quant_model_paths,
+            outlier=outlier,
             seqlen=args.seqlen, n_sample=args.n_sample, datasets=[args.dataset], dtype=process_dtype(args.dtype),
             bits={'w': self.wbits, 'k': self.kvbits, 'v': self.kvbits}, group_size=self.ss.group_size,
             residual_length=args.residual_length, attn_sink=args.attn_sink,
@@ -392,6 +406,7 @@ def build_parser():
     p.add_argument('--gpu_id', default='0'); p.add_argument('--model_path', default='/SSD/huggingface/meta-llama')
     p.add_argument('--dtype', default='bfloat16'); p.add_argument('--w_method', nargs='+', default=['hqq'])
     p.add_argument('--kv_method', nargs='+', default=['kivi', 'think']); p.add_argument('--quant_model_paths', nargs='+', default=[])
+    p.add_argument('--outlier_path', default='', help='QEFT-on-HQQ: extract_outidx.py multi-rank outlier dict {key:{n_out:[idx]}}; required when the W archive used n_outlier>0 (auto-detected from the archive)')
     p.add_argument('--residual_length', type=int, default=128); p.add_argument('--k_quant_scheme', default='channel')
     p.add_argument('--v_quant_scheme', default='token'); p.add_argument('--dataset', default='wikitext2')
     p.add_argument('--n_sample', type=int, default=128); p.add_argument('--seqlen', type=int, default=2048)
