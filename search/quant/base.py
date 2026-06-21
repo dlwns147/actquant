@@ -94,9 +94,20 @@ def get_owq_calib_dataset(data="c4", tokenizer=None, n_samples=128, seed=0, seql
             trainloader.append((inp, tar))
             
     elif 'c4' in data:
-        traindata = load_dataset(
-            'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
-        )
+        # Offline-safe c4 load: mmap the arrow shards straight from the HF cache, bypassing
+        # `load_dataset`'s config-hash lookup which fails offline ("Couldn't find cache for
+        # allenai/c4 for config default-...") — mirrors utils/data.py::get_c4_trainenc.
+        import os, glob
+        from datasets import concatenate_datasets
+        from datasets import Dataset as HFDataset
+        _base = os.path.expanduser('~/.cache/huggingface/datasets')
+        _arrow = sorted(glob.glob(os.path.join(_base, 'allenai___c4', 'default-*', '0.0.0', '*', 'c4-train-*.arrow')))
+        if _arrow:
+            traindata = concatenate_datasets([HFDataset.from_file(f) for f in _arrow])
+        else:
+            traindata = load_dataset(
+                'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
+            )
         trainloader = []
         for _ in range(n_samples):
             while True:
