@@ -57,7 +57,7 @@ class SecondSearch:
         # QEFT-on-HQQ: if the W archive used a (bits, n_outlier) outlier-column axis, rebuild the
         # SAME ladder so ss.encode covers it (else W entries [bits,n_out] vs scalar options mismatch).
         n_qeft_column, qeft_bits = derive_qeft(args.w_expr, args.eff_kv_expr)
-        self._uses_qeft = qeft_bits is not None
+        self._uses_qeft = qeft_bits is not None; self._n_qeft_column = n_qeft_column
         self.wbits, self.kvbits = wbits, kvbits
         print(f"[options] w_bits={wbits} kv_bits={kvbits} gs={gs_lists} k_prune={kprune} v_prune={vprune}"
               + (f" | QEFT n_outlier={n_qeft_column} on bits={qeft_bits}" if qeft_bits else ""))
@@ -128,10 +128,22 @@ class SecondSearch:
         self.accelerator, device_map = init_accelerator(args.gpu_id, self.config)
         # QEFT-on-HQQ: archs with n_outlier>0 need the multi-rank outlier dict so the evaluator
         # can insert the FP16 columns per-arch. Required whenever the W archive used outliers.
-        outlier = torch.load(args.outlier_path) if getattr(args, 'outlier_path', '') else None
-        if outlier is None and getattr(self, '_uses_qeft', False):
-            raise SystemExit("[QEFT] the W archive uses outlier columns (n_outlier>0) but no "
-                             "--outlier_path was given; pass the extract_outidx.py multi-rank dict.")
+        outlier = None
+        if getattr(args, 'outlier_path', ''):
+            outlier = torch.load(args.outlier_path); print(f"[QEFT] outlier dict: {args.outlier_path}")
+        elif getattr(self, '_uses_qeft', False):
+            # auto-locate the extract_outidx.py dict under the repo's outlier/ tree (path scheme
+            # mirrors search.sh: outlier/<model>/w16_r<ranks>_<dataset>/outlier.pth). Resolved
+            # relative to this file so it works regardless of cwd.
+            ranks = '_'.join(str(c) for c in self._n_qeft_column if c > 0)
+            root = os.path.dirname(os.path.abspath(__file__))
+            cand = os.path.join(root, 'outlier', args.model_name, f'w16_r{ranks}_{args.dataset}', 'outlier.pth')
+            if os.path.isfile(cand):
+                outlier = torch.load(cand); print(f"[QEFT] auto-loaded outlier dict: {cand}")
+            else:
+                raise SystemExit(f"[QEFT] W archive uses outlier columns (n_outlier={self._n_qeft_column}) "
+                                 f"but no --outlier_path given and none at {cand}; pass the "
+                                 f"extract_outidx.py multi-rank dict via --outlier_path.")
         self.evaluator = LlamaEvaluator(
             self.config, accelerator=self.accelerator, device_map=device_map,
             model_id=f'{args.model_path}/{args.model_name}',
