@@ -182,7 +182,10 @@ class LlamaSearchSpace:
         handling both scalar-bit and (bits, n_outlier)-tuple options."""
         opts = np.array(getattr(self, f'{proj_name}_option'))
         if self.w_outlier:
-            return int(np.argwhere((np.array(val) == opts).all(axis=1))[0, 0])
+            # scalar bits `b` (from a plain/non-QEFT archive, e.g. the other axis's W) ≡ (b, 0):
+            # 0 outlier columns. Lets a QEFT search space encode plain-W archs too.
+            v = val if isinstance(val, (list, tuple, np.ndarray)) else (val, 0)
+            return int(np.argwhere((np.array(v) == opts).all(axis=1))[0, 0])
         return int(np.argwhere(val == opts)[0, 0])
 
     def boundary_w_per_linear(self, w_option):
