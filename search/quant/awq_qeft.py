@@ -14,7 +14,7 @@ How it differs from the existing AWQ ``do_owq`` path (``awq_utils/pre_quant.py``
   outlier *count* is fixed at extraction time.
 * The new weight-search axis encodes each layer as a ``(w_bits, n_outlier)``
   pair with ``n_outlier ∈ {0, 32, 64, 96, 128}`` (see
-  ``search_space/llama_qeft.py``).  The count is **searchable per layer**, so the
+  ``search_space/llama.py``).  The count is **searchable per layer**, so the
   outlier indices are resolved on demand from the *multi* dict produced by
   ``extract_outidx.py`` (``{key: {n_out: [col indices]}}``) at the count
   this arch selected.  The OWQ trigger becomes ``n_outlier > 0`` (bits stay

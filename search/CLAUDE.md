@@ -122,14 +122,22 @@ mixed-precision model and returns `(metric_dict, complexity_dict)`:
 
 ### Search Space (`search_space/`)
 
-- `llama.py` — `LlamaSearchSpace`, `LlamaGroupSizeSearchSpace`
-  (KV options are `(bits, group_size)` tuples), `LlamaGroupSizeQEFTSearchSpace`
-  (W options are `(bits, n_outlier)` tuples).
-- `llama_think.py` — **`LlamaThinKSearchSpace`** (extends `LlamaGroupSizeSearchSpace`),
-  the one used by `search.py`. Adds the two ThinK axes
-  `k_pruning_dim_option` / `v_pruning_dim_option`. `encode()/decode()` map a flat
-  integer array `(n_linear + 4) × n_block` (+4 = k, v, k_prune, v_prune) ↔ the arch
-  dict. `pass_module` freezes specified layers at their max option.
+- `llama.py` — **the single search-space module** (all former files merged here;
+  `llama_think.py` / `llama_qeft.py` are gone). Contents:
+  - **`LlamaSearchSpace`** — the unified space used by `search.py`. Covers weights
+    + KV `(bits, group_size)` + ThinK KV-pruning + QEFT outlier columns in one
+    class. `encode()/decode()` map a flat integer array `(n_linear + 4) × n_block`
+    (+4 = k, v, k_prune, v_prune) ↔ the arch dict; `pass_module` freezes specified
+    layers at their max option. `initialize()` seeds boundary anchors over
+    `w × (k|v paired) × (kdim|vdim paired)` (diagonal pairing, not cartesian) and
+    fills the rest with `sample(stratify=True)` — stratified complexity-level
+    sampling that spreads the `comp_obj` evenly instead of clustering at the CLT
+    mean. Back-compat aliases `LlamaGroupSizeSearchSpace`,
+    `LlamaGroupSizeQEFTSearchSpace`, `LlamaThinKSearchSpace` all point at it.
+  - **`LlamaQEFTSearchSpace`** (+ `build_w_options`, `DEFAULT_QEFT_COLUMNS`,
+    `OUTLIER_LINEARS`) — the legacy QEFT-only weight space with the flat
+    `{'w':.., 'k':.., 'v':..}` arch dict / `(n_linear + 2)` encoding (W options are
+    `(bits, n_outlier)` tuples). Kept for the QEFT-only weight search and its tests.
 
 ### Surrogate Models (`predictor/`)
 
