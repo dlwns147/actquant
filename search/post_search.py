@@ -268,6 +268,149 @@ def run_benchmarks(args, model, model_id):
                 f.writelines(sentences)
 
 
+def select_joint(args, ctx):
+    """Final selection from a second_search joint iter_<it>.stats archive.
+
+    The 2nd-stage search already emits fully-assembled JOINT archs with a
+    measured JSD (archive entry = [arch, loss, *comp]), so NONE of the per-axis
+    combination / surrogate machinery is needed here. We just:
+      * recompute every --comp_obj from the arch via get_net_info (robust — no
+        assumption about the stored comp-column order / which objectives the
+        search optimized), so the budget box can be ANY comp_obj;
+      * keep the archs inside [comp_obj_min, comp_obj_max];
+      * rank by the ALREADY-MEASURED loss (ascending) and take the best -n.
+    Returns (ps, I, pf, sel_mode) shaped for run_final (pf is (n,1) = loss;
+    benchmarks run with K=0 → the per-axis-metric print is empty).
+    """
+    with open(args.second_expr) as f:
+        sf = json.load(f)
+    archive = sf['archive']
+    if args.second_include_candidates:
+        archive = archive + sf.get('candidates', [])
+    archs = [e[0] for e in archive]
+    loss = np.array([float(e[1]) for e in archive], float)
+    # recompute each comp_obj from the arch (no stored-column-order assumption)
+    if args.comp_obj:
+        comp = np.array(
+            [[get_net_info(a, ctx.config, ctx.group_size, n_token=args.n_token,
+                           attn_sink=args.attn_sink)[o] for o in args.comp_obj]
+             for a in archs], float)
+    else:
+        comp = np.zeros((len(archs), 0))
+    # budget-box filter (each comp_obj independently)
+    feas = np.ones(len(archs), bool)
+    for i, o in enumerate(args.comp_obj):
+        feas &= (comp[:, i] >= args.comp_obj_min[i]) & (comp[:, i] <= args.comp_obj_max[i])
+    if not feas.any():
+        msg = ["[post_search] no arch in the joint stats satisfies the COMP_OBJ "
+               "range — 0 candidates after filtering."]
+        for i, o in enumerate(args.comp_obj):
+            msg.append(f"  {o}: achievable [{comp[:, i].min():.4g}, "
+                       f"{comp[:, i].max():.4g}]  requested "
+                       f"[{args.comp_obj_min[i]:.4g}, {args.comp_obj_max[i]:.4g}]")
+        msg.append("Widen --comp_obj_min/--comp_obj_max into the achievable range.")
+        raise SystemExit("\n".join(msg))
+    idx = np.where(feas)[0]
+    idx = idx[np.argsort(loss[idx], kind='stable')]      # measured-best first
+    n_keep = max(1, int(args.n))
+    # with --select_measured_best, hand run_final the predicted-best top-k to
+    # re-measure; otherwise the stored loss already IS the measurement → take -n.
+    n_sel = (max(n_keep, int(args.verify_topk)) if args.select_measured_best
+             else n_keep)
+    sel = idx[:n_sel]
+    ps = [archs[j] for j in sel]
+    pf = loss[sel].reshape(-1, 1)
+    I = list(range(len(sel)))
+    sel_mode = (f'joint-stats top-{len(sel)} → verify → best-{n_keep}'
+                if args.select_measured_best else f'joint-stats measured-best-{len(sel)}')
+    for i, o in enumerate(args.comp_obj):
+        print(f"[post_search] {o}: in-box [{args.comp_obj_min[i]:.4g},"
+              f"{args.comp_obj_max[i]:.4g}] → best arch {int(sel[0])} "
+              f"{o}={comp[sel[0], i]:.4g} JSD={loss[sel[0]]:.5f}")
+    print(f"[post_search] --second_expr {args.second_expr}: {len(archive)} archs, "
+          f"{int(feas.sum())} in-box → {sel_mode}")
+    return ps, I, pf, sel_mode
+
+
+def run_final(args, ctx, ps, I, pf, K):
+    """Shared backend: build the evaluator, optionally top-k verify, then
+    evaluate + benchmark the selected archs. `ps[idx]` yields an arch dict,
+    `pf[idx, 0]` its predicted/measured metric. K = number of per-axis metric
+    pairs in pf (0 for the joint-stats path → no per-axis print)."""
+    model_id = f'{args.model_path}/{args.model_name}'
+    if 'hqq' not in args.w_method:
+        args.quant_model_paths = []
+    evaluator = LlamaEvaluator(
+        ctx.config, accelerator=ctx.accelerator, model_id=model_id,
+        method={'w': args.w_method, 'kv': args.kv_method},
+        quant_model_paths=args.quant_model_paths,
+        outlier=torch.load(args.outlier_path) if args.outlier_path else None,
+        seqlen=args.seqlen, min_seqlen=args.min_seqlen, n_sample=args.n_sample,
+        datasets=args.datasets, device_map=ctx.device_map, dtype=ctx.dtype,
+        bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
+        group_size=ctx.group_size, residual_length=args.residual_length,
+        attn_sink=args.attn_sink,
+        k_quant_scheme=args.k_quant_scheme, v_quant_scheme=args.v_quant_scheme,
+        loss_func=args.loss_func, last_tokens=args.last_tokens,
+        use_key_token=args.use_key_token, trunc_len=args.trunc_len,
+        sliding_window=args.sliding_window, alpha=args.alpha, beta=args.beta,
+        key_token_path=args.key_token_path)
+
+    # ── top-k verify (racing-lite): cheaply MEASURE the predicted top-k JSD
+    # (k = --verify_topk), then benchmark only the measured-best `-n`. Within a
+    # narrow COMP_OBJ band the surrogate's in-band τ is ~0.5-0.7 (near-tie y),
+    # so argmin-pred top-1 finds the true best only ~50-73% of the time; the
+    # measured-best of the predicted top-5 recovers it 96-100% with worst-band
+    # regret ≈ 0 (band-val-1000 study). Costs (k − n) extra metric evals.
+    if args.select_measured_best and len(I) > 1:
+        if not args.datasets:
+            raise SystemExit('--select_measured_best needs --datasets '
+                             '(the verification metric).')
+        measured = {}
+        for idx in tqdm(I, desc=f'verify top-{len(I)}'):
+            arch = ps[idx]
+            model = evaluator.sample(arch)
+            metric = evaluate_metric(args, arch, model, evaluator,
+                                     ctx.accelerator)
+            measured[idx] = float(list(metric.values())[0])
+            print(f'[verify] idx={idx} measured={measured[idx]:.6f} '
+                  f'pred={pf[idx, 0]:.6f}')
+            if ('awq' in args.w_method or 'gptq' in args.w_method
+                    or 'qeft' in args.w_method):
+                del model, evaluator.model
+                clean_up()
+        # keep the measured-best `-n` (original meaning of -n = #archs desired)
+        ranked_by_meas = sorted(measured, key=measured.get)
+        I = ranked_by_meas[:max(1, int(args.n))]
+        print(f'[verify] measured-best-{len(I)} of top-{len(measured)}: '
+              + ', '.join(f'idx={i}(y={measured[i]:.6f},'
+                          f'pred-rank={ranked_by_meas.index(i)})' for i in I)
+              + ' — benchmarks run on these only')
+
+    for idx in tqdm(I):
+        arch = ps[idx]
+        complexity = get_net_info(arch, ctx.config, ctx.group_size,
+                                  n_token=args.n_token)
+        print(f'complexity: {list(complexity.keys())}')
+        print(f'complexity: {list(complexity.values())}')
+        ctx.accelerator.print(f'arch: {arch}')
+        model = evaluator.sample(arch)
+
+        if args.datasets:
+            metric = evaluate_metric(args, arch, model, evaluator,
+                                     ctx.accelerator)
+            print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, '
+                  f'pred_metric: {pf[idx, 0]}, per_axis_metric: '
+                  f'{pf[idx, [1 + 2 * i for i in range(K)]].tolist()}')
+
+        run_benchmarks(args, model, model_id)
+
+        if ('awq' in args.w_method or 'gptq' in args.w_method
+                or 'qeft' in args.w_method):
+            del model, evaluator.model
+            clean_up()
+
+
 def main(args):
     print(args)
     ctx = init_run(args)
@@ -276,6 +419,16 @@ def main(args):
 
     n_comp_obj = len(args.comp_obj)
     assert n_comp_obj == len(args.comp_obj_min) == len(args.comp_obj_max)
+
+    # ── second_search joint path: archive already holds assembled joint archs
+    # with measured JSD → skip all per-axis combination/surrogate machinery,
+    # just filter by the comp_obj budget box and benchmark the measured-best.
+    if args.second_expr:
+        ps, I, pf, sel_mode = select_joint(args, ctx)
+        print(f'[selection] mode={sel_mode}  |I|={len(I)}  |candidates|={len(ps)}')
+        run_final(args, ctx, ps, I, pf, K=0)
+        print(args)
+        return
 
     expr_map = build_expr_map(args, ctx)
     nd = build_nd(args, ctx, expr_map)
@@ -456,79 +609,7 @@ def main(args):
           f'|candidates|={len(valid_nd_idx)}  (n_total={nd.n_total})')
 
     # ─────────────────────── evaluate + benchmark final arch ───────────────────────
-    model_id = f'{args.model_path}/{args.model_name}'
-    if 'hqq' not in args.w_method:
-        args.quant_model_paths = []
-    evaluator = LlamaEvaluator(
-        ctx.config, accelerator=ctx.accelerator, model_id=model_id,
-        method={'w': args.w_method, 'kv': args.kv_method},
-        quant_model_paths=args.quant_model_paths,
-        outlier=torch.load(args.outlier_path) if args.outlier_path else None,
-        seqlen=args.seqlen, min_seqlen=args.min_seqlen, n_sample=args.n_sample,
-        datasets=args.datasets, device_map=ctx.device_map, dtype=ctx.dtype,
-        bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
-        group_size=ctx.group_size, residual_length=args.residual_length,
-        attn_sink=args.attn_sink,
-        k_quant_scheme=args.k_quant_scheme, v_quant_scheme=args.v_quant_scheme,
-        loss_func=args.loss_func, last_tokens=args.last_tokens,
-        use_key_token=args.use_key_token, trunc_len=args.trunc_len,
-        sliding_window=args.sliding_window, alpha=args.alpha, beta=args.beta,
-        key_token_path=args.key_token_path)
-
-    # ── top-k verify (racing-lite): cheaply MEASURE the predicted top-k JSD
-    # (k = --verify_topk), then benchmark only the measured-best `-n`. Within a
-    # narrow COMP_OBJ band the surrogate's in-band τ is ~0.5-0.7 (near-tie y),
-    # so argmin-pred top-1 finds the true best only ~50-73% of the time; the
-    # measured-best of the predicted top-5 recovers it 96-100% with worst-band
-    # regret ≈ 0 (band-val-1000 study). Costs (k − n) extra metric evals.
-    if args.select_measured_best and len(I) > 1:
-        if not args.datasets:
-            raise SystemExit('--select_measured_best needs --datasets '
-                             '(the verification metric).')
-        measured = {}
-        for idx in tqdm(I, desc=f'verify top-{len(I)}'):
-            arch = ps[idx]
-            model = evaluator.sample(arch)
-            metric = evaluate_metric(args, arch, model, evaluator,
-                                     ctx.accelerator)
-            measured[idx] = float(list(metric.values())[0])
-            print(f'[verify] idx={idx} measured={measured[idx]:.6f} '
-                  f'pred={pf[idx, 0]:.6f}')
-            if ('awq' in args.w_method or 'gptq' in args.w_method
-                    or 'qeft' in args.w_method):
-                del model, evaluator.model
-                clean_up()
-        # keep the measured-best `-n` (original meaning of -n = #archs desired)
-        ranked_by_meas = sorted(measured, key=measured.get)
-        I = ranked_by_meas[:max(1, int(args.n))]
-        print(f'[verify] measured-best-{len(I)} of top-{len(measured)}: '
-              + ', '.join(f'idx={i}(y={measured[i]:.6f},'
-                          f'pred-rank={ranked_by_meas.index(i)})' for i in I)
-              + ' — benchmarks run on these only')
-
-    for idx in tqdm(I):
-        arch = ps[idx]
-        complexity = get_net_info(arch, ctx.config, ctx.group_size,
-                                  n_token=args.n_token)
-        print(f'complexity: {list(complexity.keys())}')
-        print(f'complexity: {list(complexity.values())}')
-        ctx.accelerator.print(f'arch: {arch}')
-        model = evaluator.sample(arch)
-
-        if args.datasets:
-            metric = evaluate_metric(args, arch, model, evaluator,
-                                     ctx.accelerator)
-            print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, '
-                  f'pred_metric: {pf[idx, 0]}, per_axis_metric: '
-                  f'{pf[idx, [1 + 2 * i for i in range(K)]].tolist()}')
-
-        run_benchmarks(args, model, model_id)
-
-        if ('awq' in args.w_method or 'gptq' in args.w_method
-                or 'qeft' in args.w_method):
-            del model, evaluator.model
-            clean_up()
-
+    run_final(args, ctx, ps, I, pf, K)
     print(args)
 
 
@@ -589,6 +670,16 @@ def build_parser():
     p.add_argument('--kvdim_scale', type=float, default=1.0)
     p.add_argument('--eff_kv_scale', type=float, default=1.0)
     # surrogate (predictor.factory.get_predictor)
+    # second_search joint path: benchmark a 2nd-stage iter_<it>.stats directly.
+    # When set, ALL per-axis combination/surrogate flags (--w_expr/--kv_expr/...
+    # /--sample_path/--surrogate) are ignored — the archive already holds joint
+    # archs with measured JSD; selection = comp_obj budget box → measured-best -n.
+    p.add_argument('--second_expr', type=str, default='',
+                   help='second_search iter_<it>.stats: select+benchmark its '
+                        'assembled joint archs directly (no per-axis combine).')
+    p.add_argument('--second_include_candidates', action='store_true',
+                   help="(with --second_expr) also include the stats' "
+                        "'candidates' list, not just 'archive'.")
     p.add_argument('--sample_path', type=str, default='',
                    help='results.csv from sample_surrogate.py (surrogate '
                         'training data). If omitted, additive metric is used.')

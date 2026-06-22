@@ -18,10 +18,10 @@ CONFIG=config/llama.json
 # CONFIG=config/mistral.json
 
 
-COMP_OBJ=wbits
+# COMP_OBJ=wbits
 # COMP_OBJ=kvbits
 # COMP_OBJ=kvdim
-# COMP_OBJ=eff_kvbits
+COMP_OBJ=eff_kvbits
 # COMP_OBJ=memory
 
 # USE_KEY_TOKEN=True
@@ -47,12 +47,8 @@ V_QUANT_SCHEME=token
 RESIDUAL_LENGTH=128
 # RESIDUAL_LENGTH=0
 
-# Attention-sink: keep the first S KV tokens in FP (KVSink/KIVI-K2V2*). 0=off.
-# Near-free (~0.2% mem), monotone-beneficial; recommend 8 when enabling (the
-# first ~4 tokens carry the bulk). NOTE: it is NOT a searched axis (per-layer S is
-# flat) — a fixed global primitive like RESIDUAL_LENGTH. Kept 0 by default so
-# existing archives stay comparable; set to 8 for new sink-enabled runs.
-ATTN_SINK=0
+# ATTN_SINK=0
+ATTN_SINK=8
 
 # DOE anchor grid thinning: initialize() seeds anchors from the cartesian
 # product of per-axis options (w x k x v x kdim x vdim), which explodes past
@@ -303,6 +299,23 @@ if [ ${PREFILL_PROMPT} == 'True' ]; then
     PP_TAG="_pp${LAST_TOKENS}"
 fi
 
+# Compress an arithmetic int list ("0 16 32 48 64" -> "0to64x16"); else '_'-join.
+compress_dim() {
+    local a=($1) n=${#a[@]} i step
+    if [ $n -ge 3 ]; then
+        step=$(( a[1] - a[0] ))
+        if [ $step -gt 0 ]; then
+            for (( i=1; i<n; i++ )); do
+                [ $(( a[i] - a[i-1] )) -ne $step ] && { echo "${1// /_}"; return; }
+            done
+            echo "${a[0]}to${a[n-1]}x${step}"; return
+        fi
+    fi
+    echo "${1// /_}"
+}
+K_PRUNING_DIM_C=$(compress_dim "${K_PRUNING_DIM}")
+V_PRUNING_DIM_C=$(compress_dim "${V_PRUNING_DIM}")
+
 # Abbreviated attention-sink tag, appended ONLY when sink is on so sink=0 runs
 # keep byte-identical SAVE names (comparable with existing archives). e.g. _sk8.
 SINK_TAG=""
@@ -318,7 +331,12 @@ if [ -n "${N_QEFT_COLUMN}" ]; then
     QEFT_TAG="_qc$(echo ${N_QEFT_COLUMN} | sed 's/ /-/g')_ob$(echo ${BASE_OUTLIER_BITS} | sed 's/ //g')"
 fi
 
-SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${METRIC}_w_${W_METHOD_TEXT}${QEFT_TAG}_kv_${KV_METHOD}_iter_${ITER}_n_iter_${N_ITER}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}bits_w${W_GROUP_SIZE}kv${KV_GROUP_SIZE_TEXT}gs_${RESIDUAL_LENGTH}res_len${SINK_TAG}_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_kdim${K_PRUNING_DIM_TEXT}_vdim${V_PRUNING_DIM_TEXT}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_${LOSS_FUNC}_co_${CROSSOVER_PROB}_mut_${MUT_PROB}_${DATASET}_${DATA_BATCH_SIZE}bs_${N_SAMPLE}sample_${SEQLEN}seq_${N_TOKEN}token_${PREDICTOR}_${STRIDE}stride${PP_TAG}
+# Shortened SAVE name: only run-varying fields are kept. Fixed-protocol values
+# (metric=loss, w_method=hqq, loss_func=jsd, co/mut, dataset/bs/sample/seq/token,
+# predictor, k/v_quant_scheme, w_group_size, iter/n_iter) are dropped -- they are
+# recorded in the .stats/config inside the dir. `obj_<min>_<max>` is preserved
+# verbatim (analysis scripts parse it). Pruning-dim lists are arithmetic-compressed.
+SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${KV_METHOD_TEXT}${QEFT_TAG}${SINK_TAG}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_r${RESIDUAL_LENGTH}_kd${K_PRUNING_DIM_C}_vd${V_PRUNING_DIM_C}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_st${STRIDE}${PP_TAG}
 
 N_PROC=1
 
