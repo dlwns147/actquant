@@ -28,7 +28,8 @@ W_BITS="2 3 4"
 AXIS=1
 W_GROUP_SIZE=128
 
-KV_METHOD="kivi"
+KV_METHOD="kivi think"
+KV_METHOD_TEXT="kivi_think"
 K_BITS="2 4"
 K_BITS_TEXT="24"
 K_GROUP_SIZE=("128" "128")
@@ -37,9 +38,8 @@ V_BITS_TEXT="24"
 V_GROUP_SIZE=("128" "128")
 
 RESIDUAL_LENGTH=128
-# Attention-sink (KVSink): keep first S KV tokens FP. 0=off. MUST match the
-# search-time --attn_sink so the final eval/benchmark mirrors what was searched.
-ATTN_SINK=0
+# ATTN_SINK=0
+ATTN_SINK=8
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
 
@@ -52,17 +52,25 @@ QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 SEED=0
 
 # ── COMP_OBJ range (the deployment budget) ──
+# NOTE (second_expr): the pool is DISCRETE (10500 archs), so a tiny ±band can
+# match 0 archs (the per-axis path enumerates a continuous space, so it doesn't).
+# At target 5.316e9, n_token 16384: ×0.00001→0 archs, ×0.001→55, ×0.005→234.
 COMP_OBJ=(memory)
 COMP_OBJ_VAL=(5315764224)
 # COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
-# COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.001)" | bc))
-# COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.0001)" | bc))
-COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.00001)" | bc))
+COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.005)" | bc))
+# COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.00001)" | bc))
 
 # COMP_OBJ=(wbits kvbits kvdim)
 # COMP_OBJ_VAL=(3 3.25 102)
 # # COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
 # COMP_OBJ_THRESHOLD_LIST=(0.005 0.005 0.05)
+
+# ── 2nd-stage JOINT (second_search) budget box: W × eff_kvbits ──
+# Use with SECOND_EXPR below. VAL = box center, min/max = VAL ∓ THRESHOLD.
+# COMP_OBJ=(wbits eff_kvbits)
+# COMP_OBJ_VAL=(2.5 2.5)
+# COMP_OBJ_THRESHOLD_LIST=(0.5 0.5)   # → wbits[2,3] eff_kvbits[2,3]
 
 N_TOKEN=16384
 
@@ -85,7 +93,7 @@ PREFER="metric#0.0"
 # (top-1 alone 50-73%; in-band tau ~0.5-0.7 near-ties) at (k-N) extra JSD evals.
 # N keeps its original meaning = number of final architectures to benchmark.
 N=1
-SELECT_MEASURED_BEST=True
+SELECT_MEASURED_BEST=False   # second_expr: loss already measured → no re-screen
 VERIFY_TOPK=5
 
 DATASETS="wikitext2"
@@ -106,17 +114,15 @@ ALPHA=2
 BETA=-2
 
 # ── per-axis search archives — MUST match stage 1 ──
-# Llama-3.1-8B-Instruct
-# W_EXPR=
-# KV_EXPR=
-# KVDIM_EXPR=
-# SAMPLE_PATH=
-W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
-KV_EXPR=save/search/think/2605112033_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_100.stats
-KVDIM_EXPR=save/search/think/2605112036_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
-SAMPLE_PATH=save/result/260513/2605132157_Llama-3.1-8B-Instruct__0_0_awq_kivi_wikitext2_1_kv_scale_0seed_w_expr_kv_expr_kvdim_expr_qs_metric_w05595_metric_kv05595_metric_kvdim05595_rs23/results.csv
+# W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
+# KV_EXPR=save/search/think/2605112033_Llama-3.1-8B-Instruct_kvbits_loss_w_hqq_kv_kivi_iter_150_n_iter_30_w4kv234bits_w128kv3264128x2_128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_1_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_100.stats
+# KVDIM_EXPR=save/search/think/2605112036_Llama-3.1-8B-Instruct_kvdim_loss_w_hqq_kv_think_iter_150_n_iter_30_w4kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_16_32_48_64_vdim0_obj_0_128_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_150.stats
+# SAMPLE_PATH=save/result/260513/2605132157_Llama-3.1-8B-Instruct__0_0_awq_kivi_wikitext2_1_kv_scale_0seed_w_expr_kv_expr_kvdim_expr_qs_metric_w05595_metric_kv05595_metric_kvdim05595_rs23/results.csv
 
-for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR SAMPLE_PATH; do
+# ── 2nd-stage JOINT search (second_search.py) ──
+SECOND_EXPR=save/second_search/2606202032_Llama-3.1-8B-Instruct_joint_hqq_rbf_doe500_it200n50_sk8_s0/iter_200.stats
+
+for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR SAMPLE_PATH SECOND_EXPR; do
     VAR_VALUE="${!VAR_NAME}"
     if [ -n "${VAR_VALUE}" ] && [[ "${VAR_VALUE}" != *"${MODEL_NAME}"* ]]; then
         echo "ERROR: ${VAR_NAME} does not contain MODEL_NAME (${MODEL_NAME}): ${VAR_VALUE}"
@@ -147,8 +153,8 @@ LONGBENCH_CONFIG=utils/longbench_config
 # result-dir names stay comparable. MUST match the search-time ATTN_SINK.
 SINK_TAG=""
 [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
-LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}${SINK_TAG}
-MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}${SINK_TAG}
+LONGBENCH_RESULT_PATH=save/longbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}${SINK_TAG}
+MINILONGBENCH_RESULT_PATH=save/minilongbench/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_k${K_BITS_TEXT}bits_v${V_BITS_TEXT}bits_r${RESIDUAL_LENGTH}${SINK_TAG}
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
 
 # RULER_TASK="niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2 niah_multikey_3 niah_multivalue niah_multiquery ruler_vt ruler_cwe ruler_fwe ruler_qa_squad ruler_qa_hotpot"
@@ -163,10 +169,10 @@ RULER_LENGTH=16384
 RULER_SAMPLE=5
 # RULER_SAMPLE=50
 RULER_BATCH_SIZE=1
-RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}${SINK_TAG}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs_${SEED}seed
+RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}${SINK_TAG}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs_${SEED}seed
 
 
-SAVE=save/post_search/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD}_${SURROGATE}${SINK_TAG}
+SAVE=save/post_search/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${SURROGATE}${SINK_TAG}
 
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
@@ -205,18 +211,24 @@ fi
 [ ${STRIDE} -gt 0 ] && ARGS+=" --stride ${STRIDE} "
 [ ${PREFILL_PROMPT} == 'True' ] && ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
 [ ${W_METHOD} == "hqq" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS} "
-[ -n "${W_EXPR}" ]      && ARGS+=" --w_expr ${W_EXPR}"
-[ -n "${KV_EXPR}" ]     && ARGS+=" --kv_expr ${KV_EXPR}"
-[ -n "${KVDIM_EXPR}" ]  && ARGS+=" --kvdim_expr ${KVDIM_EXPR}"
-[ -n "${EFF_KV_EXPR}" ] && ARGS+=" --eff_kv_expr ${EFF_KV_EXPR}"
-[ -n "${SAMPLE_PATH}" ] && ARGS+=" --sample_path ${SAMPLE_PATH} --surrogate ${SURROGATE} --rbf_kernel ${RBF_KERNEL} --surrogate_device ${SURROGATE_DEVICE}"
+if [ -n "${SECOND_EXPR}" ]; then
+    # joint path: archive already holds assembled joint archs with measured JSD,
+    # so the per-axis expr archives + surrogate are skipped entirely.
+    ARGS+=" --second_expr ${SECOND_EXPR}"
+else
+    [ -n "${W_EXPR}" ]      && ARGS+=" --w_expr ${W_EXPR}"
+    [ -n "${KV_EXPR}" ]     && ARGS+=" --kv_expr ${KV_EXPR}"
+    [ -n "${KVDIM_EXPR}" ]  && ARGS+=" --kvdim_expr ${KVDIM_EXPR}"
+    [ -n "${EFF_KV_EXPR}" ] && ARGS+=" --eff_kv_expr ${EFF_KV_EXPR}"
+    [ -n "${SAMPLE_PATH}" ] && ARGS+=" --sample_path ${SAMPLE_PATH} --surrogate ${SURROGATE} --rbf_kernel ${RBF_KERNEL} --surrogate_device ${SURROGATE_DEVICE}"
+fi
 [ "${SELECT_MEASURED_BEST:-False}" = "True" ] && ARGS+=" --select_measured_best --verify_topk ${VERIFY_TOPK:-5}"
 
-# ARGS+=" --datasets ${DATASETS} --seqlen ${SEQLEN} --min_seqlen ${MIN_SEQLEN} --n_sample ${N_SAMPLE} --data_batch_size ${DATA_BATCH_SIZE}"
+ARGS+=" --datasets ${DATASETS} --seqlen ${SEQLEN} --min_seqlen ${MIN_SEQLEN} --n_sample ${N_SAMPLE} --data_batch_size ${DATA_BATCH_SIZE}"
 # ARGS+=" --zeroshot --tasks ${TASKS} --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE}"
 # ARGS+=" --longbench --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG} --longbench_e "
 # ARGS+=" --minilongbench --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG}"
-ARGS+=" --ruler --ruler_task ${RULER_TASK} --ruler_yaml_path ${RULER_YAML_PATH} --ruler_result_path ${RULER_RESULT_PATH} --ruler_batch_size ${RULER_BATCH_SIZE} --ruler_sample ${RULER_SAMPLE} --ruler_length ${RULER_LENGTH}"
+# ARGS+=" --ruler --ruler_task ${RULER_TASK} --ruler_yaml_path ${RULER_YAML_PATH} --ruler_result_path ${RULER_RESULT_PATH} --ruler_batch_size ${RULER_BATCH_SIZE} --ruler_sample ${RULER_SAMPLE} --ruler_length ${RULER_LENGTH}"
 # ARGS+=" --pass_key_file ${PASS_KEY_FILE}"
 
 
