@@ -96,6 +96,8 @@ if [ ${COMP_OBJ} == 'wbits' ]; then
     N_ITER=50
 
 elif [ ${COMP_OBJ} == 'kvbits' ]; then
+    KV_METHOD="kivi"
+    KV_METHOD_TEXT="kivi"
     W_BITS="4"
     W_BITS_TEXT="4"
     W_GROUP_SIZE=128
@@ -156,6 +158,8 @@ elif [ ${COMP_OBJ} == 'kvdim' ]; then
     N_ITER=30
 
 elif [ ${COMP_OBJ} == 'eff_kvbits' ]; then
+    KV_METHOD="kivi think"
+    KV_METHOD_TEXT="kivi_think"
     W_BITS="4"
     W_BITS_TEXT="4"
     W_GROUP_SIZE=128

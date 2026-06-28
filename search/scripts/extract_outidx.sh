@@ -9,7 +9,7 @@ MODEL_NAME=Llama-3.1-8B-Instruct
 DATASET=wikitext2
 # DATASET=c4
 
-OUTPUT_DIR=/NAS/SJ/actquant/outlier/${MODEL_NAME}
+OUTPUT_DIR=/NAS/SJ/actquant/search/outlier/${MODEL_NAME}
 WBITS=16
 
 # One or more outlier-column counts → dict output {key: {n_out: [idx]}}

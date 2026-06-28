@@ -38,6 +38,7 @@ class SecondSearch:
     def __init__(self, config, args):
         self.config, self.args = config, args
         self.save_path = args.save
+        self.result_file = getattr(args, 'result_file', 'results.txt')
         self.iterations, self.n_doe, self.n_iter = args.iterations, args.n_doe, args.n_iter
         self.predictor, self.ga_pop_size = args.surrogate, args.pop
         self._pred_device = getattr(args, 'predictor_device', 'auto'); self._pred_dev_logged = False
@@ -377,7 +378,28 @@ class SecondSearch:
                 if self.debug:
                     self._save_viz(it, archive, c_metric, c_pred, c_comp, cov)
         print(f"[done] {len(archive)} archs, {time()-t0:.1f}s → {self.save_path}")
+        self._write_results(archive, time() - t0)
         return archive
+
+    def _write_results(self, archive, total_time):
+        """Final run summary → <save>/<result_file> (mirrors search.py::search): all args +
+        total time, plus a search summary (archive/front size, best loss, per-obj coverage)."""
+        os.makedirs(self.save_path, exist_ok=True)
+        losses = [x[1] for x in archive]
+        F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
+        nd = NonDominatedSorting().do(F, only_non_dominated_front=True)
+        cov = self._front_coverage(archive)
+        lines = [f"{k}: {v}\n" for k, v in vars(self.args).items()]
+        lines.append(f"\nTotal time: {total_time:.2f}s\n")
+        lines.append(f"archive: {len(archive)} archs | front: {len(nd)} | "
+                     f"loss {min(losses):.4f}-{max(losses):.4f} (best {min(losses):.4f})\n")
+        for obj in self.comp_obj:
+            c = cov[obj]
+            lines.append(f"  {obj}: front=[{c['front_min']:.3f}, {c['front_max']:.3f}] "
+                         f"full=[{c['full_min']:.3f}, {c['full_max']:.3f}] coverage {c['coverage']*100:.1f}%\n")
+        with open(os.path.join(self.save_path, self.result_file), 'w') as f:
+            f.writelines(lines)
+        print(f"[results] {os.path.join(self.save_path, self.result_file)}")
 
 
 def build_parser():
@@ -392,6 +414,7 @@ def build_parser():
     p.add_argument('--seed', type=int, default=0); p.add_argument('--save', default='save/second_search/run')
     p.add_argument('--resume', default=None, help='path to an iter_<it>.stats to resume from')
     p.add_argument('--save_iter', type=int, default=1, help='dump iter_<it>.stats (+ viz if --debug) every save_iter iters (and on the last)')
+    p.add_argument('--result_file', default='results.txt', help='filename (under --save) for the final run summary (args + total time + search summary), mirrors search.py')
     p.add_argument('--debug', action='store_true', help='also save per-save_iter scatter plots iter_<it>.png (like search.py --debug)')
     # comp objectives + budget box (taken at once, like search.py). comp_obj_min/max default
     # None per edge → AUTO-derived from the input archives' achievable comp range; pass an
