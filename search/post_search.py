@@ -31,7 +31,7 @@ from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
 from utils.select import (LazyPs, build_arch, assemble_F, select_valid_nd_idx,
                           per_axis_metric)
 from utils.eval import eval_zeroshot
-from utils.longbench import pred_longbench, eval_longbench
+from utils.longbench import pred_longbench, eval_longbench_preds
 from utils.data import get_tokenizer
 from utils.ruler import eval_ruler
 from utils.longeval import eval_longeval_lines, generate_lines_testcases
@@ -199,11 +199,15 @@ def run_benchmarks(args, model, model_id):
         clean_up()
         configure_model_cache(args, model, use_cache=True)
         t0 = time()
-        pred_longbench(model, tokenizer=get_tokenizer(model_id),
-                       save_path=args.longbench_result_path,
-                       longbench_config=args.longbench_config,
-                       e=args.longbench_e, model_name=args.model_name)
-        eval_longbench(args.longbench_result_path, args.longbench_e)
+        preds = pred_longbench(model, tokenizer=get_tokenizer(model_id),
+                               save_path=args.longbench_result_path,
+                               longbench_config=args.longbench_config,
+                               e=args.longbench_e, model_name=args.model_name)
+        # Score the just-produced predictions in memory (still writes
+        # result.json); avoids re-reading the dir, which could mix in stale
+        # .jsonl files from a previous run.
+        eval_longbench_preds(preds, args.longbench_e,
+                             save_path=args.longbench_result_path)
         sentences = [f"{k}: {v}\n" for k, v in vars(args).items()]
         sentences += [f'Longbench Time: {time() - t0:.2f}s', "\n"]
         with open(os.path.join(args.longbench_result_path,

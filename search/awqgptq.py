@@ -16,7 +16,7 @@ import csv
 from matplotlib import pyplot as plt
 from utils.func import init_accelerator, clean_up, process_dtype, get_net_info, set_seed
 from utils.eval import measure_latency, eval_zeroshot
-from utils.longbench import pred_longbench, eval_longbench
+from utils.longbench import pred_longbench, eval_longbench_preds
 from utils.data import get_tokenizer
 from utils.ruler import eval_ruler
 from utils.longeval import eval_longeval_lines
@@ -263,8 +263,10 @@ def main(args):
         model.config.use_cache = True
         
         longbench_start = time()
-        pred_longbench(model, tokenizer=get_tokenizer(model_id), save_path=args.longbench_result_path, longbench_config=args.longbench_config, e=args.longbench_e)
-        eval_longbench(args.longbench_result_path, args.longbench_e)
+        preds = pred_longbench(model, tokenizer=get_tokenizer(model_id), save_path=args.longbench_result_path, longbench_config=args.longbench_config, e=args.longbench_e)
+        # Score this run's predictions in memory (still writes result.json);
+        # avoids re-reading the dir, which could mix in stale .jsonl files.
+        eval_longbench_preds(preds, args.longbench_e, save_path=args.longbench_result_path)
         longbench_time = time() - longbench_start
         
         sentences = []
