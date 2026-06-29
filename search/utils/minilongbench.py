@@ -170,6 +170,7 @@ def pred_minilongbench(model, tokenizer, save_path, longbench_config,
     pred_dir = os.path.join(save_path, "pred")
     os.makedirs(pred_dir, exist_ok=True)
 
+    all_preds = {}
     for dataset in MINILONGBENCH_DATASETS:
         jsonl_path = os.path.join(data_dir, f"{dataset}.jsonl")
         if not os.path.exists(jsonl_path):
@@ -192,6 +193,11 @@ def pred_minilongbench(model, tokenizer, save_path, longbench_config,
             for pred in preds:
                 json.dump(pred, f, ensure_ascii=False)
                 f.write('\n')
+        all_preds[dataset] = preds
+    # Return the in-memory predictions keyed by dataset so the caller can score
+    # exactly THIS run's outputs (eval_minilongbench_preds) instead of re-reading
+    # the dir, which would pick up stale/other-config .jsonl files via listdir.
+    return all_preds
 
 
 def scorer(dataset, predictions, answers, all_classes):
@@ -207,35 +213,64 @@ def scorer(dataset, predictions, answers, all_classes):
     return round(100 * total_score / len(predictions), 2)
 
 
-def eval_minilongbench(save_path):
-    pred_dir = os.path.join(save_path, "pred")
-    scores = {}
-    all_files = os.listdir(pred_dir)
-    print("Evaluating on:", all_files)
+def _score_preds(dataset, preds):
+    """Score one dataset's prediction list (in-memory dicts from get_pred).
+    Shared by eval_minilongbench_preds (in-memory) and eval_minilongbench
+    (file-based) so both compute identical scores."""
+    predictions = [d["pred"] for d in preds]
+    answers = [d["answers"] for d in preds]
+    all_classes = preds[0]["all_classes"] if preds else None
+    return scorer(dataset, predictions, answers, all_classes)
 
-    for filename in all_files:
-        if not filename.endswith(".jsonl"):
-            continue
-        dataset = filename.split('.')[0]
-        predictions, answers = [], []
-        all_classes = None
-        with open(os.path.join(pred_dir, filename), "r",
-                  encoding="utf-8") as f:
-            for line in f:
-                data = json.loads(line)
-                predictions.append(data["pred"])
-                answers.append(data["answers"])
-                all_classes = data["all_classes"]
-        score = scorer(dataset, predictions, answers, all_classes)
-        scores[dataset] = score
 
-    out_path = os.path.join(pred_dir, "result.json")
+def _finalize_scores(scores, save_path):
+    """Append the avg, print, and write result.json (shared tail)."""
     print(f'task: {list(scores.keys())}')
     print(f'score: {list(scores.values())}')
     if scores:
         avg = round(np.mean(list(scores.values())), 2)
         print(f'avg score: {avg}')
         scores["avg"] = avg
+    if save_path:
+        pred_dir = os.path.join(save_path, "pred")
+        os.makedirs(pred_dir, exist_ok=True)
+        with open(os.path.join(pred_dir, "result.json"), "w") as f:
+            json.dump(scores, f, ensure_ascii=False, indent=4)
+    return scores
 
-    with open(out_path, "w") as f:
-        json.dump(scores, f, ensure_ascii=False, indent=4)
+
+def eval_minilongbench_preds(preds_by_dataset, save_path=None):
+    """Score the predictions returned by pred_minilongbench DIRECTLY (in
+    memory), with no re-read of the prediction dir. Corruption-safe: scores
+    exactly the datasets produced in THIS run, never stale or other-config
+    .jsonl files lying in the directory.
+
+    When save_path is given, the score summary is still written to
+    <save_path>/pred/result.json (predictions themselves were already written
+    by pred_minilongbench), so the on-disk artifacts are unchanged."""
+    scores = {dataset: _score_preds(dataset, preds)
+              for dataset, preds in preds_by_dataset.items()}
+    return _finalize_scores(scores, save_path)
+
+
+def eval_minilongbench(save_path):
+    """File-based scoring: re-read every .jsonl in <save_path>/pred and score.
+    Kept for backward compatibility / offline rescoring. NOTE: this reads ALL
+    .jsonl files in the dir via listdir, so it can pick up stale predictions
+    from a previous run — prefer eval_minilongbench_preds(pred_minilongbench(
+    ...)) for the live eval path."""
+    pred_dir = os.path.join(save_path, "pred")
+    all_files = os.listdir(pred_dir)
+    print("Evaluating on:", all_files)
+
+    preds_by_dataset = {}
+    for filename in all_files:
+        if not filename.endswith(".jsonl"):
+            continue
+        dataset = filename.split('.')[0]
+        with open(os.path.join(pred_dir, filename), "r",
+                  encoding="utf-8") as f:
+            preds_by_dataset[dataset] = [json.loads(line) for line in f]
+    scores = {dataset: _score_preds(dataset, preds)
+              for dataset, preds in preds_by_dataset.items()}
+    return _finalize_scores(scores, save_path)

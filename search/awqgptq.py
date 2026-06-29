@@ -20,7 +20,7 @@ from utils.longbench import pred_longbench, eval_longbench_preds
 from utils.data import get_tokenizer
 from utils.ruler import eval_ruler
 from utils.longeval import eval_longeval_lines
-from utils.minilongbench import pred_minilongbench, eval_minilongbench
+from utils.minilongbench import pred_minilongbench, eval_minilongbench_preds
 import warnings
 from time import time
 warnings.simplefilter("ignore")
@@ -308,7 +308,7 @@ def main(args):
 
         from time import time as _time
         mlb_start = _time()
-        pred_minilongbench(
+        mlb_preds = pred_minilongbench(
             model,
             tokenizer=get_tokenizer(model_id),
             save_path=args.minilongbench_result_path,
@@ -316,7 +316,9 @@ def main(args):
             data_dir=args.minilongbench_data_dir if args.minilongbench_data_dir else None,
             model_name=args.model_name,
         )
-        eval_minilongbench(args.minilongbench_result_path)
+        # Score this run's predictions in memory (still writes result.json);
+        # avoids re-reading the dir, which could mix in stale .jsonl files.
+        eval_minilongbench_preds(mlb_preds, save_path=args.minilongbench_result_path)
         mlb_time = _time() - mlb_start
         print(f'MiniLongBench Time: {mlb_time:.2f}s')
 

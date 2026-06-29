@@ -35,7 +35,7 @@ from utils.longbench import pred_longbench, eval_longbench_preds
 from utils.data import get_tokenizer
 from utils.ruler import eval_ruler
 from utils.longeval import eval_longeval_lines, generate_lines_testcases
-from utils.minilongbench import pred_minilongbench, eval_minilongbench
+from utils.minilongbench import pred_minilongbench, eval_minilongbench_preds
 
 warnings.simplefilter("ignore")
 
@@ -219,13 +219,17 @@ def run_benchmarks(args, model, model_id):
         clean_up()
         configure_model_cache(args, model, use_cache=True)
         t0 = time()
-        pred_minilongbench(
+        mlb_preds = pred_minilongbench(
             model, tokenizer=get_tokenizer(model_id),
             save_path=args.minilongbench_result_path,
             longbench_config=args.longbench_config,
             data_dir=args.minilongbench_data_dir or None,
             model_name=args.model_name)
-        eval_minilongbench(args.minilongbench_result_path)
+        # Score the just-produced predictions in memory (still writes
+        # result.json); avoids re-reading the dir, which could mix in stale
+        # .jsonl files from a previous run.
+        eval_minilongbench_preds(mlb_preds,
+                                 save_path=args.minilongbench_result_path)
         mlb_time = time() - t0
         print(f'MiniLongBench Time: {mlb_time:.2f}s')
         sentences = [f"{k}: {v}\n" for k, v in vars(args).items()]
