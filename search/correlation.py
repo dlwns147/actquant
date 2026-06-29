@@ -77,7 +77,7 @@ from utils.select import (build_arch, select_valid_nd_idx, assemble_F,
                           coverage_subset_nsga2_extras)
 from utils.eval import eval_metric, eval_loss
 from utils.data import get_tokenizer
-from utils.longbench import pred_longbench, eval_longbench
+from utils.longbench import pred_longbench, eval_longbench_preds
 from utils.ruler import eval_ruler
 
 warnings.simplefilter("ignore")
@@ -977,15 +977,13 @@ def _run_benchmark_block(args, model, model_id, which):
         clean_up()
         configure_model_cache(args, model, use_cache=True)
         t0 = time()
-        pred_longbench(model, tokenizer=get_tokenizer(model_id),
-                       save_path=result_path,
-                       longbench_config=args.longbench_config,
-                       e=e, model_name=args.model_name)
-        eval_longbench(result_path, e)
-        score_path = os.path.join(result_path, 'pred_e' if e else 'pred',
-                                  'result.json')
-        with open(score_path) as f:
-            scores = json.load(f)
+        preds = pred_longbench(model, tokenizer=get_tokenizer(model_id),
+                               save_path=result_path,
+                               longbench_config=args.longbench_config,
+                               e=e, model_name=args.model_name)
+        # Score this run's predictions in memory (still writes result.json);
+        # avoids re-reading the dir, which could mix in stale .jsonl files.
+        scores = dict(eval_longbench_preds(preds, e, save_path=result_path))
         scores['_time'] = time() - t0
         return scores
 

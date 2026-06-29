@@ -174,6 +174,7 @@ def pred_longbench(model, tokenizer, save_path, longbench_config, e,
     else:
         os.makedirs(os.path.join(save_path, "pred"), exist_ok=True)
 
+    all_preds = {}
     for dataset in datasets:
         if e:
             data = load_dataset('THUDM/LongBench', f"{dataset}_e",
@@ -190,6 +191,11 @@ def pred_longbench(model, tokenizer, save_path, longbench_config, e,
             for pred in preds:
                 json.dump(pred, f, ensure_ascii=False)
                 f.write('\n')
+        all_preds[dataset] = preds
+    # Return the in-memory predictions keyed by dataset so the caller can score
+    # exactly THIS run's outputs (eval_longbench_preds) instead of re-reading
+    # the dir, which would pick up stale/other-config .jsonl files via listdir.
+    return all_preds
 
 
 def scorer_e(dataset, predictions, answers, lengths, all_classes):
@@ -226,33 +232,61 @@ def scorer(dataset, predictions, answers, all_classes):
     return round(100 * total_score / len(predictions), 2)
 
 
+def _score_preds(dataset, preds, e):
+    """Score one dataset's prediction list (in-memory, the dicts produced by
+    get_pred). Shared by eval_longbench_preds (in-memory) and eval_longbench
+    (file-based) so both compute identical scores."""
+    predictions = [d["pred"] for d in preds]
+    answers = [d["answers"] for d in preds]
+    all_classes = preds[0]["all_classes"] if preds else None
+    if e:
+        lengths = [d["length"] for d in preds]
+        return scorer_e(dataset, predictions, answers, lengths, all_classes)
+    return scorer(dataset, predictions, answers, all_classes)
+
+
+def eval_longbench_preds(preds_by_dataset, e, save_path=None):
+    """Score the predictions returned by pred_longbench DIRECTLY (in memory),
+    with no re-read of the prediction dir. This is the corruption-safe path:
+    it scores exactly the datasets produced in THIS run, never stale or
+    other-config .jsonl files lying in the directory.
+
+    When save_path is given, the score summary is still written to
+    <save_path>/pred[_e]/result.json (predictions themselves were already
+    written by pred_longbench), so the on-disk artifacts are unchanged."""
+    scores = {dataset: _score_preds(dataset, preds, e)
+              for dataset, preds in preds_by_dataset.items()}
+    print(f'task: {list(scores.keys())}')
+    print(f'score: {list(scores.values())}')
+    if save_path:
+        out_dir = os.path.join(save_path, "pred_e" if e else "pred")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, 'result.json'), "w") as f:
+            json.dump(scores, f, ensure_ascii=False, indent=4)
+    return scores
+
+
 def eval_longbench(path, e):
+    """File-based scoring: re-read every .jsonl in <path>/pred[_e] and score.
+    Kept for backward compatibility / offline rescoring. NOTE: this reads ALL
+    .jsonl files in the dir via listdir, so it can pick up stale predictions
+    from a previous run — prefer eval_longbench_preds(pred_longbench(...)) for
+    the live eval path."""
     if e:
         path = os.path.join(path, "pred_e")
     else:
         path = os.path.join(path, "pred")
-    scores = dict()
+    preds_by_dataset = dict()
     all_files = os.listdir(path)
     print("Evaluating on:", all_files)
     for filename in all_files:
         if not filename.endswith("jsonl"):
             continue
-        predictions, answers, lengths = [], [], []
         dataset = filename.split('.')[0]
         with open(os.path.join(path, filename), "r", encoding="utf-8") as f:
-            for line in f:
-                data = json.loads(line)
-                predictions.append(data["pred"])
-                answers.append(data["answers"])
-                all_classes = data["all_classes"]
-                if "length" in data:
-                    lengths.append(data["length"])
-        if e:
-            score = scorer_e(dataset, predictions, answers, lengths,
-                             all_classes)
-        else:
-            score = scorer(dataset, predictions, answers, all_classes)
-        scores[dataset] = score
+            preds_by_dataset[dataset] = [json.loads(line) for line in f]
+    scores = {dataset: _score_preds(dataset, preds, e)
+              for dataset, preds in preds_by_dataset.items()}
     out_path = os.path.join(path, 'result.json')
     print(f'task: {list(scores.keys())}')
     print(f'score: {list(scores.values())}')
