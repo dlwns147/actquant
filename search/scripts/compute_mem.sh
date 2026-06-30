@@ -25,8 +25,8 @@ RESIDUAL_LENGTH=128
 
 N_TOKEN_LIST=(16384 32768 65536 131072)
 
-W_BITS_LIST=(3 3 4)
-W_GROUP_SIZE_LIST=(-1 128 -1)
+W_BITS_LIST=(3 4)
+W_GROUP_SIZE_LIST=(-1 -1)
 
 # KV_BITS_LIST <-> KV_GROUP_SIZE_LIST pair one-to-one (like W_BITS_LIST <->
 # W_GROUP_SIZE_LIST): index i = (bits[i], group_size[i]). group_size

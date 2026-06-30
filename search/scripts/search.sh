@@ -27,6 +27,9 @@ COMP_OBJ=eff_kvbits
 # USE_KEY_TOKEN=True
 USE_KEY_TOKEN=False
 
+# USE_QEFT=True
+USE_QEFT=False
+
 # N_TOKEN=1024
 N_TOKEN=16384
 # N_TOKEN=32768
@@ -58,16 +61,12 @@ ATTN_SINK=8
 ANCHOR_LEVELS=0
 
 if [ ${COMP_OBJ} == 'wbits' ]; then
-    # ---- QEFT outlier columns ON TOP OF the (fast) HQQ wbits search: per-layer
-    #      FP16 outlier columns (32-multiples, incl. 0=off) become a searchable
-    #      (w_bits, n_outlier) weight axis. w_method stays hqq — each arch just
-    #      swaps the pre-quantized HQQ bank + inserts the FP16 outlier columns
-    #      (no per-arch re-quant). Needs the multi-rank outlier dict from
-    #      extract_outidx.py (run scripts/extract_outidx.sh --target_rank 32 64 96 128).
-    N_QEFT_COLUMN="0 32 64 96 128"   # per-layer outlier-column options
-    BASE_OUTLIER_BITS="2 3"        # which W bit-widths get the outlier ladder
-    N_OUTLIER=128                    # only to satisfy search.py's outlier-arg assert
-    QEFT_RANK_TEXT=32_64_96_128      # non-zero ranks → outlier-dict dirname
+    if [ ${USE_QEFT} == 'True' ]; then
+        N_QEFT_COLUMN="0 32 64 96 128"   # per-layer outlier-column options
+        BASE_OUTLIER_BITS="2 3"        # which W bit-widths get the outlier ladder
+        N_OUTLIER=128                    # only to satisfy search.py's outlier-arg assert
+        QEFT_RANK_TEXT=32_64_96_128      # non-zero ranks → outlier-dict dirname
+    fi
 
     W_BITS="2 3 4"
     W_BITS_TEXT="234"
@@ -320,26 +319,16 @@ compress_dim() {
 K_PRUNING_DIM_C=$(compress_dim "${K_PRUNING_DIM}")
 V_PRUNING_DIM_C=$(compress_dim "${V_PRUNING_DIM}")
 
-# Abbreviated attention-sink tag, appended ONLY when sink is on so sink=0 runs
-# keep byte-identical SAVE names (comparable with existing archives). e.g. _sk8.
 SINK_TAG=""
 if [ ${ATTN_SINK} -ne 0 ]; then
     SINK_TAG="_sk${ATTN_SINK}"
 fi
 
-# Abbreviated QEFT-outlier tag, appended ONLY when the outlier-column axis is on
-# (N_QEFT_COLUMN set, wbits search): the searchable ladder + eligible bit-widths.
-# e.g. _qc0-32-64-96-128_ob234.
 QEFT_TAG=""
 if [ -n "${N_QEFT_COLUMN}" ]; then
     QEFT_TAG="_qc$(echo ${N_QEFT_COLUMN} | sed 's/ /-/g')_ob$(echo ${BASE_OUTLIER_BITS} | sed 's/ //g')"
 fi
 
-# Shortened SAVE name: only run-varying fields are kept. Fixed-protocol values
-# (metric=loss, w_method=hqq, loss_func=jsd, co/mut, dataset/bs/sample/seq/token,
-# predictor, k/v_quant_scheme, w_group_size, iter/n_iter) are dropped -- they are
-# recorded in the .stats/config inside the dir. `obj_<min>_<max>` is preserved
-# verbatim (analysis scripts parse it). Pruning-dim lists are arithmetic-compressed.
 SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${KV_METHOD_TEXT}${QEFT_TAG}${SINK_TAG}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_r${RESIDUAL_LENGTH}_kd${K_PRUNING_DIM_C}_vd${V_PRUNING_DIM_C}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_st${STRIDE}${PP_TAG}
 
 N_PROC=1
