@@ -44,7 +44,18 @@ class GPTQ(BASE):
     ):
         
         assert self.arch is not None, "arch is not provided"
-       
+
+        # Llama-3.x is uniquely unstable under GPTQ-without-act_order: its extreme
+        # massive-activation channels make the sequential per-column error feedback
+        # ill-conditioned, so in natural column order wiki PPL swings chaotically and
+        # can be far worse than RTN (verified Llama-3.1-8B W4 g128: act_order=False
+        # ~7.8-13.5 vs act_order=True ~7.2). Other models quantize fine without it and
+        # act_order can even hurt slightly (Qwen2.5-7B 7.16 vs 7.14, Mistral-7B-v0.3
+        # 5.87 vs 5.90), so enable it ONLY for the Llama-3 family.
+        if 'llama-3' in self.model_name.lower() and not act_order:
+            act_order = True
+            print('[gptq] Llama-3.x -> forcing act_order=True (GPTQ stability)')
+
         if samples is None:
             samples = get_gptq_calib_dataset(tokenizer=self.tokenizer, n_samples=nsamples, seqlen=seqlen)
 
