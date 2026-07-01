@@ -25,20 +25,25 @@ RESIDUAL_LENGTH=128
 
 N_TOKEN_LIST=(16384 32768 65536 131072)
 
-W_BITS_LIST=(3 4)
-W_GROUP_SIZE_LIST=(-1 -1)
+# W_BITS_LIST=(3 4)
+# W_GROUP_SIZE_LIST=(-1 -1)
+W_BITS_LIST=(2.75 3.25 3.75)
+W_GROUP_SIZE_LIST=(128 128 128)
 
 # KV_BITS_LIST <-> KV_GROUP_SIZE_LIST pair one-to-one (like W_BITS_LIST <->
 # W_GROUP_SIZE_LIST): index i = (bits[i], group_size[i]). group_size
 # broadcasts if length 1.
 # KV_BITS_LIST=(2 4)
 # KV_GROUP_SIZE_LIST=(128 128)
-KV_BITS_LIST=(2 3)
-KV_GROUP_SIZE_LIST=(128 32)
+# KV_BITS_LIST=(2 3)
+# KV_GROUP_SIZE_LIST=(128 32)
+KV_BITS_LIST=(1.25 2 2.75 3.5)
+KV_GROUP_SIZE_LIST=(128 128 128 128)
 
 # prune dim = # head_dim channels removed (0 = no pruning). NOT remaining dim.
 # INDEPENDENT axis: cartesian product with the (bits, group_size) pairs above.
-KV_PRUNE_DIM_LIST=(48 0)
+# KV_PRUNE_DIM_LIST=(48 0)
+KV_PRUNE_DIM_LIST=(0)
 
 SAVE=csv/mem
 CSV_FILE=${TODAY}_${MODEL_NAME}.csv

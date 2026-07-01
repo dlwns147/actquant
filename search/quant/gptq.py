@@ -45,16 +45,12 @@ class GPTQ(BASE):
         
         assert self.arch is not None, "arch is not provided"
 
-        # Llama-3.x is uniquely unstable under GPTQ-without-act_order: its extreme
-        # massive-activation channels make the sequential per-column error feedback
-        # ill-conditioned, so in natural column order wiki PPL swings chaotically and
-        # can be far worse than RTN (verified Llama-3.1-8B W4 g128: act_order=False
-        # ~7.8-13.5 vs act_order=True ~7.2). Other models quantize fine without it and
-        # act_order can even hurt slightly (Qwen2.5-7B 7.16 vs 7.14, Mistral-7B-v0.3
-        # 5.87 vs 5.90), so enable it ONLY for the Llama-3 family.
+        # Llama-3.x GPTQ needs act_order=True: its massive-activation channels make
+        # natural column order unstable (Llama-3.1-8B W4 wiki PPL ~7.8-13.5 vs ~7.2).
+        # Qwen/Mistral are fine without it, so gate on the Llama-3 family only.
         if 'llama-3' in self.model_name.lower() and not act_order:
             act_order = True
-            print('[gptq] Llama-3.x -> forcing act_order=True (GPTQ stability)')
+            print('[gptq] Llama-3.x -> act_order=True (GPTQ stability)')
 
         if samples is None:
             samples = get_gptq_calib_dataset(tokenizer=self.tokenizer, n_samples=nsamples, seqlen=seqlen)
@@ -86,6 +82,11 @@ class GPTQ(BASE):
                 cache['i'] += 1
                 cache['attention_mask'] = kwargs['attention_mask']
                 cache['position_ids'] = kwargs['position_ids']
+                # transformers>=4.45 passes precomputed RoPE (cos,sin) to each decoder
+                # layer; capture it so the block-replay forwards below don't pass None
+                # (otherwise 'cos, sin = position_embeddings' raises). Older versions
+                # don't pass it (computed inside attention) -> stays None, omitted below.
+                cache['position_embeddings'] = kwargs.get('position_embeddings')
                 raise ValueError
         layers[0] = Catcher(layers[0])
         for batch in samples:
@@ -105,6 +106,11 @@ class GPTQ(BASE):
         outs = torch.zeros_like(inps)
         attention_mask = cache['attention_mask']
         position_ids = cache['position_ids']
+        # forward kwargs for the block replays (include position_embeddings only when
+        # captured, so this works on both transformers<4.45 and >=4.45).
+        _fwd_kw = dict(attention_mask=attention_mask, position_ids=position_ids)
+        if cache.get('position_embeddings') is not None:
+            _fwd_kw['position_embeddings'] = cache['position_embeddings']
 
         print('Ready.')
 
@@ -130,9 +136,6 @@ class GPTQ(BASE):
                 for name in subset:
                     gptq[name] = GPTQ_METHOD(subset[name])
                     gptq[name].quantizer = Quantizer()
-                    # gptq[name].quantizer.configure(
-                    #     args.wbits, perchannel=True, sym=args.sym, mse=False
-                    # )
                     gptq[name].quantizer.configure(
                         round(self.arch[name][i]), perchannel=True, sym=sym, mse=False
                     )
@@ -145,16 +148,13 @@ class GPTQ(BASE):
                 for name in subset:
                     handles.append(subset[name].register_forward_hook(add_batch(name)))
                 for j in range(nsamples):
-                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                    outs[j] = layer(inps[j].unsqueeze(0), **_fwd_kw)[0]
                 for h in handles:
                     h.remove()
 
                 for name in subset:
                     print(i, name)
                     print('Quantizing ...')
-                    # gptq[name].fasterquant(
-                    #     percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
-                    # )
                     gptq[name].fasterquant(
                         percdamp=percdamp, groupsize=self.group_size, actorder=act_order, static_groups=static_groups
                     )
@@ -162,8 +162,7 @@ class GPTQ(BASE):
                     gptq[name].free()
 
             for j in range(nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-            # outs = layer(inps, attention_mask=attention_mask, position_ids=position_ids)[0]
+                outs[j] = layer(inps[j].unsqueeze(0), **_fwd_kw)[0]
 
             layers[i] = layer.cpu()
             del layer
@@ -214,9 +213,7 @@ class GPTQ_METHOD:
             inp = inp.flatten(1)
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
-        # inp = inp.float()
         inp = math.sqrt(2 / self.nsamples) * inp.float()
-        # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
 
     def fasterquant(
@@ -349,7 +346,6 @@ class Quantizer(nn.Module):
         mse=False, norm=2.4, grid=100, maxshrink=.8,
         trits=False
     ):
-        # print(bits)
         self.maxq = torch.tensor(2 ** bits - 1)
         self.perchannel = perchannel
         self.sym = sym
