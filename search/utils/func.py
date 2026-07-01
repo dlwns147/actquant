@@ -49,7 +49,7 @@ def compute_bits(arch, config, group_size, target='w', include_pruning=True):
             n_param += out_dim * in_dim * len(linear_bits)
             linear_group_size = in_dim if w_group_size == -1 else w_group_size
             assert in_dim % linear_group_size == 0
-            if type(linear_bits[0]) == int:
+            if type(linear_bits[0]) in (int, float):
                 for bits in linear_bits:
                     memory_usage += out_dim * in_dim * bits
                     if bits < 16:
@@ -113,7 +113,7 @@ def compute_memory(arch, config, group_size, n_token=0, residual_length=0,
         linear_group_size = in_dim if w_group_size == -1 else w_group_size
         assert in_dim % linear_group_size == 0
         linear_bits = arch['q']['w'][linear]
-        if type(linear_bits[0]) == int:
+        if type(linear_bits[0]) in (int, float):
             for bits in linear_bits:
                 weight_memory += out_dim * in_dim * bits // 8
                 if bits < 16:
@@ -196,7 +196,7 @@ def compute_weight_memory(arch, config, group_size):
         linear_group_size = in_dim if w_group_size == -1 else w_group_size
         assert in_dim % linear_group_size == 0
         linear_bits = arch['q']['w'][linear]
-        if type(linear_bits[0]) == int:
+        if type(linear_bits[0]) in (int, float):
             for bits in linear_bits:
                 weight_memory += out_dim * in_dim * bits // 8
                 if bits < 16:

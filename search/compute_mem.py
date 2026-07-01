@@ -157,12 +157,17 @@ if __name__ == '__main__':
                         help='file path to supernet weights')
     parser.add_argument('--model_name', type=str, default='',
                         help='file path to supernet weights')
-    parser.add_argument('--w_bits', type=int, nargs='+', default=[4],
-                        help='one or more weight bit-widths')
-    parser.add_argument('--k_bits', type=int, nargs='+', default=[4],
-                        help='one or more key-cache bit-widths')
-    parser.add_argument('--v_bits', type=int, nargs='+', default=[4],
-                        help='one or more value-cache bit-widths')
+    parser.add_argument('--w_bits', type=float, nargs='+', default=[4],
+                        help='one or more weight bit-widths (fractional allowed: '
+                             'a non-integer value is the numel-weighted AVERAGE '
+                             'bit-width of a mixed-precision arch, whose memory '
+                             'is identical to a uniform arch at that average)')
+    parser.add_argument('--k_bits', type=float, nargs='+', default=[4],
+                        help='one or more key-cache bit-widths (fractional = '
+                             'mixed-precision average, see --w_bits)')
+    parser.add_argument('--v_bits', type=float, nargs='+', default=[4],
+                        help='one or more value-cache bit-widths (fractional = '
+                             'mixed-precision average, see --w_bits)')
     parser.add_argument('--k_prune_dim', type=int, nargs='+', default=[0],
                         help='one or more per-layer K cache prune dims '
                              '(# head_dim channels removed; 0 = no pruning)')
@@ -175,8 +180,9 @@ if __name__ == '__main__':
                         help='one or more key-cache group sizes, paired 1:1 with --k_bits')
     parser.add_argument('--v_group_size', type=int, nargs='+', default=[128],
                         help='one or more value-cache group sizes, paired 1:1 with --v_bits')
-    parser.add_argument('--kv_bits', type=int, nargs='+', default=None,
-                        help='unified KV bit-widths; sets both --k_bits and '
+    parser.add_argument('--kv_bits', type=float, nargs='+', default=None,
+                        help='unified KV bit-widths (fractional = mixed-precision '
+                             'average, see --w_bits); sets both --k_bits and '
                              '--v_bits and treats KV as a single axis')
     parser.add_argument('--kv_group_size', type=int, nargs='+', default=None,
                         help='unified KV group sizes, paired 1:1 with --kv_bits; '

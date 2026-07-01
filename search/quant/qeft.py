@@ -36,9 +36,7 @@ class QEFT(BASE):
         n_samples=128,
         seqlen=2048,
         dataset='c4',
-        # dataset='wikitext2',
         reorder=True,
-        # reorder=False,
         target_rank=32,
         seed=42,
         sym=False,
@@ -117,22 +115,15 @@ class QEFT(BASE):
         del cache['i']
         inp_kwargs = cache
 
-        # print('Ready.')
         owq_layers = meta['owq_layers']
         ratios = meta['ratios']
-        # New (search) scheme: arch entries are (w_bits, n_outlier) tuples carrying a
-        # searchable per-layer outlier-column count; outlier indices come from a
-        # MULTI-rank dict {key: {n_out: [cols]}} (extract_outidx.py). The legacy
-        # scheme uses fractional bits + a single target_rank + a flat {key: [cols]} dict.
+        # tuple_arch = (w_bits, n_outlier) search scheme (indices from a multi-rank
+        # dict {key: {n_out: [cols]}}); legacy = fractional bits + flat {key: [cols]}.
         tuple_arch = any(isinstance(larch[l][0], (list, tuple)) for l in larch)
-        # When the arch carries searchable per-layer outlier counts, the indices
-        # must come from a multi-rank dict {key: {n_out: [cols]}}. Fail fast with an
-        # actionable message instead of crashing on `None[key]` / a flat list deep in
-        # the per-layer loop (e.g. post_search/sample_surrogate run with --w_method
-        # qeft but a missing/old-format --outlier_path).
+        # tuple_arch with outliers needs a multi-rank dict — fail fast if missing/old-format
+        # (else it crashes deep in the loop on None[key] / a flat list).
         if tuple_arch and any(e[1] > 0 for l in larch for e in larch[l]):
-            # skip the 'n_outlier' metadata key (a list of ranks, saved first by
-            # extract_outidx.py) when sampling a representative per-layer entry.
+            # skip the 'n_outlier' metadata key when sampling a representative entry.
             sample_key = next((k for k in self.owq if k != 'n_outlier'), None) \
                 if isinstance(self.owq, dict) and self.owq else None
             if not isinstance(self.owq, dict) or sample_key is None or not isinstance(self.owq[sample_key], dict):
@@ -145,38 +136,19 @@ class QEFT(BASE):
             for l, is_owq in owq_layers.items():
                 if is_owq:
                     n_out_dict[l] = [int(e[1]) for e in larch[l]]
-            # Per-layer outlier counts vary across layers, which is incompatible with
-            # QEFT's single global channel reorder (one shared out_id set for all
-            # qkv/up/gate). Reorder is a kernel-packing optimization only and does not
-            # change fake-quant outputs, so disable it for the searchable scheme.
+            # per-layer outlier counts are incompatible with QEFT's single global
+            # reorder (kernel-packing only, no effect on fake-quant), so disable it.
             reorder = False
         elif target_rank is not None:
             for l, is_owq in owq_layers.items():
                 if is_owq:
                     n_out_dict[l] = [target_rank if bits != math.ceil(bits) else 0 for bits in larch[l]]
-                    # n_out_dict[l] = target_rank
-        # Force act-order ONLY for (Llama-3.x family) AND (0 FP16 outlier columns).
-        # WHY Llama-3.x: it has uniquely extreme massive-activation channels, so GPTQ
-        # in NATURAL column order is numerically UNSTABLE there — its sequential
-        # per-column error feedback is ill-conditioned around those channels and wiki
-        # PPL swings chaotically (verified Llama-3.1-8B uniform W4 g128 0-outlier:
-        # 7.8-13.5, vs RTN 7.43; an independent reference GPTQ is just as chaotic, so
-        # it is NOT a code bug, it is the act_order=False instability). act_order=True
-        # (high-Hessian columns first) STABILIZES it to ~7.2-7.3 = HQQ 7.23. This is
-        # Llama-3-SPECIFIC: verified Qwen2.5-7B (7.16 vs 7.14) and Mistral-7B-v0.3
-        # (5.87 vs 5.90 — act_order slightly WORSE) quantize fine WITHOUT act_order,
-        # so we do NOT touch them (act_order is not a free lunch off-Llama-3).
-        # WHY 0-outlier: QEFT's stability against those channels normally comes from
-        # the FP16 outlier columns (official xvyaward/qeft always runs target_rank>=1
-        # and keeps act_order off; outlier-bearing Llama-3 archs are stable, e.g. 7.36).
-        # A 0-outlier arch (e.g. an HQQ/second_search subnet benchmarked with
-        # --w_method qeft) has no such protection, hence the rescue.
-        is_llama3 = 'llama-3' in self.model_name.lower()
-        any_outlier = any(c > 0 for cnts in n_out_dict.values() for c in cnts)
-        if is_llama3 and not any_outlier and not act_order:
+        # Llama-3.x GPTQ needs act_order=True: its massive-activation channels make
+        # natural column order unstable (Llama-3.1-8B W4 wiki PPL ~7.8-13.5 vs ~7.2).
+        # Qwen/Mistral are fine without it, so gate on the Llama-3 family only.
+        if 'llama-3' in self.model_name.lower() and not act_order:
             act_order = True
-            print('[qeft] Llama-3.x 0-outlier arch -> forcing act_order=True (GPTQ '
-                  'stability; no outlier columns to protect massive-activation channels)')
+            print('[qeft] Llama-3.x -> act_order=True (GPTQ stability)')
         print(f'tuple_arch : {tuple_arch}, reorder : {reorder}, act_order : {act_order}')
         print(f'n_out_dict : {n_out_dict}')
         print(f'self.arch : {self.arch}')
@@ -250,7 +222,6 @@ class QEFT(BASE):
 
                     key = f"{meta['prefix']}.{i}.{name}"
                     outidx = _outidx(name, i, key)
-                    # print(f'key : {key}, outidx : {outidx}, wbits : {wbits}, key in self.owq : {key in self.owq}')
                     out_ids = gptq_owq[name].hessian_sorting(
                         actorder=act_order,
                         frob_norm=frob_norm_error,
@@ -258,8 +229,7 @@ class QEFT(BASE):
                         )
                     gptq_owq[name].quantizer.out_ids = out_ids
                     gptq_owq[name].quantizer.n_out = out_ids.numel()
-                    gptq_owq[name].quantizer.reorder = reorder # if name not in meta['sequential'][1] else False
-                    # print(f'n_out_dict[name][i] : {n_out_dict[name][i]}, n_out : {out_ids.numel()}, self.owq[key] : {self.owq[key] if key in self.owq else 0}')
+                    gptq_owq[name].quantizer.reorder = reorder
 
                 if not no_frob_norm and not tuple_arch:
                     del W
@@ -269,30 +239,12 @@ class QEFT(BASE):
                 
                 for name in subset:
                     key = f"{meta['prefix']}.{i}.{name}"
-                    # print(f"Quantizing {key}")
-                    # global_ids feeds the single global make_reorder. It MUST be the
-                    # outlier set the quantizer ACTUALLY used (quantizer.out_ids), NOT
-                    # the raw self.owq[key] indices, for two reasons:
-                    #   1) make_reorder permutes the residual stream by global_ids but
-                    #      permutes each block's o_proj/down_proj OUTPUT by the per-layer
-                    #      quantizer.out_ids — the OWQ scheme is only correct when the two
-                    #      agree. For a 0-outlier (clean integer-bit) arch out_ids is
-                    #      EMPTY, so global_ids must be empty too → make_reorder collapses
-                    #      to an identity no-op. Using the dict's outlier columns instead
-                    #      permutes the residual while down_proj output stays put →
-                    #      residual-stream corruption → the uniform-4bit PPL spike.
-                    #   2) self.owq[key] is a per-rank {n_out: [cols]} dict in the
-                    #      multi-rank scheme, so torch.tensor(self.owq[key]) crashes.
-                    # For the legacy fractional-bit path out_ids == self.owq[key], so the
-                    # working case is unchanged. reorder stays ON in every case.
+                    # global_ids must be the quantizer's ACTUAL out_ids (empty for a
+                    # 0-outlier arch → make_reorder is a no-op), NOT the raw dict indices
+                    # (would permute the residual w/o matching down_proj → PPL spike; and
+                    # the multi-rank dict isn't a flat index list). Legacy: out_ids == dict.
                     if reorder and name not in meta['sequential'][1] and name not in meta['sequential'][3]:
                         global_ids = gptq_owq[name].quantizer.out_ids
-                    # print(f'out_ids : {gptq_owq[name].quantizer.out_ids.tolist()}')
-                    # print(f'self.owq[key] : {self.owq[key] if key in self.owq else 0}') 
-                    # print(f'global_ids : {global_ids.tolist()}')
-                    # if key in self.owq:
-                    #     print(f'(gptq_owq[name].quantizer.out_ids == self.owq[key]).sum() : {(gptq_owq[name].quantizer.out_ids == self.owq[key]).sum()}')
-                    # print('=' * 20)
                     if nearest_owq:
                         if gptq_owq[name].quantizer.reorder:
                             gptq_owq[name].fasterquant_nearest_owq_reorder(groupsize=self.group_size, actorder=act_order)
