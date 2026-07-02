@@ -574,6 +574,155 @@ def maximin_extras(M, anchor_idx, K, seed=0):
     return sel
 
 
+def _comb(n, k):
+    from math import comb
+    return comb(n, k)
+
+
+def even_select(comp, score, K, g, lo, hi):
+    """Coordinate-agnostic grid-quota selection: bucket `comp` rows ((N, d), any
+    coordinate system — e.g. (wbits, eff_kvbits) box or (memory, split)) into a
+    g^d grid over [lo, hi], round-robin the occupied cells, take the best `score`
+    (lowest) first WITHIN a cell → per-axis-uniform marginal density + quality.
+    Returns selected indices into `comp` (≤ K)."""
+    comp = np.asarray(comp, float)
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    cell = np.clip(((comp - lo) / (hi - lo + 1e-9) * g).astype(int), 0, g - 1)
+    cid = np.zeros(len(comp), int)
+    for d in range(comp.shape[1]):
+        cid = cid * g + cell[:, d]
+    buckets = {}
+    for i, c in enumerate(cid):
+        buckets.setdefault(int(c), []).append(i)
+    for c in buckets:                                # within-cell: best score first
+        buckets[c].sort(key=lambda i: score[i])
+    cells, sel = list(buckets), []
+    while len(sel) < K and cells:                    # round-robin over occupied cells
+        for c in list(cells):
+            if not buckets[c]:
+                cells.remove(c); continue
+            sel.append(buckets[c].pop(0))
+            if len(sel) >= K:
+                break
+    return np.array(sel, int)
+
+
+def moo_subset_select(comp, pred, K, comp_min, comp_max, g, algo='nsga3',
+                      pop=80, n_gen=80, seed=0, gap_std=False, coverage='rad'):
+    """Pick K candidate indices (into `comp`/`pred`) by a 2/3-objective subset-selection GA
+    that balances arch QUALITY against even COVERAGE of the [comp_min, comp_max] box —
+    the principled replacement for a hard exploit/explore split (validated in tests/:
+    MOO-knee NSGA-III dominates the hybrid hard split on evenness+quality, and
+    NSGA-III ≥ NSGA-II). Coordinate-agnostic like even_select. Chromosome = K pool indices:
+        obj1 = mean normalised predicted loss   (exploit: pull the low-loss front)
+        obj2 = coverage='rad' (default): covering radius over a g^d grid of cell centres
+               (2D REACH — minimax "biggest hole"; blind to clumping once cells are reached)
+               coverage='gap': max over axes of the std of consecutive sorted-coordinate
+               gaps (1D MARGINAL spacing evenness, the coverage_subset_nsga2_extras
+               marginal/max fitness; blind to joint 2D structure — a diagonal has perfect
+               marginals but covers no off-diagonal area)
+        obj3 (gap_std=True) = the OTHER criterion added as a 3rd objective (both at once;
+              tested: dilutes the quality objective in the knee — not recommended for the
+              closed-loop; per-iter subset evenness does not compound into archive evenness).
+    Solved with NSGA-III (reference-direction; default) or NSGA-II, then the KNEE of the
+    Pareto front (argmin of the min-max-normalised objective sum) is returned = the balanced
+    explore↔exploit subset. Guarantees K picks: any de-dup shortfall is filled by farthest-
+    point maximin (keeps coverage). O(pop·n_gen) cheap comp-space evals (no model calls).
+
+    NOTE: operates on the SUPPLIED pool only — pair with supply seeding
+    (utils.second_stage.grid_seed) so the high-comp corner NSGA drops is present."""
+    from scipy.spatial.distance import cdist
+    from pymoo.core.problem import Problem
+    from pymoo.core.sampling import Sampling
+    from pymoo.core.crossover import Crossover
+    from pymoo.core.mutation import Mutation
+    from pymoo.algorithms.moo.nsga2 import NSGA2
+    from pymoo.algorithms.moo.nsga3 import NSGA3
+    from pymoo.util.ref_dirs import get_reference_directions
+    from pymoo.optimize import minimize
+
+    comp = np.asarray(comp, float); pred = np.asarray(pred, float).ravel()
+    N, d = comp.shape
+    if N <= K:
+        return np.arange(N)
+    lo, hi = np.asarray(comp_min, float), np.asarray(comp_max, float)
+    cn = (comp - lo) / (hi - lo + 1e-9)                          # comp → unit box
+    centers = np.stack(np.meshgrid(*([np.linspace(0, 1, g)] * d), indexing='ij'),
+                       -1).reshape(-1, d)                        # g^d box cell centres
+    Ln = (pred - pred.min()) / (pred.max() - pred.min() + 1e-9)  # obj1 scale-free
+    rng = np.random.RandomState(int(seed))
+    n_obj = 3 if gap_std else 2
+
+    class SubProb(Problem):
+        def __init__(self): super().__init__(n_var=K, n_obj=n_obj, n_constr=0, xl=0, xu=N - 1, vtype=int)
+        def _evaluate(self, X, out, *a, **k):
+            Xi = X.astype(int)
+            f_loss = Ln[Xi].mean(1)
+            dup = np.array([K - len(set(r.tolist())) for r in Xi], float) / K   # penalise dup picks
+            need_rad = (coverage == 'rad') or gap_std
+            need_gap = (coverage == 'gap') or gap_std
+            f_cov = (np.array([cdist(centers, cn[row]).min(1).max() for row in Xi])
+                     if need_rad else None)
+            f_gap = None
+            if need_gap:                                         # per-axis spacing evenness
+                picks = cn[Xi]                                   # (npop, K, d)
+                f_gap = np.zeros(len(Xi))
+                for ax in range(d):
+                    Sd = np.sort(picks[:, :, ax], axis=1)
+                    f_gap = np.maximum(f_gap, np.std(np.diff(Sd, axis=1), axis=1))
+            main = f_cov if coverage == 'rad' else f_gap
+            cols = [f_loss + dup, main + dup]
+            if gap_std:                                          # 3-obj: add the OTHER criterion
+                other = f_gap if coverage == 'rad' else f_cov
+                cols.append(other + dup)
+            out['F'] = np.column_stack(cols)
+
+    class Smp(Sampling):
+        def _do(self, p, n, **k): return np.array([rng.choice(N, K, replace=False) for _ in range(n)])
+
+    class Cx(Crossover):
+        def __init__(self): super().__init__(2, 2)
+        def _do(self, p, X, **k):
+            Y = np.empty_like(X)
+            for j in range(X.shape[1]):
+                m = rng.rand(K) < 0.5
+                Y[0, j] = np.where(m, X[0, j], X[1, j]); Y[1, j] = np.where(m, X[1, j], X[0, j])
+            return Y
+
+    class Mt(Mutation):
+        def _do(self, p, X, **k):
+            X = X.copy()
+            for i in range(len(X)):
+                for j in range(K):
+                    if rng.rand() < 1.0 / K: X[i, j] = rng.randint(N)
+            return X
+
+    if algo == 'nsga3':
+        if n_obj == 2:
+            parts = max(pop - 1, 2)
+        else:                                      # largest p with C(p+n_obj-1, n_obj-1) <= pop
+            parts = 1
+            while _comb(parts + n_obj, n_obj - 1) <= pop:
+                parts += 1
+        ref = get_reference_directions("das-dennis", n_obj, n_partitions=parts)
+        a = NSGA3(pop_size=pop, ref_dirs=ref, sampling=Smp(), crossover=Cx(),
+                  mutation=Mt(), eliminate_duplicates=True)
+    else:
+        a = NSGA2(pop_size=pop, sampling=Smp(), crossover=Cx(), mutation=Mt(),
+                  eliminate_duplicates=True)
+    res = minimize(SubProb(), a, ('n_gen', n_gen), seed=int(seed), verbose=False)
+    F, Xr = np.atleast_2d(res.F), np.atleast_2d(res.X).astype(int)
+    Fn = (F - F.min(0)) / (F.max(0) - F.min(0)).clip(1e-9)       # knee = min-max-norm sum argmin
+    knee = Xr[int(Fn.sum(1).argmin())]
+    seen, out = set(), []
+    for pk in knee:                                             # de-dup within the knee subset
+        if int(pk) not in seen: seen.add(int(pk)); out.append(int(pk))
+    if len(out) < K:                                            # fill shortfall by farthest-point coverage
+        for e in maximin_extras(comp, anchor_idx=out, K=K - len(out), seed=seed):
+            if int(e) not in seen: seen.add(int(e)); out.append(int(e))
+    return np.array(out[:K], int)
+
+
 def coverage_subset_nsga2_extras(valid_nd_idx, efm, expr_keys,
                                   anchor_idx, K,
                                   fitness='joint',

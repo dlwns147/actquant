@@ -1,5 +1,6 @@
-"""utils/joint_search.py — reusable pieces for the 2nd-stage JOINT (W × eff_kvbits)
-NAS (second_search.py). Built on the SAME LlamaSearchSpace encoding as search.py:
+"""utils/second_stage.py — the 2nd-stage JOINT (W × eff_kvbits) NAS toolbox behind
+second_search.py (renamed from joint_search.py). Built on the SAME LlamaSearchSpace
+encoding as search.py:
 
   genome = ss.encode(arch): flat int (n_linear+4)*n_block = [w..., k..., v..., k_dim..., v_dim...].
   W-block = [0:nw] (nw = n_linear*n_block); KV-block = [nw:] (k,v,k_dim,v_dim rows).
@@ -8,6 +9,13 @@ Building blocks come from the 1st-stage per-axis Pareto fronts. CROSSOVER unit =
 axis block (additive W⊥KV). MUTATION = importance-weighted by 1st-stage lever strength
 (ε-floor → coverage; direction free → non-monotone stays reachable; NO monotone repair).
 PREDICTOR input = ss.encode_predictor (frozen/pass_module cols dropped), like search.py.
+
+Contents: encoding/split helpers · 1st-stage block pools (ε-band → diversity) ·
+JointComp (vectorized comp_obj) · GA operators (sampling/crossover/mutation) ·
+JointAuxProblem · grid supply-seeding + archive stats/coverage/HV + per-iter viz
+(the auxiliary halves of second_search.py live here). Generic candidate-subset
+selectors (even_select / moo_subset_select) live in utils.select alongside
+maximin_extras / coverage_subset_nsga2_extras.
 """
 import os, json, glob
 import numpy as np
@@ -15,6 +23,8 @@ from pymoo.core.problem import Problem
 from pymoo.core.sampling import Sampling
 from pymoo.core.crossover import Crossover
 from pymoo.core.mutation import Mutation
+from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
+from pymoo.indicators.hv import Hypervolume
 
 from utils.func import get_net_info
 from utils.select import maximin_extras
@@ -399,3 +409,114 @@ class JointAuxProblem(Problem):
         G = np.empty((len(Xc), 2 * len(self.comp_obj)))
         G[:, 0::2] = glo; G[:, 1::2] = ghi
         out['G'] = G
+
+
+# ─────────────── per-iteration supply seeding + archive stats + viz ───────────────
+# (the auxiliary halves of second_search.py; the generic subset SELECTORS —
+#  even_select / moo_subset_select — live in utils.select)
+
+def grid_side(K, override=0):
+    """grid side g for the budget box; auto = ceil(sqrt(K)) unless override>0."""
+    return override if override > 0 else int(np.ceil(np.sqrt(max(K, 1))))
+
+
+def grid_seed(Wg, KVg, w_comp, kv_comp, comp_min, comp_max, g):
+    """even SUPPLY: assemble one genome per (axis0-cell × axis1-cell) from the
+    NEAREST-comp 1st-stage blocks so the down-select has material in EVERY box cell —
+    including the high-comp corner NSGA's non-dominated sorting drops when loss is flat
+    there (the kvbits/kvdim right-end collapse). Per-iter analog of the DOE corner
+    seeding; W⊥KV additive ⇒ nearest-wbits W-block × nearest-eff_kv KV-block lands
+    near the cell centre."""
+    wc = np.linspace(comp_min[0], comp_max[0], g)
+    kc = np.linspace(comp_min[1], comp_max[1], g)
+    wi = [int(np.argmin(np.abs(w_comp - t))) for t in wc]
+    ki = [int(np.argmin(np.abs(kv_comp - t))) for t in kc]
+    return np.array([np.concatenate([Wg[a], KVg[b]]) for a in wi for b in ki])
+
+
+def calc_hv(ref_pt, F):
+    """normalized hypervolume of F's non-dominated front against 1.01·ref_pt."""
+    nd = NonDominatedSorting().do(F, only_non_dominated_front=True)
+    rp = 1.01 * ref_pt
+    return float(Hypervolume(ref_point=rp).do(F[nd]) / np.prod(rp))
+
+
+def front_coverage(archive, comp_obj):
+    """per-comp_obj Pareto-front coverage of the archive's full comp range
+    (archive rows = [arch, metric, *comp])."""
+    F = np.column_stack([[x[i] for x in archive] for i in range(1, len(comp_obj) + 2)])
+    nd = NonDominatedSorting().do(F, only_non_dominated_front=True)
+    cov = {}
+    for j, obj in enumerate(comp_obj):
+        col, full = F[nd, 1 + j], F[:, 1 + j]
+        denom = full.max() - full.min()
+        cov[obj] = {'front_min': float(col.min()), 'front_max': float(col.max()),
+                    'full_min': float(full.min()), 'full_max': float(full.max()),
+                    'coverage': float((col.max() - col.min()) / denom) if denom > 0 else 1.0}
+    return cov
+
+
+def save_viz(save_path, it, archive, c_metric, c_pred, c_comp, cov,
+             comp_obj, comp_obj_min, comp_obj_max):
+    """Per-save_iter figures (search.py --debug style + a joint panel):
+      - one panel PER comp_obj (wbits, eff_kvbits): loss vs that comp axis — archive (blue)
+        + best-loss envelope + this iter's candidates (evaluated green / predicted orange),
+        x fixed to the budget box so iters compare;
+      - a final JOINT panel: axis0 × axis1 scatter coloured by loss with this iter's
+        candidates ringed (the W×KV tradeoff the per-axis panels can't show)."""
+    try:
+        import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
+    except Exception as e:
+        print(f"[viz] skipped (matplotlib unavailable: {e})"); return
+    plt.rcParams.update({'font.size': 11, 'axes.titlesize': 12.5, 'axes.titleweight': 'semibold',
+                         'axes.edgecolor': '#444', 'axes.linewidth': 0.9, 'figure.facecolor': 'white',
+                         'axes.facecolor': '#fbfbfd', 'legend.framealpha': 0.92})
+    eps = 1e-4
+    n_obj = len(comp_obj)
+    comp_c = np.array(c_comp); c_pred = np.clip(np.asarray(c_pred).ravel(), eps, None)
+    c_metric = np.clip(np.asarray(c_metric), eps, None)
+    perf = np.clip(np.array([x[1] for x in archive]), eps, None)
+    joint = (n_obj == 2)
+    ncol = n_obj + (1 if joint else 0)
+    fig, axes = plt.subplots(1, ncol, figsize=(5.7 * ncol, 5.3), constrained_layout=True)
+    axes = np.atleast_1d(axes)
+    for i in range(n_obj):
+        ax = axes[i]; obj = comp_obj[i]
+        comp = np.array([x[i + 2] for x in archive])
+        # archive cloud: light, soft, rasterized → no black overplot mush
+        ax.scatter(comp, perf, s=9, c='#9fb3d1', alpha=0.35, edgecolors='none',
+                   rasterized=True, zorder=1, label=f'archive (n={len(archive)})')
+        # achievable frontier = best loss within budget (running min of loss as comp grows)
+        o = np.argsort(comp); env = np.minimum.accumulate(perf[o])
+        ax.plot(comp[o], env, color='#1f4e8c', lw=2.4, zorder=3, label='best-loss envelope')
+        # this iter's candidates: measured vs predicted (surrogate accuracy at a glance)
+        ax.scatter(comp_c[:, i], c_metric, s=42, marker='o', c='#2ca02c', edgecolors='white',
+                   lw=0.6, zorder=6, label='cand · measured')
+        ax.scatter(comp_c[:, i], c_pred, s=46, marker='x', c='#ff7f0e', lw=1.5,
+                   zorder=5, label='cand · predicted')
+        fmin, fmax = comp_obj_min[i], comp_obj_max[i]
+        pad = 0.03 * (fmax - fmin) if fmax > fmin else 0.1
+        ax.set_xlim(fmin - pad, fmax + pad)
+        ax.axvspan(fmin, fmax, color='#000000', alpha=0.025, zorder=0)
+        ax.set_xlabel(obj); ax.grid(True, which='both', ls=':', c='0.8', lw=0.6); ax.set_axisbelow(True)
+        ax.set_title(f"{obj}  ·  front-coverage {cov[obj]['coverage'] * 100:.0f}%")
+    axes[0].set_ylabel('loss')
+    axes[0].legend(loc='upper right', fontsize=8.5, ncol=1)
+    if joint:                                         # joint W × eff_kvbits loss landscape
+        ax = axes[n_obj]
+        wx = np.array([x[2] for x in archive]); ky = np.array([x[3] for x in archive])
+        # every arch as a point coloured by its loss (linear) — the actual sampled landscape;
+        # this iter's measured candidates ringed so you can see where the search just probed.
+        sc = ax.scatter(wx, ky, c=perf, s=16, cmap='viridis', alpha=0.7,
+                        edgecolors='none', rasterized=True, zorder=1)
+        ax.scatter(comp_c[:, 0], comp_c[:, 1], s=46, marker='o', facecolors='none',
+                   edgecolors='#d62728', lw=1.4, zorder=4, label='cand · this iter')
+        ax.set_xlabel(comp_obj[0]); ax.set_ylabel(comp_obj[1])
+        ax.set_xlim(comp_obj_min[0], comp_obj_max[0])
+        ax.set_ylim(comp_obj_min[1], comp_obj_max[1])
+        ax.set_title(f'joint  {comp_obj[0]} × {comp_obj[1]}  ·  colour = loss')
+        ax.legend(loc='upper right', fontsize=9); ax.grid(True, ls=':', c='0.8', lw=0.6); ax.set_axisbelow(True)
+        fig.colorbar(sc, ax=ax, label='loss', shrink=0.92)
+    fig.suptitle(f'2nd-stage joint W×eff_kvbits search — iter {it}', fontsize=13.5, fontweight='bold')
+    fig.savefig(os.path.join(save_path, f'iter_{it}.png'), dpi=130)
+    plt.close(fig)
