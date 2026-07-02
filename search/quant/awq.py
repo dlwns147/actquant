@@ -33,14 +33,14 @@ class AWQ(BASE):
             print("Clipping symmetrically")
 
 
-    def run(self, nsamples=128, seqlen=512, no_zero_point=False):    
+    def run(self, nsamples=128, seqlen=512, no_zero_point=False, calib_data='pileval'):
         q_config = {
             "zero_point": not no_zero_point,  # by default True
             "q_group_size": self.group_size,  # whether to use group quantization
         }
         print("Quantization config:", q_config)
         self.model.config.use_cache = False
-        awq_results = run_awq(self.model, self.tokenizer, q_config=q_config, arch=self.arch, clip_asym=self.clip_asym, n_samples=nsamples, seqlen=seqlen, do_owq=self.do_owq, outlier=self.owq)
+        awq_results = run_awq(self.model, self.tokenizer, q_config=q_config, arch=self.arch, clip_asym=self.clip_asym, n_samples=nsamples, seqlen=seqlen, do_owq=self.do_owq, outlier=self.owq, calib_data=calib_data)
         self.load_model(device_map='cpu', dtype=self.dtype)
         # self.model = simple_dispatch_model(self.model, self.device_map)
         self.model = dispatch_model(self.model, self.device_map)

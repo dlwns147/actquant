@@ -15,7 +15,6 @@ CONFIG=config/llama.json
 # MODEL_NAME=Mistral-7B-Instruct-v0.3
 # CONFIG=config/mistral.json
 
-# ── 1st-stage per-axis frontier archives (a dir → latest iter_N.stats, or an explicit .stats) ──
 W_EXPR=save/search/think/2606070017_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_128stride_pp512
 EFF_KV_EXPR=save/search/think/2606181423_Llama-3.1-8B-Instruct_eff_kvbits_kivi_sk8_w4kv234_gs3264128x2_128_r128_kd0-64x5_vd0-64x5_obj_0.1_5_st128_pp512
 
@@ -35,7 +34,6 @@ for B in ${W_BITS}; do
 done
 QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 
-# ── search hyperparameters (loop mirrors search.py: DOE → fit → next → eval → iter_N.stats) ──
 SURROGATE=rbf      # arch-input predictor: rbf (needs N_DOE > #active genes ≈ 360) / gp / ard_gp / carts
 POP=200             # NSGA-III pop (≥ das-dennis 3-obj/12-part = 91 ref dirs; 200 as in search.sh)
 N_DOE=500          # DOE measured archs (≥ #active genes for rbf)
@@ -44,36 +42,22 @@ N_ITER=50          # candidates measured per iteration
 SEED=0
 SAVE_ITER=10       # dump iter_<it>.stats + iter_<it>.png (via --debug) every SAVE_ITER iters (and the last)
 
-# comp_obj budget box: AUTO-derived from the input archives' achievable comp range
-# (second_search.py reads it off the W / eff_kvbits pools). To NARROW an axis below
-# the input range, pass --comp_obj_min/--comp_obj_max explicitly in ARGS.
 ATTN_SINK=8
 N_TOKEN=0
 
-# ── per-iteration candidate down-select across the (wbits × eff_kvbits) budget box.
-#    maximin = extent coverage (legacy). grid = per-axis-even quota. hybrid = even_frac split.
-#    moo = 2-obj (mean pred-loss × box covering-radius) subset GA → knee (principled
-#    explore↔exploit; dominates the hybrid hard split; NSGA-III ≥ NSGA-II). GRID_SEED injects
-#    nearest-block genomes per box cell so the high-comp corner NSGA drops still gets sampled
-#    (the DOMINANT lever vs right-end collapse — pair it with grid/hybrid/moo).
-#    DEFAULT moo: 2-seed multi-n_token band-retrieval test — top policies statistically tied
-#    (moo 2-seed mean regret 5.7% ≈ grid 7.3%, ordering flips across seeds), moo picked for
-#    its knee-balanced quality+coverage subsets (dominated the hybrid hard split; best s0
-#    aggregate). grid = the simpler deterministic alternative (no inner GA). Final band
-#    precision comes from post-search band-refine, not from this knob.
 CAND_EVEN=moo        # maximin / grid / hybrid / moo
 GRID_SEED=True       # True = inject per-cell block-product seeds each iter
-SEED_POOL=archive    # seed block source: archive (1st-stage ∪ archive W/KV sub-blocks; 2-seed
-                     # test: mean band-regret 3.0→2.1%, worst 50.9→24.5% vs first) / first
+SEED_POOL=full       # seed block source: full (FULL ε-band pools W~9k/KV~3k ∪ archive parts;
+                     # 2-seed test mean band-regret 7.3→3.9%, worst 112→50% vs archive-only)
+                     # / archive / first. --seed_expr <stats..> adds prior runs' parts (must be
+                     # the SAME search space — QEFT-format archives are auto-skipped).
+# NOTE --al_frac (uncertainty quota) tested: helps vs thin seed pools (worst 112→43%) but does
+# NOT stack with full seeding (full+al20 4.8% > full 3.9%) — coverage was the real mechanism.
+# Keep 0; consider 0.1-0.2 only when no dense seed pool is available.
 MOO_ALGO=nsga3       # moo solver: nsga3 (recommended) / nsga2
 EVEN_FRAC=0.5        # hybrid only: fraction of K on grid-even coverage
-# NOTE --moo_gap_std (3rd objective: per-axis spacing gap-std) tested and NOT enabled:
-# no regret gain (3.2/3.7% vs 3.0/2.1%), dilutes the quality objective in the knee.
 
-# ── building-block selector from 1st-stage archives (FINALIZED via search sweep).
-#    Pool = adaptive-ε band → structural-diversity. NO window/bin thinning: a sweep showed
-#    thinning HURTS hv (band→div 0.265 > window→div 0.237 > hardbin→div 0.20) — maximin
-#    diversity wants the FULL band as material; pre-thinning throws away what it would pick.
+
 FRONT_EPS_REL=0.3   # adaptive ε band = front_jsd·(1+rel): scale-free, auto-wider in the corner
 DIV_K=200           # structural-diversity blocks/axis (maximin; richest crossover — dominant for hv)
 
@@ -84,9 +68,9 @@ SEQLEN=2048
 RESIDUAL_LENGTH=128
 K_QUANT_SCHEME=channel
 V_QUANT_SCHEME=token
-STRIDE=128            # >0 = stride-aware (use_cache) eval; 0 = single forward pass
-PREFILL_PROMPT=True  # prefill the prompt + stride only the answer span (matches real-decode KV)
-LAST_TOKENS=512      # loss on the last N tokens only (answer-phase JSD; needs PREFILL_PROMPT)
+STRIDE=128
+PREFILL_PROMPT=True
+LAST_TOKENS=512
 
 SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${SURROGATE}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}_sk${ATTN_SINK}_s${SEED}
 echo "SECOND-SEARCH -> ${SAVE}"
