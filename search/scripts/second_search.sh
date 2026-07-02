@@ -48,12 +48,6 @@ N_TOKEN=0
 CAND_EVEN=moo        # maximin / grid / hybrid / moo
 GRID_SEED=True       # True = inject per-cell block-product seeds each iter
 SEED_POOL=full       # seed block source: full (FULL ε-band pools W~9k/KV~3k ∪ archive parts;
-                     # 2-seed test mean band-regret 7.3→3.9%, worst 112→50% vs archive-only)
-                     # / archive / first. --seed_expr <stats..> adds prior runs' parts (must be
-                     # the SAME search space — QEFT-format archives are auto-skipped).
-# NOTE --al_frac (uncertainty quota) tested: helps vs thin seed pools (worst 112→43%) but does
-# NOT stack with full seeding (full+al20 4.8% > full 3.9%) — coverage was the real mechanism.
-# Keep 0; consider 0.1-0.2 only when no dense seed pool is available.
 MOO_ALGO=nsga3       # moo solver: nsga3 (recommended) / nsga2
 EVEN_FRAC=0.5        # hybrid only: fraction of K on grid-even coverage
 
@@ -72,7 +66,15 @@ STRIDE=128
 PREFILL_PROMPT=True
 LAST_TOKENS=512
 
-SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${SURROGATE}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}_sk${ATTN_SINK}_s${SEED}
+SINK_TAG=""; [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
+QEFT_TAG=""; [ "${USE_QEFT}" == "True" ] && QEFT_TAG="_qc${QEFT_RANK_TEXT}"
+PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
+CAND_TAG=${CAND_EVEN}                                           # maximin/grid/hybrid/moo
+[ "${CAND_EVEN}" == "moo" ]    && CAND_TAG=moo${MOO_ALGO#nsga}  # moo3/moo2
+[ "${CAND_EVEN}" == "hybrid" ] && CAND_TAG=hyb${EVEN_FRAC}
+[ "${GRID_SEED}" == "True" ]   && CAND_TAG+=-g${SEED_POOL:0:2}  # -gfu/-gar/-gfi = full/archive/first
+SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURROGATE}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}_s${SEED}
+
 echo "SECOND-SEARCH -> ${SAVE}"
 
 ARGS="--config ${CONFIG} \
