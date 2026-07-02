@@ -2,28 +2,11 @@ DEVICES=${1:-0}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-# ── 2nd-stage JOINT (W × eff_kvbits) NAS — HQQ-based, NSGA-III (second_search.py).
-#    genome = (W-block, KV-block) assembled from the 1st-stage per-axis Pareto fronts.
-#    CROSSOVER unit = whole axis block (W or KV swap; additive W⊥KV).
-#    MUTATION = 1st-stage-weighted (per-gene lever strength, eps-floor → coverage kept;
-#               direction free → NON-monotone allocations stay explorable).
-#    PREDICTOR = arch-input (genome), like 1st-stage search.py (frozen genes dropped).
-#    Objectives = (loss, wbits, eff_kvbits).
-#
-#    MODE=proxy : CPU smoke — loss = 1st-stage front additive interpolation (no GPU/model).
-#    MODE=hqq   : real HQQ measurement (needs LlamaEvaluator wired into second_search.py).
-
-# MODE=proxy
-MODE=hqq
-
 MODEL_PATH=/SSD/huggingface/meta-llama
 MODEL_NAME=Llama-3.1-8B-Instruct
 DTYPE=bfloat16
 CONFIG=config/llama.json
 
-# ── alternative models (second_search is model-general: options + budget box auto-derive
-#    from the archives — verified on Qwen2.5-7B). Swap W_EXPR/EFF_KV_EXPR to match.
-#    DTYPE stays bfloat16 (the HQQ banks are bfloat16 on disk).
 # MODEL_PATH=/SSD/huggingface/Qwen
 # MODEL_NAME=Qwen2.5-7B-Instruct
 # CONFIG=config/qwen2.json
@@ -43,7 +26,6 @@ for VAR_NAME in W_EXPR EFF_KV_EXPR; do
     fi
 done
 
-# ── HQQ banks (MODE=hqq only) ──
 W_METHOD=hqq
 W_BITS="2 3 4"; W_GROUP_SIZE=128; AXIS=1
 KV_METHOD="kivi think"
@@ -95,8 +77,6 @@ EVEN_FRAC=0.5        # hybrid only: fraction of K on grid-even coverage
 FRONT_EPS_REL=0.3   # adaptive ε band = front_jsd·(1+rel): scale-free, auto-wider in the corner
 DIV_K=200           # structural-diversity blocks/axis (maximin; richest crossover — dominant for hv)
 
-# ── hqq-mode eval primitives (named like search.sh; ignored in MODE=proxy). These MUST match
-#    the 1st-stage search-time measurement so the surrogate trains on the same JSD definition.
 LOSS_FUNC=jsd
 DATASET=wikitext2
 N_SAMPLE=128
@@ -108,7 +88,7 @@ STRIDE=128            # >0 = stride-aware (use_cache) eval; 0 = single forward p
 PREFILL_PROMPT=True  # prefill the prompt + stride only the answer span (matches real-decode KV)
 LAST_TOKENS=512      # loss on the last N tokens only (answer-phase JSD; needs PREFILL_PROMPT)
 
-SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${MODE}_${SURROGATE}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}_sk${ATTN_SINK}_s${SEED}
+SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${SURROGATE}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}_sk${ATTN_SINK}_s${SEED}
 echo "SECOND-SEARCH -> ${SAVE}"
 
 ARGS="--config ${CONFIG} \
@@ -135,23 +115,29 @@ ARGS="--config ${CONFIG} \
 
 [ "${GRID_SEED}" == "True" ] && ARGS+=" --grid_seed"
 
-if [ ${MODE} == "hqq" ]; then
-    ARGS+=" --gpu_id ${DEVICES} --model_path ${MODEL_PATH} --dtype ${DTYPE} --w_method ${W_METHOD} \
---kv_method ${KV_METHOD} --quant_model_paths ${QMODEL_PATHS} \
---w_bits ${W_BITS} --w_group_size ${W_GROUP_SIZE} \
---residual_length ${RESIDUAL_LENGTH} --k_quant_scheme ${K_QUANT_SCHEME} --v_quant_scheme ${V_QUANT_SCHEME} \
---dataset ${DATASET} --n_sample ${N_SAMPLE} --seqlen ${SEQLEN} --loss_func ${LOSS_FUNC}"
+ARGS+=" --gpu_id ${DEVICES} \
+--model_path ${MODEL_PATH} \
+--dtype ${DTYPE} \
+--w_method ${W_METHOD} \
+--kv_method ${KV_METHOD} \
+--quant_model_paths ${QMODEL_PATHS} \
+--w_bits ${W_BITS} \
+--w_group_size ${W_GROUP_SIZE} \
+--residual_length ${RESIDUAL_LENGTH} \
+--k_quant_scheme ${K_QUANT_SCHEME} \
+--v_quant_scheme ${V_QUANT_SCHEME} \
+--dataset ${DATASET} \
+--n_sample ${N_SAMPLE} \
+--seqlen ${SEQLEN} \
+--loss_func ${LOSS_FUNC}"
 
-    if [ ${STRIDE} -gt 0 ]; then
-        ARGS+=" --stride ${STRIDE} "
-    fi
-    if [ ${PREFILL_PROMPT} == 'True' ]; then
-        ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
-    fi
-
-    CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=1 --num_machines=1 \
-        --main_process_port=${PORT_NUM} second_search.py ${ARGS}
-else
-    # proxy mode is pure-CPU (no model / GPU)
-    python second_search.py ${ARGS}
+if [ ${STRIDE} -gt 0 ]; then
+    ARGS+=" --stride ${STRIDE} "
 fi
+if [ ${PREFILL_PROMPT} == 'True' ]; then
+    ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
+fi
+
+CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=1 --num_machines=1 \
+    --main_process_port=${PORT_NUM} second_search.py ${ARGS}
+

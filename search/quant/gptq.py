@@ -40,9 +40,10 @@ class GPTQ(BASE):
         percdamp=.01,
         act_order=False,
         static_groups=False,
-        seqlen=2048
+        seqlen=2048,
+        calib='c4'
     ):
-        
+
         assert self.arch is not None, "arch is not provided"
 
         # Llama-3.x GPTQ needs act_order=True: its massive-activation channels make
@@ -53,7 +54,7 @@ class GPTQ(BASE):
             print('[gptq] Llama-3.x -> act_order=True (GPTQ stability)')
 
         if samples is None:
-            samples = get_gptq_calib_dataset(tokenizer=self.tokenizer, n_samples=nsamples, seqlen=seqlen)
+            samples = get_gptq_calib_dataset(data=calib, tokenizer=self.tokenizer, n_samples=nsamples, seqlen=seqlen)
 
         print('Starting ...')
 

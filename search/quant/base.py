@@ -54,6 +54,11 @@ def get_awq_calib_dataset(data="pileval", tokenizer=None, n_samples=512, block_s
 
 
 def get_gptq_calib_dataset(data="c4", tokenizer=None, n_samples=128, seed=0, seqlen=2048):
+    # Non-c4 calib (wikitext2 / pileval) delegates to the OWQ loader, which
+    # produces the identical [(inp, tar), ...] format and is offline-safe.
+    if data != "c4":
+        return get_owq_calib_dataset(data=data, tokenizer=tokenizer,
+                                     n_samples=n_samples, seed=seed, seqlen=seqlen)
     if data == "c4":
         traindata = load_dataset(
         'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train')
@@ -121,9 +126,28 @@ def get_owq_calib_dataset(data="c4", tokenizer=None, n_samples=128, seed=0, seql
             tar = inp.clone()
             tar[:, :-1] = -100
             trainloader.append((inp, tar))
+    elif 'pile' in data:
+        # pileval (Pile validation) — the AWQ default calib set; contains code
+        # (GitHub/StackExchange) unlike prose-only c4/wikitext2. Added to test
+        # the calibration-CONTENT hypothesis for GPTQ/QEFT. Per-doc sampling
+        # mirrors the c4 branch (random doc with len>seqlen, random window).
+        traindata = load_dataset('mit-han-lab/pile-val-backup', split='validation')
+        trainloader = []
+        for _ in range(n_samples):
+            while True:
+                i = random.randint(0, len(traindata) - 1)
+                trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
+                if trainenc.input_ids.shape[1] > seqlen:
+                    break
+            i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            inp = trainenc.input_ids[:, i:j]
+            tar = inp.clone()
+            tar[:, :-1] = -100
+            trainloader.append((inp, tar))
     else:
         raise NotImplementedError(data)
-    
+
     return trainloader
 
 class BASE:
