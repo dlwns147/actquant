@@ -90,12 +90,23 @@ class GPTQ_OWQ:
             return torch.sort(descending_ids[:self.n_out])[0].to(torch.int32)
         else:
             outidx = outidx.to(device=self.dev)
+            assert outidx.numel() == self.n_out, (
+                f"outidx has {outidx.numel()} cols but n_out={self.n_out}")
             temp_mask[outidx] = False
             if actorder:
-                ids = torch.cat([descending_ids[self.n_out:],descending_ids[:self.n_out]])
+                # Honor the PASSED outidx under act_order too: quantize the
+                # non-outlier columns in descending-Hessian order and keep the
+                # passed outlier columns (moved to the tail) in FP16.
+                # BUG(fixed): this branch used descending_ids[:n_out] (the
+                # CURRENT-Hessian top) as the protected tail and silently
+                # discarded outidx — while still returning outidx, so callers
+                # believed their columns were protected. Regression test:
+                # tests/test_qeft_outidx_bug.py.
+                non_out = descending_ids[temp_mask[descending_ids]]
+                ids = torch.cat([non_out, outidx])
             else:
                 ids = torch.cat([torch.arange(self.columns, device=self.dev)[temp_mask], outidx])
-            
+
             self.ids = ids
             # return torch.sort(outidx)[0].to(torch.int32)
             return outidx.to(torch.int32)

@@ -42,7 +42,7 @@ class QEFT(BASE):
         sym=False,
         true_sequential=False,
         percdamp=.01,
-        act_order=False,
+        act_order=None,
         no_frob_norm=False,
         tuning='mse',
         layers=None,
@@ -146,9 +146,13 @@ class QEFT(BASE):
         # Llama-3.x GPTQ needs act_order=True: its massive-activation channels make
         # natural column order unstable (Llama-3.1-8B W4 wiki PPL ~7.8-13.5 vs ~7.2).
         # Qwen/Mistral are fine without it, so gate on the Llama-3 family only.
-        if 'llama-3' in self.model_name.lower() and not act_order:
-            act_order = True
-            print('[qeft] Llama-3.x -> act_order=True (GPTQ stability)')
+        # act_order=None (default) = auto-gate; an EXPLICIT True/False is honored
+        # (needed by the act_order regression experiments — previously an explicit
+        # False was silently overridden to True here).
+        if act_order is None:
+            act_order = 'llama-3' in self.model_name.lower()
+            if act_order:
+                print('[qeft] Llama-3.x -> act_order=True (GPTQ stability)')
         print(f'tuple_arch : {tuple_arch}, reorder : {reorder}, act_order : {act_order}')
         print(f'n_out_dict : {n_out_dict}')
         print(f'self.arch : {self.arch}')
