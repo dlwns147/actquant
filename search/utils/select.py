@@ -649,7 +649,14 @@ def moo_subset_select(comp, pred, K, comp_min, comp_max, g, algo='nsga3',
     cn = (comp - lo) / (hi - lo + 1e-9)                          # comp → unit box
     centers = np.stack(np.meshgrid(*([np.linspace(0, 1, g)] * d), indexing='ij'),
                        -1).reshape(-1, d)                        # g^d box cell centres
-    Ln = (pred - pred.min()) / (pred.max() - pred.min() + 1e-9)  # obj1 scale-free
+    # obj1 scale-free AND outlier-robust: RANK-normalised predictions, not min-max — exact-
+    # interpolant surrogates (rbf/tps) extrapolate wildly at mutated/seed candidates (observed
+    # candidate RMSE ~120 on a 0.02-0.7 JSD scale at production iter 1); one blown-up value
+    # under min-max compresses every other prediction to ~0 and degenerates the quality
+    # objective. Ranks keep the surrogate's ORDERING (all the subset pressure needs) with
+    # zero outlier leverage.
+    _r = np.empty(N); _r[np.argsort(pred, kind='stable')] = np.arange(N)
+    Ln = _r / max(N - 1, 1)
     rng = np.random.RandomState(int(seed))
     n_obj = 3 if gap_std else 2
 

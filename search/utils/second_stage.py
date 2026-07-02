@@ -411,6 +411,63 @@ class JointAuxProblem(Problem):
         out['G'] = G
 
 
+def load_band_blocks(w_expr, kv_expr, ss, w_eps=0.0, kv_eps=0.0, eps_rel=0.0):
+    """FULL ε-band block pools (NO div_k diversity pruning) for SEEDING. div_k pruning was
+    tuned for crossover richness; grid_seed nearest-comp matching wants the DENSEST pool —
+    more blocks ⇒ closer matches to every cell/band target. Returns (Wb, w_comp, KVb, kv_comp)."""
+    nw = nw_split(ss)
+    dw = json.load(open(_last_stats(w_expr))); Ew = dw['archive'] + dw.get('candidates', [])
+    jw = np.array([e[1] for e in Ew]); cw = np.array([e[2] for e in Ew])
+    iw = select_eps_band(jw, cw, w_eps, eps_rel)
+    Wb = np.stack([ss.encode(Ew[i][0])[:nw] for i in iw])
+    dk = json.load(open(_last_stats(kv_expr))); Ek = dk['archive'] + dk.get('candidates', [])
+    jk = np.array([e[1] for e in Ek]); ck = np.array([e[2] for e in Ek])
+    ik = select_eps_band(jk, ck, kv_eps, eps_rel)
+    KVb = np.stack([ss.encode(Ek[i][0])[nw:] for i in ik])
+    return Wb, cw[iw], KVb, ck[ik]
+
+
+def load_extra_parts(exprs, ss, comp):
+    """W/KV sub-block pools from EXTRA archives (--seed_expr: prior 2nd-stage runs or any
+    iter_N.stats over the same module space). Each arch is encoded, split at nw, and per-part
+    comps (wbits / eff_kvbits) come from a vectorized JointComp batch (wbits depends only on
+    the W part, eff_kvbits only on the KV part — exact). QEFT-format W entries [bits, 0] are
+    normalized to scalar bits when ss uses scalar options (n_outlier>0 archs are SKIPPED for
+    a scalar space — not representable). Returns (Wp, wc, KVp, kc, n_skip)."""
+    nw = nw_split(ss)
+    scalar_w = not isinstance(ss.q_proj_option[0], (list, tuple))
+    G, n_skip = [], 0
+    for pth in exprs:
+        d = json.load(open(_last_stats(pth)))
+        for e in d['archive'] + d.get('candidates', []):
+            a = e[0]
+            if scalar_w:                                # normalize [b, 0] → b; skip n_out>0
+                w = a['q']['w']
+                ok = True
+                for k, mod in w.items():
+                    nb = []
+                    for b in mod:
+                        if isinstance(b, (list, tuple)):
+                            if int(b[1]) > 0: ok = False; break
+                            nb.append(int(b[0]))
+                        else:
+                            nb.append(b)
+                    if not ok: break
+                    w[k] = nb
+                if not ok: n_skip += 1; continue
+            try:
+                G.append(ss.encode(a))
+            except Exception:
+                n_skip += 1
+    if not G:
+        return (np.zeros((0, nw), int), np.zeros(0), np.zeros((0, 0), int), np.zeros(0), n_skip)
+    G = np.array(G)
+    c = comp.batch(G, ['wbits', 'eff_kvbits'])
+    uW, iW = np.unique(G[:, :nw], axis=0, return_index=True)
+    uK, iK = np.unique(G[:, nw:], axis=0, return_index=True)
+    return uW, c[iW, 0], uK, c[iK, 1], n_skip
+
+
 # ─────────────── per-iteration supply seeding + archive stats + viz ───────────────
 # (the auxiliary halves of second_search.py; the generic subset SELECTORS —
 #  even_select / moo_subset_select — live in utils.select)

@@ -12,6 +12,26 @@ sys.path.append('..')
 # from model import skip_llama
 # from model.replace import replace_model
 
+
+def _c4_traindata(cache_dir=None):
+    """Offline-safe c4 'train' load, mirroring utils/data.py::get_c4_trainenc:
+    mmap the arrow shards straight from the HF cache (bypassing load_dataset's
+    config-hash lookup, which fails offline), falling back to the gz shard.
+    Single source of truth for c4 across the owq/gptq/awq calib loaders."""
+    import os
+    import glob as _glob
+    from datasets import concatenate_datasets
+    from datasets import Dataset as HFDataset
+    base = cache_dir or os.path.expanduser('~/.cache/huggingface/datasets')
+    arrow = sorted(_glob.glob(os.path.join(
+        base, 'allenai___c4', 'default-*', '0.0.0', '*', 'c4-train-*.arrow')))
+    if arrow:
+        return concatenate_datasets([HFDataset.from_file(f) for f in arrow])
+    return load_dataset(
+        'allenai/c4',
+        data_files={'train': 'en/c4-train.00000-of-01024.json.gz'},
+        split='train')
+
 def get_awq_calib_dataset(data="pileval", tokenizer=None, n_samples=512, block_size=512):
     if data == "pileval":
         dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
@@ -43,6 +63,20 @@ def get_awq_calib_dataset(data="pileval", tokenizer=None, n_samples=512, block_s
             raise ValueError(f"wikitext2 train has {enc.shape[1]} tokens < "
                              f"requested {need} ({n_samples}x{block_size})")
         cat_samples = enc[:, :need]
+    elif 'c4' in data:
+        # c4 (prose) for AWQ, to test AWQ under the QEFT/GPTQ default calib.
+        # Mirrors utils/data.py::get_c4_trainenc: offline-safe arrow mmap +
+        # shuffle(seed) + ' '.join(text) -> single [1,T] stream, then the same
+        # first-N-tokens/block-split contract as the wikitext2 branch.
+        traindata = _c4_traindata().shuffle(seed=42)
+        need = n_samples * block_size
+        # ~400 tok/doc; take generously more docs than needed, then slice.
+        n_docs = min(len(traindata), max(2000, need // 200))
+        enc = tokenizer(' '.join(traindata[:n_docs]['text']),
+                        return_tensors="pt").input_ids
+        if enc.shape[1] < need:
+            raise ValueError(f"c4 slice has {enc.shape[1]} tokens < {need}")
+        cat_samples = enc[:, :need]
     else:
         raise NotImplementedError(data)
     # now concatenate all samples and split according to block size
@@ -54,9 +88,13 @@ def get_awq_calib_dataset(data="pileval", tokenizer=None, n_samples=512, block_s
 
 
 def get_gptq_calib_dataset(data="c4", tokenizer=None, n_samples=128, seed=0, seqlen=2048):
+    # Non-c4 calib (wikitext2 / pileval) delegates to the OWQ loader, which
+    # produces the identical [(inp, tar), ...] format and is offline-safe.
+    if data != "c4":
+        return get_owq_calib_dataset(data=data, tokenizer=tokenizer,
+                                     n_samples=n_samples, seed=seed, seqlen=seqlen)
     if data == "c4":
-        traindata = load_dataset(
-        'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train')
+        traindata = _c4_traindata()  # offline-safe arrow mmap (utils/data.py)
     else:
         raise NotImplementedError
 
@@ -94,20 +132,28 @@ def get_owq_calib_dataset(data="c4", tokenizer=None, n_samples=128, seed=0, seql
             trainloader.append((inp, tar))
             
     elif 'c4' in data:
-        # Offline-safe c4 load: mmap the arrow shards straight from the HF cache, bypassing
-        # `load_dataset`'s config-hash lookup which fails offline ("Couldn't find cache for
-        # allenai/c4 for config default-...") — mirrors utils/data.py::get_c4_trainenc.
-        import os, glob
-        from datasets import concatenate_datasets
-        from datasets import Dataset as HFDataset
-        _base = os.path.expanduser('~/.cache/huggingface/datasets')
-        _arrow = sorted(glob.glob(os.path.join(_base, 'allenai___c4', 'default-*', '0.0.0', '*', 'c4-train-*.arrow')))
-        if _arrow:
-            traindata = concatenate_datasets([HFDataset.from_file(f) for f in _arrow])
-        else:
-            traindata = load_dataset(
-                'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
-            )
+        # Offline-safe c4 (shared loader, mirrors utils/data.py); per-doc
+        # random-window sampling below is the OWQ/GPTQ calibration convention.
+        traindata = _c4_traindata()
+        trainloader = []
+        for _ in range(n_samples):
+            while True:
+                i = random.randint(0, len(traindata) - 1)
+                trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
+                if trainenc.input_ids.shape[1] > seqlen:
+                    break
+            i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            inp = trainenc.input_ids[:, i:j]
+            tar = inp.clone()
+            tar[:, :-1] = -100
+            trainloader.append((inp, tar))
+    elif 'pile' in data:
+        # pileval (Pile validation) — the AWQ default calib set; contains code
+        # (GitHub/StackExchange) unlike prose-only c4/wikitext2. Added to test
+        # the calibration-CONTENT hypothesis for GPTQ/QEFT. Per-doc sampling
+        # mirrors the c4 branch (random doc with len>seqlen, random window).
+        traindata = load_dataset('mit-han-lab/pile-val-backup', split='validation')
         trainloader = []
         for _ in range(n_samples):
             while True:
@@ -123,7 +169,7 @@ def get_owq_calib_dataset(data="c4", tokenizer=None, n_samples=128, seed=0, seql
             trainloader.append((inp, tar))
     else:
         raise NotImplementedError(data)
-    
+
     return trainloader
 
 class BASE:

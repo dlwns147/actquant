@@ -30,7 +30,8 @@ from predictor.factory import get_predictor
 from utils.func import set_seed, get_correlation, get_net_info
 from utils.select import maximin_extras, even_select, moo_subset_select
 from utils.second_stage import (
-    encoding_xu, nw_split, load_block_pools, gene_weights, freeze_mask, block_segments, derive_options, derive_qeft,
+    encoding_xu, nw_split, load_block_pools, load_band_blocks, load_extra_parts,
+    gene_weights, freeze_mask, block_segments, derive_options, derive_qeft,
     FrontierProductSampling, AxisBlockCrossover, WeightedIntMutation, KnowledgeMutation, JointAuxProblem, JointComp,
     grid_side, grid_seed, calc_hv, front_coverage, save_viz)
 
@@ -108,6 +109,26 @@ class SecondSearch:
         # pool consensus. New-arch exploration is thus confined to the uncertain dims (the
         # decided dims are frozen). Verified loss-free in tests/joint_reabsorption.py
         # (mut_contested == mut in HV). agree_frac > 1.0 disables (freezes nothing).
+        # seeding pools beyond the div_k-pruned crossover pools (--seed_pool full / --seed_expr):
+        # full ε-band blocks (densest nearest-comp matching) + extra archives' W/KV parts.
+        self.Wseed = self.KVseed = None
+        if args.seed_pool == 'full':
+            Wb, wbc, KVb, kbc = load_band_blocks(args.w_expr, args.eff_kv_expr, self.ss,
+                                                 w_eps=args.w_front_eps, kv_eps=args.kv_front_eps,
+                                                 eps_rel=args.front_eps_rel)
+            wm2 = (wbc >= self.comp_obj_min[0]) & (wbc <= self.comp_obj_max[0])
+            km2 = (kbc >= self.comp_obj_min[1]) & (kbc <= self.comp_obj_max[1])
+            self.Wseed, self.wseed_comp = Wb[wm2], wbc[wm2]
+            self.KVseed, self.kvseed_comp = KVb[km2], kbc[km2]
+            print(f"[seed_pool full] band blocks W {len(self.Wseed)} | KV {len(self.KVseed)} (in-box)")
+        if args.seed_expr:
+            xW, xwc, xK, xkc, n_skip = load_extra_parts(args.seed_expr, self.ss, self._comp)
+            bW, bwc = (self.Wseed, self.wseed_comp) if self.Wseed is not None else (self.Wg, self.w_comp)
+            bK, bkc = (self.KVseed, self.kvseed_comp) if self.KVseed is not None else (self.KVg, self.kv_comp)
+            self.Wseed = np.vstack([bW, xW]); self.wseed_comp = np.concatenate([bwc, xwc])
+            self.KVseed = np.vstack([bK, xK]); self.kvseed_comp = np.concatenate([bkc, xkc])
+            print(f"[seed_expr] +{len(xW)} W / +{len(xK)} KV parts from {len(args.seed_expr)} "
+                  f"archives (skipped {n_skip} non-encodable)")
         self.contested, mf = freeze_mask(self.Wg, self.KVg, args.agree_frac)
         self.w = self.w * self.contested
         n_frozen = int((~self.contested).sum())
@@ -218,11 +239,15 @@ class SecondSearch:
         g = grid_side(K, self.args.cand_grid)
         pool = res.pop.get('X')
         if self.args.grid_seed:                          # even SUPPLY: block-product seeds per box cell
-            Wp, wc, KVp, kc = self.Wg, self.w_comp, self.KVg, self.kv_comp
-            if self.args.seed_pool == 'archive':
-                # augment the 1st-stage block pools with the ARCHIVE's W/KV sub-blocks (incl.
-                # 2nd-stage mutants) so seeds improve as the search discovers better parts;
-                # per-part comp comes free from the stored archive comp columns.
+            # base = div_k crossover pools ('first') or the denser seed pools ('full'/--seed_expr)
+            if self.Wseed is not None:
+                Wp, wc, KVp, kc = self.Wseed, self.wseed_comp, self.KVseed, self.kvseed_comp
+            else:
+                Wp, wc, KVp, kc = self.Wg, self.w_comp, self.KVg, self.kv_comp
+            if self.args.seed_pool != 'first':
+                # augment with the ARCHIVE's W/KV sub-blocks (incl. 2nd-stage mutants) so seeds
+                # improve as the search discovers better parts; per-part comp comes free from
+                # the stored archive comp columns.
                 aw = np.array([x[2] for x in archive]); ak = np.array([x[3] for x in archive])
                 uW, iW = np.unique(Ga[:, :self.nw], axis=0, return_index=True)
                 uK, iK = np.unique(Ga[:, self.nw:], axis=0, return_index=True)
@@ -235,27 +260,43 @@ class SecondSearch:
         if len(Xc) == 0:
             return [], np.zeros((0,))
         pred = np.asarray(predictor.predict(Xc[:, self.active].astype(float))).ravel()
+        # optional ACTIVE-LEARNING quota (--al_frac): reserve part of K for the candidates
+        # FARTHEST (standardized active-dims distance) from every measured arch — a model-free
+        # uncertainty proxy (safe with rbf: no jackknife, no uncertainty-AL clustering pathology).
+        # Default 0: in-house evidence says AL payoff is tail-only and cov_rad already explores.
+        n_al = int(round(self.args.al_frac * K)) if len(Xc) > K else 0
+        K_sel = K - n_al
         if len(Xc) > K:
             comp = self._comp.batch(Xc, self.comp_obj)   # (N,2) [wbits, eff_kvbits], vectorized
             if self.args.cand_even == 'maximin':         # extent coverage (legacy default)
                 z = (comp - comp.mean(0)) / (comp.std(0) + 1e-9)
-                idx = np.asarray(maximin_extras(z, anchor_idx=[], K=K, seed=self.args.seed), int)
+                idx = np.asarray(maximin_extras(z, anchor_idx=[], K=K_sel, seed=self.args.seed), int)
             elif self.args.cand_even == 'grid':          # per-axis-even quota over the box
-                idx = even_select(comp, pred, K, g, self.comp_obj_min, self.comp_obj_max)
+                idx = even_select(comp, pred, K_sel, g, self.comp_obj_min, self.comp_obj_max)
             elif self.args.cand_even == 'moo':           # 2/3-obj (loss × coverage [× gap-std]) → knee
-                idx = moo_subset_select(comp, pred, K, self.comp_obj_min, self.comp_obj_max, g,
+                idx = moo_subset_select(comp, pred, K_sel, self.comp_obj_min, self.comp_obj_max, g,
                                         algo=self.args.moo_algo, pop=self.args.moo_pop,
                                         n_gen=self.args.moo_gen, seed=self.args.seed,
                                         gap_std=self.args.moo_gap_std,
                                         coverage=self.args.moo_coverage)
             else:                                        # hybrid: front pressure + grid-even coverage
-                k_even = int(round(self.args.even_frac * K)); k_front = K - k_even
+                k_even = int(round(self.args.even_frac * K_sel)); k_front = K_sel - k_even
                 front = np.argsort(pred)[:k_front]       # low predicted loss = keep the front moving
                 rest = np.setdiff1d(np.arange(len(Xc)), front)
                 even = (rest[even_select(comp[rest], pred[rest], k_even, g,
                                          self.comp_obj_min, self.comp_obj_max)]
                         if len(rest) else np.array([], int))
                 idx = np.concatenate([front, even]).astype(int)
+            if n_al > 0:                                 # AL quota: farthest-from-archive extras
+                rest = np.setdiff1d(np.arange(len(Xc)), idx)
+                if len(rest):
+                    act = self.active
+                    mu = Ga[:, act].mean(0); sd = Ga[:, act].std(0); sd[sd < 1e-9] = 1.0
+                    A = (Ga[:, act] - mu) / sd
+                    Rz = (Xc[rest][:, act] - mu) / sd
+                    from scipy.spatial.distance import cdist
+                    dmin = cdist(Rz, A).min(1)
+                    idx = np.concatenate([idx, rest[np.argsort(-dmin)[:n_al]]]).astype(int)
             Xc, pred = Xc[idx], pred[idx]
         cands = [self.ss.decode(gg) for gg in Xc]
         return cands, pred
@@ -394,10 +435,19 @@ def build_parser():
     p.add_argument('--cand_grid', type=int, default=0, help='grid side for grid/hybrid/moo even-select (0=auto=ceil(sqrt(n_iter)))')
     p.add_argument('--even_frac', type=float, default=0.5, help='hybrid: fraction of K spent on grid-even coverage (rest = front pressure)')
     p.add_argument('--grid_seed', action='store_true', help='seed nearest-block genomes per box cell into the candidate pool each iter (guarantees high-comp supply)')
-    p.add_argument('--seed_pool', default='archive', choices=['first', 'archive'],
-                   help="block source for --grid_seed: 'first' = 1st-stage front pools only; "
-                        "'archive' = also the current archive's W/KV sub-blocks (2nd-stage "
-                        "mutants included) — seeds adapt as the search finds better parts")
+    p.add_argument('--seed_pool', default='archive', choices=['first', 'archive', 'full'],
+                   help="block source for --grid_seed: 'first' = div_k-pruned 1st-stage pools; "
+                        "'archive' = + the current archive's W/KV sub-blocks (2nd-stage mutants) "
+                        "— seeds adapt as the search finds better parts; 'full' = + the FULL "
+                        "ε-band 1st-stage blocks (no div_k pruning — densest nearest-comp match)")
+    p.add_argument('--seed_expr', nargs='*', default=[],
+                   help='extra iter_N.stats archives (e.g. prior 2nd-stage runs) whose W/KV '
+                        'sub-blocks join the seed pool (QEFT [b,0] entries auto-normalized; '
+                        'n_outlier>0 archs skipped for a scalar-bit space)')
+    p.add_argument('--al_frac', type=float, default=0.0,
+                   help='fraction of K reserved for ACTIVE-LEARNING picks = candidates farthest '
+                        '(standardized active-dims distance) from all measured archs; model-free '
+                        'uncertainty proxy. 0 = off (in-house evidence: AL payoff is tail-only)')
     p.add_argument('--moo_algo', default='nsga3', choices=['nsga3', 'nsga2'], help='moo down-select MOO solver (nsga3 = reference-direction, recommended)')
     p.add_argument('--moo_pop', type=int, default=80, help='moo down-select subset-GA population')
     p.add_argument('--moo_gen', type=int, default=80, help='moo down-select subset-GA generations')
