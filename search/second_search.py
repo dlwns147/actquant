@@ -3,7 +3,9 @@
 Structure mirrors search.py (Search): DOE → _fit_predictor → _next → _evaluate →
 iter_<it>.stats loop; archive = [arch, metric, *comp_obj]. Uses the SAME building
 blocks as search.py — LlamaSearchSpace (encode/decode/encode_predictor) and
-LlamaEvaluator (eval). Joint-specific operators live in utils/joint_search.py.
+LlamaEvaluator (eval). Joint-specific operators + auxiliary helpers (supply seeding,
+coverage/HV stats, per-iter viz) live in utils/second_stage.py; generic candidate
+subset selectors (even_select / moo_subset_select) in utils/select.py.
 
   * genome = ss.encode(arch); a (W-block, KV-block) assembled from the 1st-stage
     per-axis Pareto fronts (--w_expr / --eff_kv_expr).
@@ -22,15 +24,15 @@ from pymoo.optimize import minimize
 from pymoo.algorithms.moo.nsga3 import NSGA3
 from pymoo.util.ref_dirs import get_reference_directions
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
-from pymoo.indicators.hv import Hypervolume
 
 from search_space.llama import LlamaSearchSpace
 from predictor.factory import get_predictor
 from utils.func import set_seed, get_correlation, get_net_info
-from utils.select import maximin_extras
-from utils.joint_search import (
+from utils.select import maximin_extras, even_select, moo_subset_select
+from utils.second_stage import (
     encoding_xu, nw_split, load_block_pools, gene_weights, freeze_mask, block_segments, derive_options, derive_qeft,
-    FrontierProductSampling, AxisBlockCrossover, WeightedIntMutation, KnowledgeMutation, JointAuxProblem, JointComp)
+    FrontierProductSampling, AxisBlockCrossover, WeightedIntMutation, KnowledgeMutation, JointAuxProblem, JointComp,
+    grid_side, grid_seed, calc_hv, front_coverage, save_viz)
 
 
 class SecondSearch:
@@ -211,101 +213,52 @@ class SecondSearch:
                      crossover=AxisBlockCrossover(self.nw, self.n_var),
                      mutation=mut, eliminate_duplicates=False)
         res = minimize(problem, algo, ('n_gen', 20), seed=self.args.seed, save_history=True, verbose=True)
-        seen = {tuple(self.ss.encode(x[0])) for x in archive}
-        Xc = np.unique(np.clip(np.round(res.pop.get('X')), 0, self.xu).astype(int), axis=0)
-        Xc = np.array([g for g in Xc if tuple(g) not in seen])
+        Ga = np.array([self.ss.encode(x[0]) for x in archive])      # archive genomes (reused below)
+        seen = {tuple(gg) for gg in Ga}
+        g = grid_side(K, self.args.cand_grid)
+        pool = res.pop.get('X')
+        if self.args.grid_seed:                          # even SUPPLY: block-product seeds per box cell
+            Wp, wc, KVp, kc = self.Wg, self.w_comp, self.KVg, self.kv_comp
+            if self.args.seed_pool == 'archive':
+                # augment the 1st-stage block pools with the ARCHIVE's W/KV sub-blocks (incl.
+                # 2nd-stage mutants) so seeds improve as the search discovers better parts;
+                # per-part comp comes free from the stored archive comp columns.
+                aw = np.array([x[2] for x in archive]); ak = np.array([x[3] for x in archive])
+                uW, iW = np.unique(Ga[:, :self.nw], axis=0, return_index=True)
+                uK, iK = np.unique(Ga[:, self.nw:], axis=0, return_index=True)
+                Wp = np.vstack([Wp, uW]); wc = np.concatenate([wc, aw[iW]])
+                KVp = np.vstack([KVp, uK]); kc = np.concatenate([kc, ak[iK]])
+            pool = np.vstack([pool, grid_seed(Wp, KVp, wc, kc,
+                                              self.comp_obj_min, self.comp_obj_max, g)])
+        Xc = np.unique(np.clip(np.round(pool), 0, self.xu).astype(int), axis=0)
+        Xc = np.array([gg for gg in Xc if tuple(gg) not in seen])
         if len(Xc) == 0:
             return [], np.zeros((0,))
-        if len(Xc) > K:                                  # diversity-select K across comp space (maximin)
-            comp = self._comp.batch(Xc, self.comp_obj)   # vectorized (was per-genome get_net_info)
-            z = (comp - comp.mean(0)) / (comp.std(0) + 1e-9)
-            Xc = Xc[maximin_extras(z, anchor_idx=[], K=K, seed=self.args.seed)]
-        cands = [self.ss.decode(g) for g in Xc]
-        return cands, predictor.predict(Xc[:, self.active].astype(float))
-
-    def _front_coverage(self, archive):
-        F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
-        nd = NonDominatedSorting().do(F, only_non_dominated_front=True)
-        cov = {}
-        for j, obj in enumerate(self.comp_obj):
-            col, full = F[nd, 1 + j], F[:, 1 + j]
-            denom = full.max() - full.min()
-            cov[obj] = {'front_min': float(col.min()), 'front_max': float(col.max()),
-                        'full_min': float(full.min()), 'full_max': float(full.max()),
-                        'coverage': float((col.max() - col.min()) / denom) if denom > 0 else 1.0}
-        return cov
-
-    @staticmethod
-    def _calc_hv(ref_pt, F):
-        nd = NonDominatedSorting().do(F, only_non_dominated_front=True)
-        rp = 1.01 * ref_pt
-        return float(Hypervolume(ref_point=rp).do(F[nd]) / np.prod(rp))
-
-    def _save_viz(self, it, archive, c_metric, c_pred, c_comp, cov):
-        """Per-save_iter figures (search.py --debug style + a joint panel):
-          - one panel PER comp_obj (wbits, eff_kvbits): loss vs that comp axis — archive (blue)
-            + 1st Pareto-front line (black) + this iter's candidates (evaluated red / predicted
-            green), x fixed to the budget box so iters compare;
-          - a final JOINT panel: wbits × eff_kvbits scatter coloured by loss with the non-
-            dominated front ringed (the W×KV tradeoff the per-axis panels can't show)."""
-        try:
-            import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
-        except Exception as e:
-            print(f"[viz] skipped (matplotlib unavailable: {e})"); return
-        plt.rcParams.update({'font.size': 11, 'axes.titlesize': 12.5, 'axes.titleweight': 'semibold',
-                             'axes.edgecolor': '#444', 'axes.linewidth': 0.9, 'figure.facecolor': 'white',
-                             'axes.facecolor': '#fbfbfd', 'legend.framealpha': 0.92})
-        eps = 1e-4
-        n_obj = len(self.comp_obj)
-        comp_c = np.array(c_comp); c_pred = np.clip(np.asarray(c_pred).ravel(), eps, None)
-        c_metric = np.clip(np.asarray(c_metric), eps, None)
-        perf = np.clip(np.array([x[1] for x in archive]), eps, None)
-        arch_F = np.column_stack([[x[k] for x in archive] for k in range(1, n_obj + 2)])
-        nd_idx = NonDominatedSorting().do(arch_F, only_non_dominated_front=True)
-        joint = (n_obj == 2)
-        ncol = n_obj + (1 if joint else 0)
-        fig, axes = plt.subplots(1, ncol, figsize=(5.7 * ncol, 5.3), constrained_layout=True)
-        axes = np.atleast_1d(axes)
-        for i in range(n_obj):
-            ax = axes[i]; obj = self.comp_obj[i]
-            comp = np.array([x[i + 2] for x in archive])
-            # archive cloud: light, soft, rasterized → no black overplot mush
-            ax.scatter(comp, perf, s=9, c='#9fb3d1', alpha=0.35, edgecolors='none',
-                       rasterized=True, zorder=1, label=f'archive (n={len(archive)})')
-            # achievable frontier = best loss within budget (running min of loss as comp grows)
-            o = np.argsort(comp); env = np.minimum.accumulate(perf[o])
-            ax.plot(comp[o], env, color='#1f4e8c', lw=2.4, zorder=3, label='best-loss envelope')
-            # this iter's candidates: measured vs predicted (surrogate accuracy at a glance)
-            ax.scatter(comp_c[:, i], c_metric, s=42, marker='o', c='#2ca02c', edgecolors='white',
-                       lw=0.6, zorder=6, label='cand · measured')
-            ax.scatter(comp_c[:, i], c_pred, s=46, marker='x', c='#ff7f0e', lw=1.5,
-                       zorder=5, label='cand · predicted')
-            fmin, fmax = self.comp_obj_min[i], self.comp_obj_max[i]
-            pad = 0.03 * (fmax - fmin) if fmax > fmin else 0.1
-            ax.set_xlim(fmin - pad, fmax + pad)
-            ax.axvspan(fmin, fmax, color='#000000', alpha=0.025, zorder=0)
-            ax.set_xlabel(obj); ax.grid(True, which='both', ls=':', c='0.8', lw=0.6); ax.set_axisbelow(True)
-            ax.set_title(f"{obj}  ·  front-coverage {cov[obj]['coverage'] * 100:.0f}%")
-        axes[0].set_ylabel('loss')
-        axes[0].legend(loc='upper right', fontsize=8.5, ncol=1)
-        if joint:                                         # joint W × eff_kvbits loss landscape
-            ax = axes[n_obj]
-            wx = np.array([x[2] for x in archive]); ky = np.array([x[3] for x in archive])
-            # every arch as a point coloured by its loss (linear) — the actual sampled landscape;
-            # this iter's measured candidates ringed so you can see where the search just probed.
-            sc = ax.scatter(wx, ky, c=perf, s=16, cmap='viridis', alpha=0.7,
-                            edgecolors='none', rasterized=True, zorder=1)
-            ax.scatter(comp_c[:, 0], comp_c[:, 1], s=46, marker='o', facecolors='none',
-                       edgecolors='#d62728', lw=1.4, zorder=4, label='cand · this iter')
-            ax.set_xlabel(self.comp_obj[0]); ax.set_ylabel(self.comp_obj[1])
-            ax.set_xlim(self.comp_obj_min[0], self.comp_obj_max[0])
-            ax.set_ylim(self.comp_obj_min[1], self.comp_obj_max[1])
-            ax.set_title(f'joint  {self.comp_obj[0]} × {self.comp_obj[1]}  ·  colour = loss')
-            ax.legend(loc='upper right', fontsize=9); ax.grid(True, ls=':', c='0.8', lw=0.6); ax.set_axisbelow(True)
-            fig.colorbar(sc, ax=ax, label='loss', shrink=0.92)
-        fig.suptitle(f'2nd-stage joint W×eff_kvbits search — iter {it}', fontsize=13.5, fontweight='bold')
-        fig.savefig(os.path.join(self.save_path, f'iter_{it}.png'), dpi=130)
-        plt.close(fig)
+        pred = np.asarray(predictor.predict(Xc[:, self.active].astype(float))).ravel()
+        if len(Xc) > K:
+            comp = self._comp.batch(Xc, self.comp_obj)   # (N,2) [wbits, eff_kvbits], vectorized
+            if self.args.cand_even == 'maximin':         # extent coverage (legacy default)
+                z = (comp - comp.mean(0)) / (comp.std(0) + 1e-9)
+                idx = np.asarray(maximin_extras(z, anchor_idx=[], K=K, seed=self.args.seed), int)
+            elif self.args.cand_even == 'grid':          # per-axis-even quota over the box
+                idx = even_select(comp, pred, K, g, self.comp_obj_min, self.comp_obj_max)
+            elif self.args.cand_even == 'moo':           # 2/3-obj (loss × coverage [× gap-std]) → knee
+                idx = moo_subset_select(comp, pred, K, self.comp_obj_min, self.comp_obj_max, g,
+                                        algo=self.args.moo_algo, pop=self.args.moo_pop,
+                                        n_gen=self.args.moo_gen, seed=self.args.seed,
+                                        gap_std=self.args.moo_gap_std,
+                                        coverage=self.args.moo_coverage)
+            else:                                        # hybrid: front pressure + grid-even coverage
+                k_even = int(round(self.args.even_frac * K)); k_front = K - k_even
+                front = np.argsort(pred)[:k_front]       # low predicted loss = keep the front moving
+                rest = np.setdiff1d(np.arange(len(Xc)), front)
+                even = (rest[even_select(comp[rest], pred[rest], k_even, g,
+                                         self.comp_obj_min, self.comp_obj_max)]
+                        if len(rest) else np.array([], int))
+                idx = np.concatenate([front, even]).astype(int)
+            Xc, pred = Xc[idx], pred[idx]
+        cands = [self.ss.decode(gg) for gg in Xc]
+        return cands, pred
 
     def _initialize(self):
         """DOE seed, mirroring search_space.llama.initialize: enumerate the BOUNDARY corners
@@ -356,7 +309,7 @@ class SecondSearch:
             for a, m, c in zip(cands, c_metric, c_comp):
                 archive.append([a, m, *c])
             F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
-            hv = self._calc_hv(ref_pt, F); cov = self._front_coverage(archive)
+            hv = calc_hv(ref_pt, F); cov = front_coverage(archive, self.comp_obj)
             iter_time = time() - iter_start
             # print iteration-wise statistics (search.py format)
             print(f"Iter {it}: hv = {hv:.2f}, iter time : {iter_time:.2f}s, "
@@ -376,7 +329,8 @@ class SecondSearch:
                                'surrogate': {'model': self.predictor, 'rmse': rmse, 'rho': rho, 'tau': tau},
                                'coverage': cov, 'iteration': it}, f)
                 if self.debug:
-                    self._save_viz(it, archive, c_metric, c_pred, c_comp, cov)
+                    save_viz(self.save_path, it, archive, c_metric, c_pred, c_comp, cov,
+                             self.comp_obj, self.comp_obj_min, self.comp_obj_max)
         print(f"[done] {len(archive)} archs, {time()-t0:.1f}s → {self.save_path}")
         self._write_results(archive, time() - t0)
         return archive
@@ -388,7 +342,7 @@ class SecondSearch:
         losses = [x[1] for x in archive]
         F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
         nd = NonDominatedSorting().do(F, only_non_dominated_front=True)
-        cov = self._front_coverage(archive)
+        cov = front_coverage(archive, self.comp_obj)
         lines = [f"{k}: {v}\n" for k, v in vars(self.args).items()]
         lines.append(f"\nTotal time: {total_time:.2f}s\n")
         lines.append(f"archive: {len(archive)} archs | front: {len(nd)} | "
@@ -428,6 +382,32 @@ def build_parser():
     p.add_argument('--front_eps_rel', type=float, default=0.0, help='relative ε band = front_jsd·(1+rel); scale-free, auto-wider in the high-loss corner')
     p.add_argument('--div_k', type=int, default=0, help='keep div_k structurally-diverse blocks per axis (maximin; 0=off)')
     p.add_argument('--agree_frac', type=float, default=0.95, help='L2 freeze: cells where ≥ this fraction of 1st-stage blocks agree are frozen at consensus (mutation skips them); >1.0 disables. 0.95 is loss-free per tests/joint_reabsorption.py')
+    # per-iteration candidate down-select across the (wbits × eff_kvbits) budget box.
+    # maximin = extent coverage (legacy). grid = per-axis-even quota (bucket the box into a
+    # g×g grid, round-robin cells, best predicted loss within a cell). hybrid = even_frac of K
+    # on grid-even coverage + the rest on lowest-predicted-loss front pressure. moo = 2-obj
+    # (mean pred-loss × box covering-radius) subset GA → knee (principled explore↔exploit
+    # balance, dominates hybrid's hard split; --moo_algo nsga3 ≥ nsga2). --grid_seed additionally
+    # injects nearest-block genomes per cell so the high-comp corner NSGA drops (right-end
+    # collapse) still gets sampled — pair it with grid/hybrid/moo. Defaults keep legacy behaviour.
+    p.add_argument('--cand_even', default='maximin', choices=['maximin', 'grid', 'hybrid', 'moo'])
+    p.add_argument('--cand_grid', type=int, default=0, help='grid side for grid/hybrid/moo even-select (0=auto=ceil(sqrt(n_iter)))')
+    p.add_argument('--even_frac', type=float, default=0.5, help='hybrid: fraction of K spent on grid-even coverage (rest = front pressure)')
+    p.add_argument('--grid_seed', action='store_true', help='seed nearest-block genomes per box cell into the candidate pool each iter (guarantees high-comp supply)')
+    p.add_argument('--seed_pool', default='archive', choices=['first', 'archive'],
+                   help="block source for --grid_seed: 'first' = 1st-stage front pools only; "
+                        "'archive' = also the current archive's W/KV sub-blocks (2nd-stage "
+                        "mutants included) — seeds adapt as the search finds better parts")
+    p.add_argument('--moo_algo', default='nsga3', choices=['nsga3', 'nsga2'], help='moo down-select MOO solver (nsga3 = reference-direction, recommended)')
+    p.add_argument('--moo_pop', type=int, default=80, help='moo down-select subset-GA population')
+    p.add_argument('--moo_gen', type=int, default=80, help='moo down-select subset-GA generations')
+    p.add_argument('--moo_coverage', default='rad', choices=['rad', 'gap'],
+                   help="moo 2nd objective: 'rad' = box covering radius (2D reach), "
+                        "'gap' = max-axis spacing gap-std (1D marginal evenness)")
+    p.add_argument('--moo_gap_std', action='store_true',
+                   help='moo: add a 3rd objective = max-axis std of consecutive sorted-coordinate '
+                        'gaps of the subset (per-axis spacing evenness, as in '
+                        "coverage_subset_nsga2_extras marginal/max)")
     # mutation: 1st-stage-knowledge-guided (value-resample + module-transplant) vs lever-weighted ±1
     p.add_argument('--mutation', default='knowledge', choices=['knowledge', 'weighted'])
     p.add_argument('--mut_p_val', type=float, default=0.5, help='prob a mutated cell takes a 1st-stage value (else ±1)')

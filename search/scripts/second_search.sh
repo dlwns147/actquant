@@ -68,6 +68,26 @@ SAVE_ITER=10       # dump iter_<it>.stats + iter_<it>.png (via --debug) every SA
 ATTN_SINK=8
 N_TOKEN=0
 
+# ── per-iteration candidate down-select across the (wbits × eff_kvbits) budget box.
+#    maximin = extent coverage (legacy). grid = per-axis-even quota. hybrid = even_frac split.
+#    moo = 2-obj (mean pred-loss × box covering-radius) subset GA → knee (principled
+#    explore↔exploit; dominates the hybrid hard split; NSGA-III ≥ NSGA-II). GRID_SEED injects
+#    nearest-block genomes per box cell so the high-comp corner NSGA drops still gets sampled
+#    (the DOMINANT lever vs right-end collapse — pair it with grid/hybrid/moo).
+#    DEFAULT moo: 2-seed multi-n_token band-retrieval test — top policies statistically tied
+#    (moo 2-seed mean regret 5.7% ≈ grid 7.3%, ordering flips across seeds), moo picked for
+#    its knee-balanced quality+coverage subsets (dominated the hybrid hard split; best s0
+#    aggregate). grid = the simpler deterministic alternative (no inner GA). Final band
+#    precision comes from post-search band-refine, not from this knob.
+CAND_EVEN=moo        # maximin / grid / hybrid / moo
+GRID_SEED=True       # True = inject per-cell block-product seeds each iter
+SEED_POOL=archive    # seed block source: archive (1st-stage ∪ archive W/KV sub-blocks; 2-seed
+                     # test: mean band-regret 3.0→2.1%, worst 50.9→24.5% vs first) / first
+MOO_ALGO=nsga3       # moo solver: nsga3 (recommended) / nsga2
+EVEN_FRAC=0.5        # hybrid only: fraction of K on grid-even coverage
+# NOTE --moo_gap_std (3rd objective: per-axis spacing gap-std) tested and NOT enabled:
+# no regret gain (3.2/3.7% vs 3.0/2.1%), dilutes the quality objective in the knee.
+
 # ── building-block selector from 1st-stage archives (FINALIZED via search sweep).
 #    Pool = adaptive-ε band → structural-diversity. NO window/bin thinning: a sweep showed
 #    thinning HURTS hv (band→div 0.265 > window→div 0.237 > hardbin→div 0.20) — maximin
@@ -95,8 +115,11 @@ ARGS="--config ${CONFIG} \
 --model_name ${MODEL_NAME} \
 --w_expr ${W_EXPR} \
 --eff_kv_expr ${EFF_KV_EXPR} \
---mode ${MODE} \
 --surrogate ${SURROGATE} \
+--cand_even ${CAND_EVEN} \
+--seed_pool ${SEED_POOL} \
+--moo_algo ${MOO_ALGO} \
+--even_frac ${EVEN_FRAC} \
 --pop ${POP} \
 --n_doe ${N_DOE} \
 --iterations ${ITERATIONS} \
@@ -109,6 +132,8 @@ ARGS="--config ${CONFIG} \
 --save_iter ${SAVE_ITER} \
 --debug \
 --save ${SAVE}"
+
+[ "${GRID_SEED}" == "True" ] && ARGS+=" --grid_seed"
 
 if [ ${MODE} == "hqq" ]; then
     ARGS+=" --gpu_id ${DEVICES} --model_path ${MODEL_PATH} --dtype ${DTYPE} --w_method ${W_METHOD} \

@@ -1,27 +1,27 @@
 DEVICES=${1}
 
-MODEL_PATH=/SSD/huggingface/meta-llama
-# # MODEL_NAME=Llama-2-7b-hf
-# # MODEL_NAME=Llama-2-13b-hf
-# # MODEL_NAME=Llama-2-70b-hf
-# # MODEL_NAME=Meta-Llama-3-8B
-# # MODEL_NAME=Llama-3.1-8B
-MODEL_NAME=Llama-3.1-8B-Instruct
-# # MODEL_NAME=Llama-3.2-1B-Instruct
-# MODEL_NAME=Llama-3.2-3B-Instruct
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# # # MODEL_NAME=Llama-2-7b-hf
+# # # MODEL_NAME=Llama-2-13b-hf
+# # # MODEL_NAME=Llama-2-70b-hf
+# # # MODEL_NAME=Meta-Llama-3-8B
+# # # MODEL_NAME=Llama-3.1-8B
+# MODEL_NAME=Llama-3.1-8B-Instruct
+# # # MODEL_NAME=Llama-3.2-1B-Instruct
+# # MODEL_NAME=Llama-3.2-3B-Instruct
 
 # MODEL_PATH=/SSD/huggingface/Qwen
-# MODEL_NAME=Qwen2.5-1.5B
-# MODEL_NAME=Qwen2.5-3B
-# MODEL_NAME=Qwen2.5-7B
-# MODEL_NAME=Qwen2.5-14B
-# MODEL_NAME=Qwen2.5-7B-1M
+# # MODEL_NAME=Qwen2.5-1.5B
+# # MODEL_NAME=Qwen2.5-3B
+# # MODEL_NAME=Qwen2.5-7B
+# # MODEL_NAME=Qwen2.5-14B
+# # MODEL_NAME=Qwen2.5-7B-1M
 
-# MODEL_NAME=Qwen2.5-1.5B-Instruct
-# MODEL_NAME=Qwen2.5-3B-Instruct
+# # # MODEL_NAME=Qwen2.5-1.5B-Instruct
+# # # MODEL_NAME=Qwen2.5-3B-Instruct
 # MODEL_NAME=Qwen2.5-7B-Instruct
-# MODEL_NAME=Qwen2.5-14B-Instruct
-# MODEL_NAME=Qwen2.5-7B-Instruct-1M
+# # MODEL_NAME=Qwen2.5-14B-Instruct
+# # # MODEL_NAME=Qwen2.5-7B-Instruct-1M
 
 # MODEL_NAME=Qwen3-4B
 # MODEL_NAME=Qwen3-8B
@@ -35,8 +35,9 @@ MODEL_NAME=Llama-3.1-8B-Instruct
 # MODEL_PATH=/SSD/huggingface/facebook
 # MODEL_NAME=opt-1.3b
 
-# MODEL_PATH=/SSD/huggingface/google
+MODEL_PATH=/SSD/huggingface/google
 # MODEL_NAME=gemma-3-12b-it
+MODEL_NAME=gemma-3-27b-it
 
 # DTYPE=float16
 DTYPE=bfloat16
