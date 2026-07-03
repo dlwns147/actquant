@@ -92,24 +92,30 @@ class GPTQ_OWQ:
             outidx = outidx.to(device=self.dev)
             assert outidx.numel() == self.n_out, (
                 f"outidx has {outidx.numel()} cols but n_out={self.n_out}")
-            temp_mask[outidx] = False
             if actorder:
-                # Honor the PASSED outidx under act_order too: quantize the
-                # non-outlier columns in descending-Hessian order and keep the
-                # passed outlier columns (moved to the tail) in FP16.
-                # BUG(fixed): this branch used descending_ids[:n_out] (the
-                # CURRENT-Hessian top) as the protected tail and silently
-                # discarded outidx — while still returning outidx, so callers
-                # believed their columns were protected. Regression test:
-                # tests/test_qeft_outidx_bug.py.
-                non_out = descending_ids[temp_mask[descending_ids]]
-                ids = torch.cat([non_out, outidx])
+                # act_order: protect the CURRENT-Hessian top-n_out (ignore the
+                # passed outidx) and RETURN the actually-protected columns.
+                # Measured on Llama-3.1-8B (searched w4 arch, n_out=32, KIVI,
+                # LongBench lcc): H-top protection 65.0 vs honoring the passed
+                # wikitext2 outidx 52.9 (instruct-leak 10% vs 34%) — honoring
+                # stale outidx under act_order collapses code tasks because the
+                # massive-activation H-top columns lose FP16 protection. The
+                # historical code protected H-top but RETURNED outidx, so
+                # callers/kernel-packing believed the wrong columns were FP16;
+                # now the return value reports the true protected set.
+                # Regression test: tests/test_qeft_outidx_bug.py.
+                protected = descending_ids[:self.n_out]
+                temp_mask[protected] = False
+                ids = torch.cat([descending_ids[self.n_out:], protected])
+                self.ids = ids
+                return torch.sort(protected)[0].to(torch.int32)
             else:
+                # original-order path: honor the passed outidx (legacy QEFT
+                # behavior; also what the pre-d350089 act_order=False runs did).
+                temp_mask[outidx] = False
                 ids = torch.cat([torch.arange(self.columns, device=self.dev)[temp_mask], outidx])
-
-            self.ids = ids
-            # return torch.sort(outidx)[0].to(torch.int32)
-            return outidx.to(torch.int32)
+                self.ids = ids
+                return outidx.to(torch.int32)
 
     def hessian_sorting_qkv_frob_norm(self, actorder=False, frob_norm_k=None, frob_norm_q=None, frob_norm_v=None):
         # print("Using hessian_sorting_qkv_frob_norm")

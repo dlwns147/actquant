@@ -28,6 +28,8 @@ done
 W_METHOD=hqq
 W_BITS="2 3 4"; W_GROUP_SIZE=128; AXIS=1
 KV_METHOD="kivi think"
+W_METHOD_TEXT=${W_METHOD}
+KV_METHOD_TEXT=${KV_METHOD// /_}
 QMODEL_PATHS_LIST=()
 for B in ${W_BITS}; do
     QMODEL_PATHS_LIST+=( "/SSD/hqq/${MODEL_NAME}_${B}bit_${W_GROUP_SIZE}gs_${AXIS}axis_${DTYPE}" )
@@ -46,6 +48,7 @@ ATTN_SINK=8
 N_TOKEN=0
 
 CAND_EVEN=moo        # maximin / grid / hybrid / moo
+MOO_GAP_STD=True     # moo 3rd objective ON: (pred-loss × cov_rad × gap-std) knee.
 GRID_SEED=True       # True = inject per-cell block-product seeds each iter
 SEED_POOL=full       # seed block source: full (FULL ε-band pools W~9k/KV~3k ∪ archive parts;
 MOO_ALGO=nsga3       # moo solver: nsga3 (recommended) / nsga2
@@ -70,7 +73,8 @@ SINK_TAG=""; [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
 QEFT_TAG=""; [ "${USE_QEFT}" == "True" ] && QEFT_TAG="_qc${QEFT_RANK_TEXT}"
 PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
 CAND_TAG=${CAND_EVEN}                                           # maximin/grid/hybrid/moo
-[ "${CAND_EVEN}" == "moo" ]    && CAND_TAG=moo${MOO_ALGO#nsga}  # moo3/moo2
+[ "${CAND_EVEN}" == "moo" ]    && CAND_TAG=moo${MOO_ALGO#nsga}  # moo3/moo2 (=nsga ver.)
+[ "${CAND_EVEN}" == "moo" ] && [ "${MOO_GAP_STD}" == "True" ] && CAND_TAG+=gs  # +gap-std obj
 [ "${CAND_EVEN}" == "hybrid" ] && CAND_TAG=hyb${EVEN_FRAC}
 [ "${GRID_SEED}" == "True" ]   && CAND_TAG+=-g${SEED_POOL:0:2}  # -gfu/-gar/-gfi = full/archive/first
 SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURROGATE}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}_s${SEED}
@@ -100,6 +104,7 @@ ARGS="--config ${CONFIG} \
 --save ${SAVE}"
 
 [ "${GRID_SEED}" == "True" ] && ARGS+=" --grid_seed"
+[ "${MOO_GAP_STD}" == "True" ] && ARGS+=" --moo_gap_std"
 
 ARGS+=" --gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \

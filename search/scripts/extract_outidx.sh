@@ -6,8 +6,8 @@ MODEL_NAME=Llama-3.1-8B-Instruct
 # MODEL_NAME=Llama-2-13b-hf
 # MODEL_NAME=Llama-2-70b-hf
 # MODEL_NAME=Meta-Llama-3-8B
-DATASET=wikitext2
-# DATASET=c4
+# DATASET=wikitext2
+DATASET=c4
 
 OUTPUT_DIR=/NAS/SJ/actquant/search/outlier/${MODEL_NAME}
 WBITS=16
