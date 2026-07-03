@@ -46,12 +46,20 @@ class GPTQ(BASE):
 
         assert self.arch is not None, "arch is not provided"
 
-        # Llama-3.x GPTQ needs act_order=True: its massive-activation channels make
-        # natural column order unstable (Llama-3.1-8B W4 wiki PPL ~7.8-13.5 vs ~7.2).
-        # Qwen/Mistral are fine without it, so gate on the Llama-3 family only.
-        if 'llama-3' in self.model_name.lower() and not act_order:
-            act_order = True
-            print('[gptq] Llama-3.x -> act_order=True (GPTQ stability)')
+        # DEFAULT act_order=False for ALL models (project decision 2026-07-03).
+        # act_order='auto'/None opts into the Llama-3 gate; explicit True/False
+        # honored (was silently overridden to True — same trap fixed in qeft.py).
+        # CAVEAT: plain GPTQ has no FP16 outlier columns, so on Llama-3.x the
+        # False default IS the known chaotic config (massive-activation channels,
+        # wiki PPL 7.5<->12.4 by calib seed vs stable ~7.5 with True) — warn.
+        if act_order is None or act_order == 'auto':
+            act_order = 'llama-3' in self.model_name.lower()
+            if act_order:
+                print('[gptq] Llama-3.x -> act_order=True (GPTQ stability)')
+        elif act_order is False and 'llama-3' in self.model_name.lower():
+            print('[gptq] WARNING: Llama-3 + act_order=False is the known '
+                  'chaotic config (wiki PPL 7.5<->12.4 by calib seed) — '
+                  'check PPL or pass act_order=True/auto.')
 
         if samples is None:
             samples = get_gptq_calib_dataset(data=calib, tokenizer=self.tokenizer, n_samples=nsamples, seqlen=seqlen)

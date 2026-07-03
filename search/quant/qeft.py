@@ -42,7 +42,8 @@ class QEFT(BASE):
         sym=False,
         true_sequential=False,
         percdamp=.01,
-        act_order=None,
+        act_order=False,
+        htop_protect=False,
         no_frob_norm=False,
         tuning='mse',
         layers=None,
@@ -143,16 +144,52 @@ class QEFT(BASE):
             for l, is_owq in owq_layers.items():
                 if is_owq:
                     n_out_dict[l] = [target_rank if bits != math.ceil(bits) else 0 for bits in larch[l]]
-        # Llama-3.x GPTQ needs act_order=True: its massive-activation channels make
-        # natural column order unstable (Llama-3.1-8B W4 wiki PPL ~7.8-13.5 vs ~7.2).
-        # Qwen/Mistral are fine without it, so gate on the Llama-3 family only.
-        # act_order=None (default) = auto-gate; an EXPLICIT True/False is honored
-        # (needed by the act_order regression experiments — previously an explicit
-        # False was silently overridden to True here).
-        if act_order is None:
-            act_order = 'llama-3' in self.model_name.lower()
-            if act_order:
-                print('[qeft] Llama-3.x -> act_order=True (GPTQ stability)')
+        # DEFAULT act_order=False for ALL models (project decision 2026-07-03:
+        # QEFT archs always carry FP16 outlier columns, which remove the
+        # Llama-3 original-order chaos source — measured n_out=32 wiki PPL
+        # 7.533 vs n_out=0's 11.1 spike — while act_order=True costs up to
+        # -17 lcc via calib overfitting). act_order='auto' or None opts into
+        # the arch-aware gate below; an EXPLICIT True/False is always honored.
+        #
+        # act_order is a two-sided knob (Llama-3.1-8B-Instruct, measured):
+        #  * act_order=True is a CALIB-OVERFIT AMPLIFIER at high bits: per-layer
+        #    c4-calib error improves 20-30% but heldout-c4 flips +11-16% and CODE
+        #    inputs +15-25% WORSE (tests/test_actorder_probe2.py, 4-bit n_out=0
+        #    layers). Arch-level: REAL w4 arch lcc 47.4 (True) vs 64.5 (False),
+        #    w3.5 56.6 vs 60.5 — PPL is blind to it (same manifold as calib).
+        #    Ordering is the dominant channel (-13.1 of the 17-pt gap; protected-
+        #    column identity only -4.0, htop_protect arm).
+        #  * act_order=False is NUMERICALLY CHAOTIC where GPTQ original-order
+        #    breaks: 2-bit-heavy archs (REAL w3 arch, 30% 2-bit: 53.9 True vs
+        #    46.9 False) and 0-outlier uniform archs on Llama-3.x (W4 wiki PPL
+        #    swings 7.8-13.5 vs stable 7.2 with True).
+        # Gate: True where original-order chaos dominates (many 2-bit layers, or
+        # no FP16 outlier columns to absorb massive activations); False otherwise.
+        # Boundary is uncalibrated between 1.8% (w3.5, False wins) and 30% (w3,
+        # True wins) 2-bit layers; 10% splits the gap. Measured on Llama-3.1 only;
+        # per-linear mixing gates measured WORSE than both globals — keep global.
+        if act_order is None or act_order == 'auto':
+            if not ('llama-3' in self.model_name.lower()):
+                act_order = False   # Qwen/Mistral: original order is stable
+            else:
+                ents = [e for l in larch for e in larch[l]]
+                if tuple_arch:
+                    frac2 = sum(int(e[0]) <= 2 for e in ents) / max(len(ents), 1)
+                    has_out = any(int(e[1]) > 0 for e in ents)
+                else:
+                    frac2 = sum(int(e) <= 2 for e in ents) / max(len(ents), 1)
+                    has_out = any(b != math.floor(b) for b in ents) and target_rank
+                act_order = (not has_out) or frac2 >= 0.10
+                print(f'[qeft] auto act_order={act_order} '
+                      f'(2bit_frac={frac2:.3f}, outliers={bool(has_out)})')
+        elif act_order is False and 'llama-3' in self.model_name.lower():
+            ents = [e for l in larch for e in larch[l]]
+            has_out = (any(int(e[1]) > 0 for e in ents) if tuple_arch
+                       else any(b != math.floor(b) for b in ents) and target_rank)
+            if not has_out:
+                print('[qeft] WARNING: Llama-3 + 0-outlier + act_order=False is '
+                      'the known chaotic config (wiki PPL 7.5<->12.4 by calib '
+                      'seed) — check PPL or pass act_order=True/auto.')
         print(f'tuple_arch : {tuple_arch}, reorder : {reorder}, act_order : {act_order}')
         print(f'n_out_dict : {n_out_dict}')
         print(f'self.arch : {self.arch}')
@@ -162,6 +199,23 @@ class QEFT(BASE):
             n_outlier)-tuple search arch and the legacy scalar/fractional arch."""
             e = larch[name][i]
             return int(e[0]) if tuple_arch else e
+
+        def _ao(name, i):
+            """Per-call act_order. act_order='per_linear' gates each linear by
+            its OWN bits: True at <=3 bits (order/compensation stability
+            dominates), False at 4 bits (act_order's group-misalignment side
+            effects dominate). Measured on the real searched archs (lcc, KIVI
+            sk8): w4 arch aoTrue 47.4 vs aoFalse 64.5; w3 arch aoTrue 53.9 vs
+            aoFalse 46.9 — opposite winners, so a single global flag cannot fit
+            mixed archs."""
+            if act_order == 'per_linear':
+                return _wbits(name, i) <= 3
+            if act_order == 'per_linear2':
+                # gate on 2-bit only: aoTrue where GPTQ original-order is
+                # numerically chaotic, aoFalse everywhere else. Discriminates
+                # "2-bit chaos" vs "avg-bits" as the arch-level gate driver.
+                return _wbits(name, i) <= 2
+            return act_order
 
         def _outidx(name, i, key):
             """FP16 outlier column indices for (name, block i), or None.
@@ -227,9 +281,10 @@ class QEFT(BASE):
                     key = f"{meta['prefix']}.{i}.{name}"
                     outidx = _outidx(name, i, key)
                     out_ids = gptq_owq[name].hessian_sorting(
-                        actorder=act_order,
+                        actorder=_ao(name, i),
                         frob_norm=frob_norm_error,
                         outidx=outidx,
+                        htop_protect=htop_protect,
                         )
                     gptq_owq[name].quantizer.out_ids = out_ids
                     gptq_owq[name].quantizer.n_out = out_ids.numel()
@@ -251,14 +306,14 @@ class QEFT(BASE):
                         global_ids = gptq_owq[name].quantizer.out_ids
                     if nearest_owq:
                         if gptq_owq[name].quantizer.reorder:
-                            gptq_owq[name].fasterquant_nearest_owq_reorder(groupsize=self.group_size, actorder=act_order)
+                            gptq_owq[name].fasterquant_nearest_owq_reorder(groupsize=self.group_size, actorder=_ao(name, i))
                         else:
-                            gptq_owq[name].fasterquant_nearest_owq(groupsize=self.group_size, actorder=act_order)
+                            gptq_owq[name].fasterquant_nearest_owq(groupsize=self.group_size, actorder=_ao(name, i))
                     else:
                         if gptq_owq[name].quantizer.reorder:
-                            gptq_owq[name].fasterquant_reorder(percdamp=percdamp, groupsize=self.group_size, actorder=act_order)
+                            gptq_owq[name].fasterquant_reorder(percdamp=percdamp, groupsize=self.group_size, actorder=_ao(name, i))
                         else:
-                            gptq_owq[name].fasterquant(percdamp=percdamp, groupsize=self.group_size, actorder=act_order)
+                            gptq_owq[name].fasterquant(percdamp=percdamp, groupsize=self.group_size, actorder=_ao(name, i))
                     quantizers[f"{meta['prefix']}.{i}.{name}"] = gptq_owq[name].quantizer
                     gptq_owq[name].free()
             
