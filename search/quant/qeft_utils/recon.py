@@ -58,7 +58,8 @@ class GPTQ_OWQ:
         self.H += inp.matmul(inp.t())
         
         
-    def hessian_sorting(self, actorder=False, frob_norm=None, outidx=None):
+    def hessian_sorting(self, actorder=False, frob_norm=None, outidx=None,
+                        htop_protect=False):
         H = self.H
 
         if not self.owq:
@@ -112,6 +113,11 @@ class GPTQ_OWQ:
             else:
                 # original-order path: honor the passed outidx (legacy QEFT
                 # behavior; also what the pre-d350089 act_order=False runs did).
+                # htop_protect swaps the dict outidx for the live H-top while
+                # KEEPING original-order quantization — isolates "which columns
+                # are FP16" from "quantization order" (mechanism experiments).
+                if htop_protect:
+                    outidx = torch.sort(descending_ids[:self.n_out])[0]
                 temp_mask[outidx] = False
                 ids = torch.cat([torch.arange(self.columns, device=self.dev)[temp_mask], outidx])
                 self.ids = ids
