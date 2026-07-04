@@ -32,7 +32,8 @@ def _resolve_device(device):
     if isinstance(device, torch.device):
         return device
     if device is None or device == 'auto':
-        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # predictor default is CPU (see predictor/factory._resolve_device); pass 'cuda' to opt in
+        return torch.device('cpu')
     dev = torch.device(device)
     if dev.type == 'cuda' and not torch.cuda.is_available():
         print("[ARDGP] CUDA requested but not available — falling back to CPU")

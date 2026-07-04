@@ -31,12 +31,14 @@ BASE_PREDICTORS = ('rbf', 'gp', 'mlp', 'carts', 'as', 'ard_gp',
 
 
 def _resolve_device(spec):
-    """'auto' → 'cuda' if visible else 'cpu'; otherwise pass through.
-    Mirrors post_search.py::_resolve_surrogate_device so the factory
-    defaults to GPU when one is available."""
-    if spec == 'auto':
-        import torch
-        return 'cuda' if torch.cuda.is_available() else 'cpu'
+    """'auto'/None → 'cpu'; otherwise pass through.
+    DEFAULT IS CPU: the RBF surrogate solves an ill-conditioned cubic-RBF saddle system whose
+    GPU (cuSOLVER) solve returns garbage on near-singular inputs (cond >~1e18 in the 2nd-stage
+    capped regime) — same matrix gives GPU ||coeff||~1e39 rho<0 vs CPU rho~1.0. CPU LAPACK is
+    stable and the fit is not the bottleneck (model evals dominate), so default to CPU. Pass an
+    explicit 'cuda'/'cuda:N' to opt back into GPU (still guarded by RBF's CPU-lstsq fallback)."""
+    if spec is None or spec == 'auto':
+        return 'cpu'
     return spec
 
 
@@ -140,8 +142,9 @@ def get_predictor(model, inputs, targets, device='auto', **kwargs):
     predictor and wrapping the result in ``TargetTransformPredictor``
     (which undoes the transform at predict time).
 
-    ``device='auto'`` (default) resolves to ``'cuda'`` when a GPU is
-    visible, else ``'cpu'``. Pass an explicit string to override.
+    ``device='auto'`` (default) resolves to ``'cpu'`` (GPU cuSOLVER is
+    unreliable on the ill-conditioned RBF saddle system — see
+    ``_resolve_device``). Pass an explicit ``'cuda'`` to opt into GPU.
     """
     import numpy as np
     device = _resolve_device(device)

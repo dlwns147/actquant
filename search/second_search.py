@@ -190,9 +190,25 @@ class SecondSearch:
             metric.append(float(list(m.values())[0]))
         return metric, comp
 
+    # ───────────────── incremental encode cache (append-only archive) ─────────────────
+    def _encode_archive(self, archive):
+        """ss.encode() with an append-only cache: the archive only GROWS (the loop appends, never
+        reorders), so encode ONLY the new tail each iter instead of re-encoding all N. Encoding is
+        ~3ms/arch pure-python and was run over the FULL archive twice per iter (_fit_predictor +
+        _next) — the dominant per-iter cost at large N (up to ~31s at N=10.5k). Returns the int
+        (N, n_var) genome matrix (callers cast to float where needed)."""
+        cache = getattr(self, '_enc_cache', None)
+        n = len(archive)
+        if cache is None or cache.shape[0] > n:              # first call / resume / (defensive) shrink
+            self._enc_cache = np.array([self.ss.encode(x[0]) for x in archive]) if n else np.empty((0, self.n_var), int)
+        elif cache.shape[0] < n:                             # append only the freshly-added tail
+            new = np.array([self.ss.encode(archive[i][0]) for i in range(cache.shape[0], n)])
+            self._enc_cache = np.vstack([cache, new])
+        return self._enc_cache
+
     # ───────────────── surrogate fit (arch input via encode_predictor, like search.py) ─────────────────
     def _fit_predictor(self, archive):
-        Xf = np.array([self.ss.encode(x[0]) for x in archive], float)        # full (N, n_var) encoding
+        Xf = self._encode_archive(archive).astype(float)                     # full (N, n_var) encoding (cached)
         targets = np.array([x[1] for x in archive])
         # active = cols that actually VARY in THIS data (constant-in-sample cols make the
         # RBF tail block singular → nan); for RBF cap dim below N (exact interpolation).
@@ -208,12 +224,11 @@ class SecondSearch:
         self.active = active                                                 # _next reads this (set before it)
         inputs = Xf[:, active]
         kwargs = {'lb': np.zeros(len(active)), 'ub': self.xu[active].astype(float)} if self.predictor == 'rbf' else {}
-        # surrogate runs its linear algebra on GPU when available (rbf/gp/ard_gp/mlp are
-        # torch-backed; device='auto'→cuda). Matters at large archive N (RBF fit is the N×N solve).
+        # surrogate device: DEFAULT is CPU now ('auto'→cpu in predictor/factory._resolve_device) —
+        # GPU cuSOLVER returns garbage on the ill-conditioned RBF saddle system. Pass
+        # --predictor_device cuda to opt into GPU (guarded by RBF's CPU-lstsq fallback).
         if not self._pred_dev_logged:
-            import torch
-            res = 'cuda' if (self._pred_device in ('auto', 'cuda') and torch.cuda.is_available()) else \
-                  ('cpu' if self._pred_device in ('auto', 'cuda') else self._pred_device)
+            res = 'cpu' if self._pred_device in ('auto', None) else self._pred_device
             print(f"[predictor] {self.predictor} on {res} (requested '{self._pred_device}')")
             self._pred_dev_logged = True
         pred = get_predictor(self.predictor, inputs, targets, device=self._pred_device, **kwargs)
@@ -234,7 +249,7 @@ class SecondSearch:
                      crossover=AxisBlockCrossover(self.nw, self.n_var),
                      mutation=mut, eliminate_duplicates=False)
         res = minimize(problem, algo, ('n_gen', 20), seed=self.args.seed, save_history=True, verbose=True)
-        Ga = np.array([self.ss.encode(x[0]) for x in archive])      # archive genomes (reused below)
+        Ga = self._encode_archive(archive)                          # archive genomes (cached; reused below)
         seen = {tuple(gg) for gg in Ga}
         g = grid_side(K, self.args.cand_grid)
         pool = res.pop.get('X')
@@ -403,7 +418,7 @@ def build_parser():
     p.add_argument('--w_expr', required=True, help='1st-stage W-axis archive dir or iter_N.stats')
     p.add_argument('--eff_kv_expr', required=True, help='1st-stage eff_kvbits archive dir or iter_N.stats')
     p.add_argument('--surrogate', default='rbf', help='arch-input predictor (rbf/gp/ard_gp/carts)')
-    p.add_argument('--predictor_device', default='auto', help="surrogate compute device: 'auto' (cuda if available) / 'cuda' / 'cuda:N' / 'cpu'")
+    p.add_argument('--predictor_device', default='auto', help="surrogate compute device: 'auto' (=cpu; GPU cuSOLVER is unreliable on the RBF saddle system) / 'cuda' / 'cuda:N' / 'cpu'")
     p.add_argument('--iterations', type=int, default=8); p.add_argument('--n_doe', type=int, default=512)
     p.add_argument('--n_iter', type=int, default=60); p.add_argument('--pop', type=int, default=92)
     p.add_argument('--seed', type=int, default=0); p.add_argument('--save', default='save/second_search/run')

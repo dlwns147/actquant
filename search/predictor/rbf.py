@@ -38,7 +38,10 @@ def _resolve_device(device):
     if isinstance(device, torch.device):
         return device
     if device is None or device == 'auto':
-        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # DEFAULT CPU: cuSOLVER returns garbage on the near-singular cubic-RBF saddle system
+        # (cond >~1e18); CPU LAPACK is stable and the fit is not the bottleneck. Pass 'cuda'
+        # explicitly to opt into GPU (still guarded by the CPU-lstsq fallback in _robust_solve).
+        return torch.device('cpu')
     dev = torch.device(device)
     if dev.type == 'cuda' and not torch.cuda.is_available():
         print("[RBF] CUDA requested but not available — falling back to CPU")
@@ -51,7 +54,8 @@ class RBF:
 
     def __init__(self, kernel='cubic', tail='linear', lb=None, ub=None,
                  eta=1e-6, device='auto', predict_batch=None,
-                 predict_mem_budget=512 * 1024 ** 2):
+                 predict_mem_budget=512 * 1024 ** 2,
+                 refine_steps=3, solve_rtol=1.0):
         self.kernel = kernel
         self.tail = tail
         self.name = 'rbf'
@@ -60,6 +64,15 @@ class RBF:
         self.ub = ub
         self.eta = eta
         self.device = _resolve_device(device)
+        # Ill-conditioned cubic-RBF saddle system (cond ~1e13 in the 2nd-stage joint space): a raw
+        # LU solve on GPU (cuSOLVER) can occasionally return garbage -> the predictor RMSE/rho
+        # spikes. Factor once, run a few float64 iterative-refinement steps (O(n^2) each, reuse the
+        # factors) to recover a blown-up solution, and only if the residual stays gross fall back to
+        # the backward-stable (but ~20x slower) lstsq/QR. All on-device -> GPU speed kept in the
+        # common case. refine_steps=0 restores the old single-solve. solve_rtol gates the fallback on
+        # ||A c - rhs||inf / ||rhs||inf (good solve ~1e-1, failed ~1e5).
+        self.refine_steps = refine_steps
+        self.solve_rtol = solve_rtol
         # query points are predicted in row-chunks so peak memory stays
         # bounded no matter how large the candidate set is (the m x n_train
         # kernel matrix is the dominant term). predict_batch fixes the chunk
@@ -155,14 +168,54 @@ class RBF:
             yt,
         ), dim=0)                                 # (ntail+n, 1)
 
-        try:
-            coeff = torch.linalg.solve(A, rhs)
-        except RuntimeError:
-            # ill-conditioned / singular — least-squares fallback
-            coeff = torch.linalg.lstsq(A, rhs).solution
+        coeff = self._robust_solve(A, rhs)
         self._coeff = coeff
         self.model = True  # sentinel so predict()'s assert mirrors old API
         return self
+
+    def _robust_solve(self, A, rhs):
+        """LU solve + iterative refinement (reuse factors) + residual-gated CPU-lstsq fallback.
+
+        The saddle matrix is near-singular; a single ``torch.linalg.solve`` can blow up on GPU.
+        Refinement (float64, O(n^2)/step) stabilises mild cases at negligible cost. But on a badly
+        conditioned system (cond >~1e18, e.g. the capped small-N regime) cuSOLVER returns garbage
+        for BOTH solve and lstsq, so when the on-device residual stays gross we fall back to a CPU
+        float64 lstsq (LAPACK gelsd, backward-stable) — the only reliable recovery. The fallback is
+        rare and cheap even at large N (~0.35s at n≈5k) since it fires only on the bad iters."""
+        tol = self.solve_rtol * (rhs.abs().max().item() + 1.0)
+
+        def resid(c):
+            return (A @ c - rhs).abs().max().item()
+
+        coeff = None
+        if self.refine_steps and self.refine_steps > 0:
+            try:
+                LU, piv = torch.linalg.lu_factor(A)
+                coeff = torch.linalg.lu_solve(LU, piv, rhs)
+                for _ in range(self.refine_steps):
+                    if resid(coeff) <= tol:
+                        break
+                    coeff = coeff + torch.linalg.lu_solve(LU, piv, rhs - A @ coeff)
+            except RuntimeError:
+                coeff = None
+        else:
+            try:
+                coeff = torch.linalg.solve(A, rhs)
+            except RuntimeError:
+                coeff = None
+
+        if coeff is None or not torch.isfinite(coeff).all() or resid(coeff) > tol:
+            # The on-device solve failed its residual check. On GPU this is cuSOLVER returning
+            # garbage on a near-singular saddle system (cond >~1e18): a device-side lstsq is ALSO
+            # unreliable there — verified on real capped-regime archives, SAME matrix gives GPU
+            # ||coeff||~1e39 rho<0 vs CPU ||coeff||~1e4 rho~1.0. So fall back to a CPU float64 lstsq
+            # (LAPACK gelsd is backward-stable at this conditioning) and copy the coefficients back.
+            # Fires only in the rare bad case, so GPU speed is kept when the system is well-behaved;
+            # when device is already CPU this is just the plain lstsq fallback (unchanged behaviour).
+            coeff = torch.linalg.lstsq(A.cpu(), rhs.cpu()).solution.to(A.device)
+            if not torch.isfinite(coeff).all():          # truly singular — last-resort pinv (CPU)
+                coeff = (torch.linalg.pinv(A.cpu()) @ rhs.cpu()).to(A.device)
+        return coeff
 
     def _chunk_rows(self, m, n):
         if self.predict_batch is not None:
