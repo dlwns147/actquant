@@ -256,9 +256,13 @@ class Search:
                 accelerator.print(self.args)
                 iter_start = time()
 
-                # construct accuracy predictor surrogate model from archive
+                # construct accuracy predictor surrogate model from archive.
+                # device defaults to CPU (predictor/factory._resolve_device: 'auto'→cpu): GPU
+                # cuSOLVER returns garbage on the ill-conditioned RBF saddle solve. Was
+                # accelerator.device (forced GPU) — pass an explicit cuda device only to opt back
+                # in (still guarded by RBF's CPU-lstsq fallback).
                 predictor_start = time()
-                metric_predictor, a_metric_pred = self._fit_predictor(archive, device=accelerator.device)
+                metric_predictor, a_metric_pred = self._fit_predictor(archive)
                 predictor_time = time() - predictor_start
 
                 # search for the next set of candidates for high-fidelity evaluation (lower level)
@@ -379,8 +383,28 @@ class Search:
 
         return metric_list, complexity_list
 
+    def _encode_archive(self, archive, fn, attr):
+        """ss encode with an append-only cache: the archive only GROWS in search() (the loop
+        appends, never reorders), so encode ONLY the freshly-added tail each iter instead of
+        re-encoding all N. Encoding is ~3ms/arch pure-python and was run over the FULL archive
+        every iter in BOTH _fit_predictor and _next — the dominant per-iter cost at large N.
+        `fn` is the ss encoder (encode / encode_predictor); `attr` names the per-encoder cache
+        slot (the two encoders give DIFFERENT encodings → separate caches). Rebuilds fully on the
+        first call / resume / (defensive) shrink; output is byte-identical to the plain re-encode."""
+        cache = getattr(self, attr, None)
+        n = len(archive)
+        if cache is None or cache.shape[0] == 0 or cache.shape[0] > n:   # cold / resume / shrink
+            enc = np.array([fn(x[0]) for x in archive])
+        elif cache.shape[0] < n:                                         # append only the new tail
+            new = np.array([fn(archive[i][0]) for i in range(cache.shape[0], n)])
+            enc = np.vstack([cache, new])
+        else:                                                            # archive unchanged
+            enc = cache
+        setattr(self, attr, enc)
+        return enc
+
     def _fit_predictor(self, archive, device='auto'):
-        inputs = np.array([self.search_space.encode_predictor(x[0]) for x in archive])
+        inputs = self._encode_archive(archive, self.search_space.encode_predictor, '_enc_pred_cache')
         targets = np.array([x[1] for x in archive])
 
         kwargs = {}
@@ -413,7 +437,7 @@ class Search:
         F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
         front = NonDominatedSorting().do(F, only_non_dominated_front=True)
         # non-dominated arch bit-strings
-        nd_X = np.array([self.search_space.encode(x[0]) for x in archive])[front]
+        nd_X = self._encode_archive(archive, self.search_space.encode, '_enc_cache')[front]
 
         # Budget-feasible comp_obj endpoint (boundary-corner) archs to always keep
         # both edges represented. Seeded into the NSGA2 sampling here, re-merged
