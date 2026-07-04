@@ -224,11 +224,13 @@ class SecondSearch:
         self.active = active                                                 # _next reads this (set before it)
         inputs = Xf[:, active]
         kwargs = {'lb': np.zeros(len(active)), 'ub': self.xu[active].astype(float)} if self.predictor == 'rbf' else {}
-        # surrogate device: DEFAULT is CPU now ('auto'→cpu in predictor/factory._resolve_device) —
-        # GPU cuSOLVER returns garbage on the ill-conditioned RBF saddle system. Pass
-        # --predictor_device cuda to opt into GPU (guarded by RBF's CPU-lstsq fallback).
+        # surrogate device: DEFAULT is GPU-when-visible ('auto'→cuda in predictor/factory.
+        # _resolve_device) — RBF's ridge-stabilised _robust_solve makes the cuSOLVER LU solve
+        # reliable on the ill-conditioned saddle. Pass --predictor_device cpu to force CPU.
         if not self._pred_dev_logged:
-            res = 'cpu' if self._pred_device in ('auto', None) else self._pred_device
+            import torch
+            auto = 'cuda' if torch.cuda.is_available() else 'cpu'
+            res = auto if self._pred_device in ('auto', None) else self._pred_device
             print(f"[predictor] {self.predictor} on {res} (requested '{self._pred_device}')")
             self._pred_dev_logged = True
         pred = get_predictor(self.predictor, inputs, targets, device=self._pred_device, **kwargs)
@@ -418,7 +420,7 @@ def build_parser():
     p.add_argument('--w_expr', required=True, help='1st-stage W-axis archive dir or iter_N.stats')
     p.add_argument('--eff_kv_expr', required=True, help='1st-stage eff_kvbits archive dir or iter_N.stats')
     p.add_argument('--surrogate', default='rbf', help='arch-input predictor (rbf/gp/ard_gp/carts)')
-    p.add_argument('--predictor_device', default='auto', help="surrogate compute device: 'auto' (=cpu; GPU cuSOLVER is unreliable on the RBF saddle system) / 'cuda' / 'cuda:N' / 'cpu'")
+    p.add_argument('--predictor_device', default='auto', help="surrogate compute device: 'auto' (=cuda when visible; the RBF saddle solve is ridge-stabilised) / 'cuda' / 'cuda:N' / 'cpu'")
     p.add_argument('--iterations', type=int, default=8); p.add_argument('--n_doe', type=int, default=512)
     p.add_argument('--n_iter', type=int, default=60); p.add_argument('--pop', type=int, default=92)
     p.add_argument('--seed', type=int, default=0); p.add_argument('--save', default='save/second_search/run')

@@ -257,10 +257,9 @@ class Search:
                 iter_start = time()
 
                 # construct accuracy predictor surrogate model from archive.
-                # device defaults to CPU (predictor/factory._resolve_device: 'auto'→cpu): GPU
-                # cuSOLVER returns garbage on the ill-conditioned RBF saddle solve. Was
-                # accelerator.device (forced GPU) — pass an explicit cuda device only to opt back
-                # in (still guarded by RBF's CPU-lstsq fallback).
+                # device defaults to GPU-when-visible (predictor/factory._resolve_device: 'auto'→
+                # cuda): RBF's ridge-stabilised _robust_solve makes the cuSOLVER LU solve reliable
+                # on the ill-conditioned saddle. Pass an explicit 'cpu' device to force CPU.
                 predictor_start = time()
                 metric_predictor, a_metric_pred = self._fit_predictor(archive)
                 predictor_time = time() - predictor_start
