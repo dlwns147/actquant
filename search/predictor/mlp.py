@@ -6,10 +6,10 @@ import gc
 
 
 def _resolve_device(device):
-    """'auto'/None → cpu (predictor default is CPU; see predictor/factory._resolve_device);
-    otherwise pass through. Pass 'cuda' explicitly to opt into GPU."""
+    """'auto'/None → 'cuda' when a GPU is visible else 'cpu' (predictor default is GPU; see
+    predictor/factory._resolve_device); otherwise pass through. Pass 'cpu' explicitly to force CPU."""
     if device is None or device == 'auto':
-        return 'cpu'
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
     return device
 # from utils import get_correlation
 # from torch.nn import DataParallel
