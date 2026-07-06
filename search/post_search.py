@@ -383,8 +383,8 @@ def run_final(args, ctx, ps, I, pf, K):
             measured[idx] = float(list(metric.values())[0])
             print(f'[verify] idx={idx} measured={measured[idx]:.6f} '
                   f'pred={pf[idx, 0]:.6f}')
-            if ('awq' in args.w_method or 'gptq' in args.w_method
-                    or 'qeft' in args.w_method):
+            if any(m in args.w_method
+                   for m in ('awq', 'gptq', 'qeft', 'awq_qeft')):
                 del model, evaluator.model
                 clean_up()
         # keep the measured-best `-n` (original meaning of -n = #archs desired)
@@ -413,8 +413,8 @@ def run_final(args, ctx, ps, I, pf, K):
 
         run_benchmarks(args, model, model_id)
 
-        if ('awq' in args.w_method or 'gptq' in args.w_method
-                or 'qeft' in args.w_method):
+        if any(m in args.w_method
+               for m in ('awq', 'gptq', 'qeft', 'awq_qeft')):
             del model, evaluator.model
             clean_up()
 
@@ -636,7 +636,7 @@ def build_parser():
     p.add_argument('--seed', type=int, default=0)
     # quant methods / bits
     p.add_argument('--w_method', type=str, nargs='+', default=[],
-                   choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'])
+                   choices=['fp16', 'awq', 'gptq', 'qeft', 'awq_qeft', 'hqq'])
     p.add_argument('--kv_method', type=str, nargs='+', default=['kivi'],
                    choices=['fp16', 'hqq', 'kivi', 'think'],
                    help="space-separated list (e.g. 'kivi think'). Matches "

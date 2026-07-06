@@ -24,6 +24,12 @@ W_METHOD=hqq
 W_METHOD_TEXT=hqq
 # W_METHOD=awq
 # W_METHOD_TEXT=awq
+# ── AWQ-based QEFT (searchable per-layer FP16 outlier columns) ──
+# Needs --outlier_path = the multi-rank dict from extract_outidx.py; its
+# ranks must cover every n_outlier the arch selects (0/32/64/96/128). The
+# w arch entries are (bits, n_outlier) tuples (from a QEFT-space archive).
+# W_METHOD=awq_qeft
+# W_METHOD_TEXT=awq_qeft
 W_BITS="2 3 4"
 AXIS=1
 W_GROUP_SIZE=128
@@ -211,6 +217,13 @@ fi
 [ ${STRIDE} -gt 0 ] && ARGS+=" --stride ${STRIDE} "
 [ ${PREFILL_PROMPT} == 'True' ] && ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
 [ ${W_METHOD} == "hqq" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS} "
+# QEFT / AWQ-QEFT: the multi-rank outlier dict from extract_outidx.py. Its
+# ranks (e.g. r32_64_96_128) must cover every n_outlier the arch selects and
+# the dataset must match how extract_outidx.sh was run.
+if [ "${W_METHOD}" == "qeft" ] || [ "${W_METHOD}" == "awq_qeft" ]; then
+    OUTLIER_PATH=/NAS/SJ/actquant/search/outlier/${MODEL_NAME}/w16_r32_64_96_128_${DATASETS}/outlier.pth
+    ARGS+=" --outlier_path ${OUTLIER_PATH} "
+fi
 if [ -n "${SECOND_EXPR}" ]; then
     # joint path: archive already holds assembled joint archs with measured JSD,
     # so the per-axis expr archives + surrogate are skipped entirely.

@@ -219,7 +219,7 @@ class LlamaEvaluator:
                                             k_pruning_dim=k_pruning_dim,
                                             v_pruning_dim=v_pruning_dim)
                 
-        elif not ('awq' in method['w'] or 'gptq' in method['w'] or 'qeft' in method['w']):
+        elif not any(m in method['w'] for m in ('awq', 'gptq', 'qeft', 'awq_qeft')):
             raise NotImplementedError(method['w'])
 
         # if 'layer_prune' in method and self.model is not None:
@@ -310,8 +310,12 @@ class LlamaEvaluator:
                         else:
                             remove_fp16_channel_hqq(ln)
 
-        elif 'awq' in self.method['w'] or 'gptq' in self.method['w'] or 'qeft' in self.method['w']:
-            w_method = 'awq' if 'awq' in self.method['w'] else 'gptq' if 'gptq' in self.method['w'] else 'qeft'
+        elif any(m in self.method['w'] for m in ('awq', 'gptq', 'qeft', 'awq_qeft')):
+            # awq_qeft must be matched before the bare 'awq'/'qeft' branches
+            # (it is its own method, not the AWQ or the GPTQ-based QEFT path).
+            w_method = ('awq_qeft' if 'awq_qeft' in self.method['w']
+                        else 'awq' if 'awq' in self.method['w']
+                        else 'gptq' if 'gptq' in self.method['w'] else 'qeft')
             # AWQ / GPTQ / QEFT load via BASE.load_model →
             # from_pretrained(torch_dtype=self.dtype). dtype='auto' picks up
             # the model config's torch_dtype (e.g. Llama-3.1-8B → bf16);
@@ -325,7 +329,8 @@ class LlamaEvaluator:
                                              group_size=self.group_size['w'],
                                              dtype=self.dtype,
                                              config=self.config,
-                                             do_owq='qeft' in self.method['w'],
+                                             do_owq=('qeft' in self.method['w']
+                                                     or 'awq_qeft' in self.method['w']),
                                              owq_path=self.outlier_raw)
             self.model.eval()
             # Resolve self.dtype → real torch.dtype now that the model is up;
