@@ -2,6 +2,7 @@ import torch
 from .awq import AWQ
 from .gptq import GPTQ
 from .qeft import QEFT
+from .awq_qeft import AWQ_QEFT
 import gc
 
 from accelerate import dispatch_model
@@ -9,7 +10,8 @@ from accelerate import dispatch_model
 METHOD = {
     'gptq': GPTQ,
     'awq': AWQ,
-    'qeft': QEFT
+    'qeft': QEFT,
+    'awq_qeft': AWQ_QEFT,
 }
 
 def get_quantized_model(method, arch, model_name, device_map, group_size=128, dtype='auto', config=None, dev='cuda', prune=False, do_owq=False, owq_path=None, **kwargs):
