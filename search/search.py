@@ -35,6 +35,7 @@ class Search:
         self.args = deepcopy(kwargs)
         self.config = config
         self.device_map = device_map
+        self.accelerator = accelerator            # for accelerator.print (main-process-only output)
 
         self.save_path = kwargs.pop('save', 'save')  # path to save results
         self.result_file = kwargs.pop('result_file', 'results.txt')  # path to save results
@@ -134,7 +135,7 @@ class Search:
                     total_sensitivity[target] = sensitivity
             total_sensitivity_list = np.nan_to_num(np.concatenate(list(total_sensitivity.values())), nan=float('inf'))
             upper_bound = np.median(total_sensitivity_list) * kwargs.pop('sensitivity_threshold', 2)
-            print(f'upper_bound: {upper_bound}')
+            self.accelerator.print(f'upper_bound: {upper_bound}')
             pass_idx_list = np.where(total_sensitivity_list > upper_bound)[0].tolist()
 
             start = 0
@@ -147,7 +148,7 @@ class Search:
 
         self.pass_module = pass_module
         self.args['pass_module'] = pass_module
-        print(f'pass_module: {pass_module}')
+        self.accelerator.print(f'pass_module: {pass_module}')
 
         self.evaluator = LlamaEvaluator(
             self.config,
@@ -446,7 +447,7 @@ class Search:
         if endpoint_archs:
             n_before = len(nd_X)
             nd_X = self._inject_endpoint_rows(nd_X, endpoint_archs)
-            print(f'anchor_endpoints: {len(endpoint_archs)} endpoint archs, '
+            self.accelerator.print(f'anchor_endpoints: {len(endpoint_archs)} endpoint archs, '
                   f'seeded {len(nd_X) - n_before} new into NSGA2 sampling')
 
         # initiate a multi-objective solver to optimize the problem
@@ -467,13 +468,13 @@ class Search:
         if endpoint_archs:
             n_before = len(res_pop)
             res_pop = self._merge_endpoint_pop(res_pop, endpoint_archs, problem)
-            print(f'anchor_endpoints: re-merged {len(res_pop) - n_before} '
+            self.accelerator.print(f'anchor_endpoints: re-merged {len(res_pop) - n_before} '
                   f'dropped endpoint archs into candidate pool')
 
         # check for duplicates
         not_duplicate = np.logical_not(
             [x in [x[0] for x in archive] for x in [self.search_space.decode(x) for x in res_pop.get("X")]])
-        print(f'not_duplicate : {sum(not_duplicate)}')
+        self.accelerator.print(f'not_duplicate : {sum(not_duplicate)}')
 
         pop = res_pop[not_duplicate]
         if sum(not_duplicate) >= K:

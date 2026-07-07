@@ -40,6 +40,8 @@ class SecondSearch:
     """Joint 2nd-stage search — same loop as search.py::Search; joint operators."""
     def __init__(self, config, args):
         self.config, self.args = config, args
+        from utils.func import init_accelerator
+        self.accelerator, self._device_map = init_accelerator(args.gpu_id, config)  # early: enables accelerator.print
         self.save_path = args.save
         self.result_file = getattr(args, 'result_file', 'results.txt')
         self.iterations, self.n_doe, self.n_iter = args.iterations, args.n_doe, args.n_iter
@@ -63,7 +65,7 @@ class SecondSearch:
         n_qeft_column, qeft_bits = derive_qeft(args.w_expr, args.eff_kv_expr)
         self._uses_qeft = qeft_bits is not None; self._n_qeft_column = n_qeft_column
         self.wbits, self.kvbits = wbits, kvbits
-        print(f"[options] w_bits={wbits} kv_bits={kvbits} gs={gs_lists} k_prune={kprune} v_prune={vprune}"
+        self.accelerator.print(f"[options] w_bits={wbits} kv_bits={kvbits} gs={gs_lists} k_prune={kprune} v_prune={vprune}"
               + (f" | QEFT n_outlier={n_qeft_column} on bits={qeft_bits}" if qeft_bits else ""))
         self.ss = LlamaSearchSpace(
             bits={'w': wbits, 'k': kvbits, 'v': kvbits},
@@ -89,7 +91,7 @@ class SecondSearch:
                              for i, c in enumerate((w_comp, kv_comp))]
         self.ss.comp_obj_min, self.ss.comp_obj_max = self.comp_obj_min, self.comp_obj_max
         box_src = 'auto' if all(v is None for v in self._box_min + self._box_max) else 'user/auto'
-        print(f"[budget box] wbits [{self.comp_obj_min[0]:.3f}, {self.comp_obj_max[0]:.3f}] | "
+        self.accelerator.print(f"[budget box] wbits [{self.comp_obj_min[0]:.3f}, {self.comp_obj_max[0]:.3f}] | "
               f"eff_kvbits [{self.comp_obj_min[1]:.3f}, {self.comp_obj_max[1]:.3f}]  ({box_src})")
         # filter pools to the comp budget box so DOE + search stay in-box (each axis filtered
         # independently → every W×KV combination stays feasible). No-op when the box is auto.
@@ -99,7 +101,7 @@ class SecondSearch:
             raise SystemExit(f"[budget box] too few in-box blocks (W {wm.sum()}, KV {km.sum()}); "
                              f"widen --comp_obj_min/max or raise --front_eps_rel")
         if wm.sum() < len(self.Wg) or km.sum() < len(self.KVg):
-            print(f"[budget box] W {len(self.Wg)}→{int(wm.sum())} | KV {len(self.KVg)}→{int(km.sum())}")
+            self.accelerator.print(f"[budget box] W {len(self.Wg)}→{int(wm.sum())} | KV {len(self.KVg)}→{int(km.sum())}")
         self.Wg, self.KVg = self.Wg[wm], self.KVg[km]
         self.w_comp, self.kv_comp = w_comp[wm], kv_comp[km]   # in-box comp (for endpoint corners)
         self.w = gene_weights(self.Wg, self.KVg)
@@ -120,26 +122,26 @@ class SecondSearch:
             km2 = (kbc >= self.comp_obj_min[1]) & (kbc <= self.comp_obj_max[1])
             self.Wseed, self.wseed_comp = Wb[wm2], wbc[wm2]
             self.KVseed, self.kvseed_comp = KVb[km2], kbc[km2]
-            print(f"[seed_pool full] band blocks W {len(self.Wseed)} | KV {len(self.KVseed)} (in-box)")
+            self.accelerator.print(f"[seed_pool full] band blocks W {len(self.Wseed)} | KV {len(self.KVseed)} (in-box)")
         if args.seed_expr:
             xW, xwc, xK, xkc, n_skip = load_extra_parts(args.seed_expr, self.ss, self._comp)
             bW, bwc = (self.Wseed, self.wseed_comp) if self.Wseed is not None else (self.Wg, self.w_comp)
             bK, bkc = (self.KVseed, self.kvseed_comp) if self.KVseed is not None else (self.KVg, self.kv_comp)
             self.Wseed = np.vstack([bW, xW]); self.wseed_comp = np.concatenate([bwc, xwc])
             self.KVseed = np.vstack([bK, xK]); self.kvseed_comp = np.concatenate([bkc, xkc])
-            print(f"[seed_expr] +{len(xW)} W / +{len(xK)} KV parts from {len(args.seed_expr)} "
+            self.accelerator.print(f"[seed_expr] +{len(xW)} W / +{len(xK)} KV parts from {len(args.seed_expr)} "
                   f"archives (skipped {n_skip} non-encodable)")
         self.contested, mf = freeze_mask(self.Wg, self.KVg, args.agree_frac)
         self.w = self.w * self.contested
         n_frozen = int((~self.contested).sum())
-        print(f"[L2 freeze] agree_frac={args.agree_frac}: frozen/agreed cells {n_frozen}/{self.n_var} "
+        self.accelerator.print(f"[L2 freeze] agree_frac={args.agree_frac}: frozen/agreed cells {n_frozen}/{self.n_var} "
               f"→ free(contested) dims {int(self.contested.sum())} "
               f"(W {int(self.contested[:self.nw].sum())}/{self.nw}, "
               f"KV {int(self.contested[self.nw:].sum())}/{self.n_var-self.nw})")
         # predictor active set is recomputed data-driven per fit (_fit_predictor): cols that
         # vary in the current archive, capped below N for RBF (else singular → nan).
         self.active = np.where(self.w > 0.05)[0]
-        print(f"[ss] n_var={self.n_var} (W-block {self.nw}, KV-block {self.n_var-self.nw}) | "
+        self.accelerator.print(f"[ss] n_var={self.n_var} (W-block {self.nw}, KV-block {self.n_var-self.nw}) | "
               f"W-blocks={len(self.Wg)} KV-blocks={len(self.KVg)} | "
               f"contested~{len(self.active)} levers(>0.5)={int((self.w>0.5).sum())}")
 
@@ -148,13 +150,13 @@ class SecondSearch:
     def _build_evaluator(self, args):
         import torch
         from evaluator import LlamaEvaluator
-        from utils.func import init_accelerator, process_dtype
-        self.accelerator, device_map = init_accelerator(args.gpu_id, self.config)
+        from utils.func import process_dtype
+        device_map = self._device_map                      # accelerator already built in __init__
         # QEFT-on-HQQ: archs with n_outlier>0 need the multi-rank outlier dict so the evaluator
         # can insert the FP16 columns per-arch. Required whenever the W archive used outliers.
         outlier = None
         if getattr(args, 'outlier_path', ''):
-            outlier = torch.load(args.outlier_path); print(f"[QEFT] outlier dict: {args.outlier_path}")
+            outlier = torch.load(args.outlier_path); self.accelerator.print(f"[QEFT] outlier dict: {args.outlier_path}")
         elif getattr(self, '_uses_qeft', False):
             # auto-locate the extract_outidx.py dict under the repo's outlier/ tree (path scheme
             # mirrors search.sh: outlier/<model>/w16_r<ranks>_<dataset>/outlier.pth). Resolved
@@ -163,7 +165,7 @@ class SecondSearch:
             root = os.path.dirname(os.path.abspath(__file__))
             cand = os.path.join(root, 'outlier', args.model_name, f'w16_r{ranks}_{args.dataset}', 'outlier.pth')
             if os.path.isfile(cand):
-                outlier = torch.load(cand); print(f"[QEFT] auto-loaded outlier dict: {cand}")
+                outlier = torch.load(cand); self.accelerator.print(f"[QEFT] auto-loaded outlier dict: {cand}")
             else:
                 raise SystemExit(f"[QEFT] W archive uses outlier columns (n_outlier={self._n_qeft_column}) "
                                  f"but no --outlier_path given and none at {cand}; pass the "
@@ -231,7 +233,7 @@ class SecondSearch:
             import torch
             auto = 'cuda' if torch.cuda.is_available() else 'cpu'
             res = auto if self._pred_device in ('auto', None) else self._pred_device
-            print(f"[predictor] {self.predictor} on {res} (requested '{self._pred_device}')")
+            self.accelerator.print(f"[predictor] {self.predictor} on {res} (requested '{self._pred_device}')")
             self._pred_dev_logged = True
         pred = get_predictor(self.predictor, inputs, targets, device=self._pred_device, **kwargs)
         return pred, pred.predict(inputs)
@@ -337,15 +339,15 @@ class SecondSearch:
         if self.args.resume:                                  # resume from an iter_<it>.stats
             rf = json.load(open(self.args.resume))
             archive = rf['archive']; start_it = rf['iteration'] + 1
-            print(f"[resume] {len(archive)} archs from iter {rf['iteration']} → start iter {start_it}")
+            self.accelerator.print(f"[resume] {len(archive)} archs from iter {rf['iteration']} → start iter {start_it}")
         else:
             archs, n_corner, n_rand = self._initialize()
             metric, comp = self._evaluate(archs)
             archive = [[a, m, *c] for a, m, c in zip(archs, metric, comp)]
-            print(f"[DOE] {len(archive)} archs ({n_corner} budget corners + {n_rand} random)  "
+            self.accelerator.print(f"[DOE] {len(archive)} archs ({n_corner} budget corners + {n_rand} random)  "
                   f"loss {min(metric):.4f}-{max(metric):.4f}  ({time()-t0:.1f}s)")
         ref_pt = np.array([np.max([x[i] for x in archive]) for i in range(1, len(self.comp_obj) + 2)])
-        print(f'data preparation time : {time() - t0:.2f}s')
+        self.accelerator.print(f'data preparation time : {time() - t0:.2f}s')
 
         for it in range(start_it, self.iterations + 1):
             iter_start = time()
@@ -358,7 +360,7 @@ class SecondSearch:
             cands, c_pred = self._next(archive, pred, self.n_iter)
             next_time = time() - next_start
             if not cands:
-                print(f"Iter {it}: no new candidates; stop"); break
+                self.accelerator.print(f"Iter {it}: no new candidates; stop"); break
             c_metric, c_comp = self._evaluate(cands)
             # check accuracy predictor's performance
             rmse, rho, tau = get_correlation(
@@ -370,15 +372,15 @@ class SecondSearch:
             hv = calc_hv(ref_pt, F); cov = front_coverage(archive, self.comp_obj)
             iter_time = time() - iter_start
             # print iteration-wise statistics (search.py format)
-            print(f"Iter {it}: hv = {hv:.2f}, iter time : {iter_time:.2f}s, "
+            self.accelerator.print(f"Iter {it}: hv = {hv:.2f}, iter time : {iter_time:.2f}s, "
                   f"predictor_time : {predictor_time:.2f}, next_time : {next_time:.2f}")
-            print(f"fitting {self.predictor}: RMSE = {rmse:.4f}, Spearman's Rho = {rho:.4f}, Kendall's Tau = {tau:.4f}")
+            self.accelerator.print(f"fitting {self.predictor}: RMSE = {rmse:.4f}, Spearman's Rho = {rho:.4f}, Kendall's Tau = {tau:.4f}")
             for obj in self.comp_obj:
                 c = cov[obj]
-                print(f"  {obj} front-coverage : {c['coverage']*100:.1f}%  "
+                self.accelerator.print(f"  {obj} front-coverage : {c['coverage']*100:.1f}%  "
                       f"front=[{c['front_min']:.3f}, {c['front_max']:.3f}] / "
                       f"full=[{c['full_min']:.3f}, {c['full_max']:.3f}]")
-            print(f'iteration time : {iter_time:.2f}s')
+            self.accelerator.print(f'iteration time : {iter_time:.2f}s')
             # dump stats + per-save_iter visualization (also always on the final iter)
             if it % self.save_iter == 0 or it == self.iterations:
                 os.makedirs(self.save_path, exist_ok=True)
@@ -389,7 +391,7 @@ class SecondSearch:
                 if self.debug:
                     save_viz(self.save_path, it, archive, c_metric, c_pred, c_comp, cov,
                              self.comp_obj, self.comp_obj_min, self.comp_obj_max)
-        print(f"[done] {len(archive)} archs, {time()-t0:.1f}s → {self.save_path}")
+        self.accelerator.print(f"[done] {len(archive)} archs, {time()-t0:.1f}s → {self.save_path}")
         self._write_results(archive, time() - t0)
         return archive
 
@@ -411,7 +413,7 @@ class SecondSearch:
                          f"full=[{c['full_min']:.3f}, {c['full_max']:.3f}] coverage {c['coverage']*100:.1f}%\n")
         with open(os.path.join(self.save_path, self.result_file), 'w') as f:
             f.writelines(lines)
-        print(f"[results] {os.path.join(self.save_path, self.result_file)}")
+        self.accelerator.print(f"[results] {os.path.join(self.save_path, self.result_file)}")
 
 
 def build_parser():
