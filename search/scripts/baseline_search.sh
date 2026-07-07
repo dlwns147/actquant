@@ -64,6 +64,9 @@ ANCHOR_LEVELS=3          # full anchor grid explodes; thin each axis to min/mid/
 CAND_EVEN=moo
 MOO_ALGO=nsga3
 MOO_GAP_STD=False
+# moo objectives: loss_cov (default, loss×coverage knee) | axis_gap (geometry-only, no loss:
+# per-axis wbits/eff_kvbits std-gap + 2D cov_rad → spread across the whole bit box)
+MOO_OBJS=loss_cov
 
 # measurement protocol (matches search.sh)
 LOSS_FUNC=jsd
@@ -118,6 +121,9 @@ ARGS="--config ${CONFIG} \
 --max_value ${MAX_VALUE} \
 --mut_prob ${MUT_PROB} \
 --crossover_prob ${CROSSOVER_PROB} \
+--cand_even ${CAND_EVEN} \
+--moo_algo ${MOO_ALGO} \
+--moo_objs ${MOO_OBJS} \
 --dataset ${DATASET} \
 --n_sample ${N_SAMPLE} \
 --seqlen ${SEQLEN} \
@@ -131,6 +137,7 @@ for g in "${KV_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 
 [ ${STRIDE} -gt 0 ] && ARGS+=" --stride ${STRIDE} "
 [ "${PREFILL_PROMPT}" == 'True' ] && ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
+[ "${MOO_GAP_STD}" == 'True' ] && ARGS+=" --moo_gap_std "
 
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=1 --num_machines=1 \
     --main_process_port=${PORT_NUM} baseline_search.py ${ARGS}

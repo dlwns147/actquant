@@ -551,10 +551,12 @@ def save_viz(save_path, it, archive, c_metric, c_pred, c_comp, cov,
                    lw=0.6, zorder=6, label='cand · measured')
         ax.scatter(comp_c[:, i], c_pred, s=46, marker='x', c='#ff7f0e', lw=1.5,
                    zorder=5, label='cand · predicted')
-        fmin, fmax = comp_obj_min[i], comp_obj_max[i]
-        pad = 0.03 * (fmax - fmin) if fmax > fmin else 0.1
-        ax.set_xlim(fmin - pad, fmax + pad)
-        ax.axvspan(fmin, fmax, color='#000000', alpha=0.025, zorder=0)
+        # x spans the ACTUAL sampled range of this comp axis (archive incl. this iter's cands),
+        # NOT the comp_obj budget box — so the panel isn't mostly empty when the budget bound
+        # (e.g. wbits max 5) is far looser than what the search actually reaches (~4.1).
+        dmin, dmax = float(comp.min()), float(comp.max())
+        pad = 0.03 * (dmax - dmin) if dmax > dmin else 0.1
+        ax.set_xlim(dmin - pad, dmax + pad)
         ax.set_xlabel(obj); ax.grid(True, which='both', ls=':', c='0.8', lw=0.6); ax.set_axisbelow(True)
         ax.set_title(f"{obj}  ·  front-coverage {cov[obj]['coverage'] * 100:.0f}%")
     axes[0].set_ylabel('loss')
@@ -569,8 +571,11 @@ def save_viz(save_path, it, archive, c_metric, c_pred, c_comp, cov,
         ax.scatter(comp_c[:, 0], comp_c[:, 1], s=46, marker='o', facecolors='none',
                    edgecolors='#d62728', lw=1.4, zorder=4, label='cand · this iter')
         ax.set_xlabel(comp_obj[0]); ax.set_ylabel(comp_obj[1])
-        ax.set_xlim(comp_obj_min[0], comp_obj_max[0])
-        ax.set_ylim(comp_obj_min[1], comp_obj_max[1])
+        # limits = actual sampled ranges (both axes), not the comp_obj budget box
+        wr, kr = wx.max() - wx.min(), ky.max() - ky.min()
+        wpad = 0.03 * wr if wr > 0 else 0.1; kpad = 0.03 * kr if kr > 0 else 0.1
+        ax.set_xlim(wx.min() - wpad, wx.max() + wpad)
+        ax.set_ylim(ky.min() - kpad, ky.max() + kpad)
         ax.set_title(f'joint  {comp_obj[0]} × {comp_obj[1]}  ·  colour = loss')
         ax.legend(loc='upper right', fontsize=9); ax.grid(True, ls=':', c='0.8', lw=0.6); ax.set_axisbelow(True)
         fig.colorbar(sc, ax=ax, label='loss', shrink=0.92)
