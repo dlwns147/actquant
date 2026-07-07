@@ -608,7 +608,8 @@ def even_select(comp, score, K, g, lo, hi):
 
 
 def moo_subset_select(comp, pred, K, comp_min, comp_max, g, algo='nsga3',
-                      pop=80, n_gen=80, seed=0, gap_std=False, coverage='rad'):
+                      pop=80, n_gen=80, seed=0, gap_std=False, coverage='rad',
+                      objs='loss_cov'):
     """Pick K candidate indices (into `comp`/`pred`) by a 2/3-objective subset-selection GA
     that balances arch QUALITY against even COVERAGE of the [comp_min, comp_max] box —
     the principled replacement for a hard exploit/explore split (validated in tests/:
@@ -624,6 +625,16 @@ def moo_subset_select(comp, pred, K, comp_min, comp_max, g, algo='nsga3',
         obj3 (gap_std=True) = the OTHER criterion added as a 3rd objective (both at once;
               tested: dilutes the quality objective in the knee — not recommended for the
               closed-loop; per-iter subset evenness does not compound into archive evenness).
+    objs='axis_gap' REPLACES the (loss × coverage) objectives with a GEOMETRY-ONLY set and NO
+        loss: ONE std-of-gaps objective PER comp axis PLUS the 2D covering radius
+        (n_obj = d + 1 = 3 → (wbits_gap, eff_kvbits_gap, cov_rad); NSGA trades per-axis marginal
+        evenness against 2D reach, then the same knee is returned). This is the
+        search.py::SubsetProblem "even-spacing only" idea, but per-axis + 2D: unit-box normalised
+        so the differently-scaled wbits/eff_kvbits axes weigh equally (instead of the larger-gap
+        axis dominating a pooled std), and cov_rad closes the marginal blind spot (a diagonal has
+        even marginals but a large 2D hole — cov_rad penalises it, the per-axis gaps keep each
+        bit-axis evenly stepped). Use when the (loss × coverage) knee clusters candidates in one
+        bit-region instead of covering the whole (wbits × eff_kvbits) box.
     Solved with NSGA-III (reference-direction; default) or NSGA-II, then the KNEE of the
     Pareto front (argmin of the min-max-normalised objective sum) is returned = the balanced
     explore↔exploit subset. Guarantees K picks: any de-dup shortfall is filled by farthest-
@@ -658,14 +669,24 @@ def moo_subset_select(comp, pred, K, comp_min, comp_max, g, algo='nsga3',
     _r = np.empty(N); _r[np.argsort(pred, kind='stable')] = np.arange(N)
     Ln = _r / max(N - 1, 1)
     rng = np.random.RandomState(int(seed))
-    n_obj = 3 if gap_std else 2
+    n_obj = (d + 1) if objs == 'axis_gap' else (3 if gap_std else 2)
 
     class SubProb(Problem):
         def __init__(self): super().__init__(n_var=K, n_obj=n_obj, n_constr=0, xl=0, xu=N - 1, vtype=int)
         def _evaluate(self, X, out, *a, **k):
             Xi = X.astype(int)
-            f_loss = Ln[Xi].mean(1)
             dup = np.array([K - len(set(r.tolist())) for r in Xi], float) / K   # penalise dup picks
+            if objs == 'axis_gap':                               # GEOMETRY-ONLY (no loss): per-axis std-of-gaps + 2D cov_rad
+                picks = cn[Xi]                                   # (npop, K, d) in the unit box
+                cols = []
+                for ax in range(d):                              # marginal evenness per axis: (wbits_gap, eff_kvbits_gap)
+                    Sd = np.sort(picks[:, :, ax], axis=1)
+                    cols.append(np.std(np.diff(Sd, axis=1), axis=1) + dup)
+                cov_rad = np.array([cdist(centers, cn[row]).min(1).max() for row in Xi])  # 2D reach (biggest hole)
+                cols.append(cov_rad + dup)                       # → n_obj = d + 1 = (wbits_gap, eff_kvbits_gap, cov_rad)
+                out['F'] = np.column_stack(cols)
+                return
+            f_loss = Ln[Xi].mean(1)
             need_rad = (coverage == 'rad') or gap_std
             need_gap = (coverage == 'gap') or gap_std
             f_cov = (np.array([cdist(centers, cn[row]).min(1).max() for row in Xi])

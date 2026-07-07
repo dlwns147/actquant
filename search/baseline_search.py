@@ -44,6 +44,7 @@ class BaselineJointSearch(Search):
         self.moo_gen = a.get('moo_gen', 80)
         self.moo_coverage = a.get('moo_coverage', 'rad')
         self.moo_gap_std = a.get('moo_gap_std', False)
+        self.moo_objs = a.get('moo_objs', 'loss_cov')
         self.al_frac = a.get('al_frac', 0.0)
         self.xu = self._encoding_xu()
 
@@ -111,11 +112,11 @@ class BaselineJointSearch(Search):
                 idx = np.asarray(maximin_extras(z, anchor_idx=[], K=K_sel, seed=self.seed), int)
             elif self.cand_even == 'grid':                  # per-axis-even quota over the box
                 idx = np.asarray(even_select(comp, predr, K_sel, g, self.comp_obj_min, self.comp_obj_max), int)
-            elif self.cand_even == 'moo':                   # 2/3-obj (loss × coverage [× gap-std]) knee
+            elif self.cand_even == 'moo':                   # loss×coverage knee, OR geometry-only axis_gap+cov_rad
                 idx = np.asarray(moo_subset_select(comp, predr, K_sel, self.comp_obj_min, self.comp_obj_max, g,
                                                    algo=self.moo_algo, pop=self.moo_pop, n_gen=self.moo_gen,
                                                    seed=self.seed, gap_std=self.moo_gap_std,
-                                                   coverage=self.moo_coverage), int)
+                                                   coverage=self.moo_coverage, objs=self.moo_objs), int)
             else:                                           # hybrid: front pressure + grid-even coverage
                 k_even = int(round(self.even_frac * K_sel)); k_front = K_sel - k_even
                 fr = np.argsort(predr)[:k_front]
@@ -253,6 +254,11 @@ def build_parser():
     p.add_argument('--moo_gen', type=int, default=80)
     p.add_argument('--moo_coverage', default='rad', choices=['rad', 'gap'])
     p.add_argument('--moo_gap_std', action='store_true', help='moo: add gap-std as a 3rd objective')
+    p.add_argument('--moo_objs', default='loss_cov', choices=['loss_cov', 'axis_gap'],
+                   help="moo objectives: 'loss_cov' (default) = (mean pred-loss × coverage[+gap_std]) knee; "
+                        "'axis_gap' = GEOMETRY-ONLY, NO loss = one std-of-gaps objective per comp axis "
+                        "(wbits, eff_kvbits) + 2D cov_rad → spreads candidates across the whole bit box "
+                        "instead of clustering where the loss knee pulls")
     p.add_argument('--al_frac', type=float, default=0.0, help='fraction of K reserved for farthest-from-archive AL picks')
 
     # objectives (the 3-D joint front). Bounds must be generous enough that DOE boundary
