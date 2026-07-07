@@ -32,6 +32,7 @@ from utils.second_stage import save_viz
 class BaselineJointSearch(Search):
     def __init__(self, config, accelerator, device_map, kwargs):
         super().__init__(config, accelerator, device_map, kwargs)
+        self.accelerator = accelerator            # for accelerator.print (main-process-only output)
         a = self.args
         self.ref_partitions = a.get('ref_partitions', 12)  # 3-obj/12-part = 91 ref dirs
         self.seed = a.get('seed', 0)
@@ -74,7 +75,7 @@ class BaselineJointSearch(Search):
 
         ref_dirs = get_reference_directions("das-dennis", len(self.comp_obj) + 1, n_partitions=self.ref_partitions)
         if self.ga_pop_size < len(ref_dirs):
-            print(f'[NSGA3] warning: ga_pop_size ({self.ga_pop_size}) < #ref_dirs ({len(ref_dirs)})')
+            self.accelerator.print(f'[NSGA3] warning: ga_pop_size ({self.ga_pop_size}) < #ref_dirs ({len(ref_dirs)})')
         method = NSGA3(pop_size=self.ga_pop_size, ref_dirs=ref_dirs, sampling=nd_X,
                        crossover=BinomialCrossover(prob=self.crossover_prob, n_offsprings=1),
                        mutation=IntMutation(prob=self.mut_prob),
@@ -92,7 +93,7 @@ class BaselineJointSearch(Search):
         seen = {tuple(g) for g in Ga}
         Xc = np.unique(np.clip(np.round(res_pop.get('X')), 0, self.xu).astype(int), axis=0)
         Xc = np.array([g for g in Xc if tuple(g) not in seen])
-        print(f'not_duplicate : {len(Xc)}')
+        self.accelerator.print(f'not_duplicate : {len(Xc)}')
         if len(Xc) == 0:
             return [], np.zeros((0, 1))
 
@@ -142,14 +143,14 @@ class BaselineJointSearch(Search):
         t0 = time(); start_it = 1
         if self.resume:                                       # resume from an iter_<it>.stats
             archive, start_it = self._resume_from_dir()
-            print(f"[resume] {len(archive)} archs → start iter {start_it}")
+            self.accelerator.print(f"[resume] {len(archive)} archs → start iter {start_it}")
         else:
             archs = self.search_space.initialize(self.n_doe, anchor_levels=self.anchor_levels)
             metric, comp = self._evaluate(archs, accelerator)
             archive = [[a, m, *c] for a, m, c in zip(archs, metric, comp)]
-            print(f"[DOE] {len(archive)} archs  loss {min(metric):.4f}-{max(metric):.4f}  ({time()-t0:.1f}s)")
+            self.accelerator.print(f"[DOE] {len(archive)} archs  loss {min(metric):.4f}-{max(metric):.4f}  ({time()-t0:.1f}s)")
         ref_pt = np.array([np.max([x[i] for x in archive]) for i in range(1, len(self.comp_obj) + 2)])
-        print(f'data preparation time : {time()-t0:.2f}s')
+        self.accelerator.print(f'data preparation time : {time()-t0:.2f}s')
 
         for it in range(start_it, self.iterations + 1):
             iter_start = time()
@@ -160,7 +161,7 @@ class BaselineJointSearch(Search):
             cands, c_pred = self._next(archive, predictor, self.n_iter)
             next_time = time() - next_start
             if not cands:
-                print(f"Iter {it}: no new candidates; stop"); break
+                self.accelerator.print(f"Iter {it}: no new candidates; stop"); break
             c_metric, c_comp = self._evaluate(cands, accelerator)
             # check accuracy predictor's performance (ravel like second_search.py so RMSE is exact)
             rmse, rho, tau = get_correlation(
@@ -171,15 +172,15 @@ class BaselineJointSearch(Search):
             F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
             hv = self._calc_hv(ref_pt, F); cov = self._front_coverage(archive)
             iter_time = time() - iter_start
-            print(f"Iter {it}: hv = {hv:.2f}, iter time : {iter_time:.2f}s, "
+            self.accelerator.print(f"Iter {it}: hv = {hv:.2f}, iter time : {iter_time:.2f}s, "
                   f"predictor_time : {predictor_time:.2f}, next_time : {next_time:.2f}")
-            print(f"fitting {self.predictor}: RMSE = {rmse:.4f}, Spearman's Rho = {rho:.4f}, Kendall's Tau = {tau:.4f}")
+            self.accelerator.print(f"fitting {self.predictor}: RMSE = {rmse:.4f}, Spearman's Rho = {rho:.4f}, Kendall's Tau = {tau:.4f}")
             for obj in self.comp_obj:
                 c = cov[obj]
-                print(f"  {obj} front-coverage : {c['coverage']*100:.1f}%  "
+                self.accelerator.print(f"  {obj} front-coverage : {c['coverage']*100:.1f}%  "
                       f"front=[{c['front_min']:.3f}, {c['front_max']:.3f}] / "
                       f"full=[{c['full_min']:.3f}, {c['full_max']:.3f}]")
-            print(f'iteration time : {iter_time:.2f}s')
+            self.accelerator.print(f'iteration time : {iter_time:.2f}s')
             # dump stats (+ per-save_iter viz), also always on the final iter
             if it % self.save_iter == 0 or it == self.iterations:
                 os.makedirs(self.save_path, exist_ok=True)
@@ -192,7 +193,7 @@ class BaselineJointSearch(Search):
                 if self.debug:
                     save_viz(self.save_path, it, archive, c_metric, c_pred, c_comp, cov,
                              self.comp_obj, self.comp_obj_min, self.comp_obj_max)
-        print(f"[done] {len(archive)} archs, {time()-t0:.1f}s → {self.save_path}")
+        self.accelerator.print(f"[done] {len(archive)} archs, {time()-t0:.1f}s → {self.save_path}")
         self._write_results(archive, time() - t0)
         return archive
 
@@ -214,7 +215,7 @@ class BaselineJointSearch(Search):
                          f"full=[{c['full_min']:.3f}, {c['full_max']:.3f}] coverage {c['coverage']*100:.1f}%\n")
         with open(os.path.join(self.save_path, self.result_file), 'w') as f:
             f.writelines(lines)
-        print(f"[results] {os.path.join(self.save_path, self.result_file)}")
+        self.accelerator.print(f"[results] {os.path.join(self.save_path, self.result_file)}")
 
 
 def build_parser():

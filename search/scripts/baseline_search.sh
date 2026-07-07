@@ -20,6 +20,16 @@ W_METHOD=hqq
 W_BITS="2 3 4"; W_BITS_TEXT="234"
 W_GROUP_SIZE=128; AXIS=1
 
+# USE_QEFT=False
+USE_QEFT=True
+if [ "${USE_QEFT}" == "True" ]; then
+    N_QEFT_COLUMN="0 32 64 96 128"
+    BASE_OUTLIER_BITS="2 3"
+    N_OUTLIER=128
+    QEFT_RANK_TEXT=32_64_96_128
+    QEFT_OUTLIER_DATASET=wikitext2
+fi
+
 # KV bits + group size + ThinK prune
 KV_METHOD="kivi think"
 KV_BITS="2 3 4"; KV_BITS_TEXT="234"
@@ -64,9 +74,7 @@ ANCHOR_LEVELS=3          # full anchor grid explodes; thin each axis to min/mid/
 CAND_EVEN=moo
 MOO_ALGO=nsga3
 MOO_GAP_STD=False
-# moo objectives: loss_cov (default, loss×coverage knee) | axis_gap (geometry-only, no loss:
-# per-axis wbits/eff_kvbits std-gap + 2D cov_rad → spread across the whole bit box)
-MOO_OBJS=loss_cov
+MOO_OBJS=axis_gap
 
 # measurement protocol (matches search.sh)
 LOSS_FUNC=jsd
@@ -83,7 +91,9 @@ CROSSOVER_PROB=0.9
 
 SINK_TAG=""; [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
 PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
-SAVE=save/baseline_search/${TODAY}_${MODEL_NAME}_baseline_joint_${W_METHOD_TEXT}_${KV_METHOD_TEXT}${SINK_TAG}_${SURROGATE}_nsga3p${REF_PARTITIONS}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${GA_POP_SIZE}_st${STRIDE}${PP_TAG}_s${SEED}
+QEFT_TAG=""; [ -n "${N_QEFT_COLUMN}" ] && QEFT_TAG="_qc$(echo ${N_QEFT_COLUMN} | sed 's/ /-/g')_ob$(echo ${BASE_OUTLIER_BITS} | sed 's/ //g')"
+DS_TAG="_${CAND_EVEN}"; [ "${CAND_EVEN}" == "moo" ] && [ "${MOO_OBJS}" == "axis_gap" ] && DS_TAG="_moo_axg"
+SAVE=save/baseline_search/${TODAY}_${MODEL_NAME}_baseline_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}${SINK_TAG}_${SURROGATE}_nsga3p${REF_PARTITIONS}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${GA_POP_SIZE}_st${STRIDE}${PP_TAG}${DS_TAG}_s${SEED}
 
 echo "BASELINE-SEARCH -> ${SAVE}"
 
@@ -138,6 +148,14 @@ for g in "${KV_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 [ ${STRIDE} -gt 0 ] && ARGS+=" --stride ${STRIDE} "
 [ "${PREFILL_PROMPT}" == 'True' ] && ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
 [ "${MOO_GAP_STD}" == 'True' ] && ARGS+=" --moo_gap_std "
+
+if [ -n "${N_QEFT_COLUMN}" ]; then
+    OUTLIER_PATH=/NAS/SJ/actquant/search/outlier/${MODEL_NAME}/w16_r${QEFT_RANK_TEXT}_${QEFT_OUTLIER_DATASET}/outlier.pth
+    ARGS+=" --n_qeft_column ${N_QEFT_COLUMN} \
+    --base_outlier_bits ${BASE_OUTLIER_BITS} \
+    --outlier_path ${OUTLIER_PATH} \
+    --n_outlier ${N_OUTLIER} "
+fi
 
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=1 --num_machines=1 \
     --main_process_port=${PORT_NUM} baseline_search.py ${ARGS}
