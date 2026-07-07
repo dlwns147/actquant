@@ -54,6 +54,17 @@ class LlamaSearchSpace:
         [w_indices..., k_indices..., v_indices..., k_dim_indices..., v_dim_indices...]
     """
 
+    # comp_obj → per-layer knob groups it controls, for stratified DOE sampling
+    # (w=weight bits, k/v=KV bits, kd/vd=ThinK prune dims). Each comp_obj gets its own
+    # independent complexity level; a knob group inherits the level of the comp_obj that
+    # drives it so that axis is spread evenly and independent axes stay decoupled.
+    _COMP_GROUPS = {
+        'wbits': ('w',), 'memory': ('w', 'k', 'v', 'kd', 'vd'),
+        'kvbits': ('k', 'v'), 'kbits': ('k',), 'vbits': ('v',),
+        'kvdim': ('kd', 'vd'), 'kdim': ('kd',), 'vdim': ('vd',),
+        'eff_kvbits': ('k', 'v', 'kd', 'vd'), 'eff_kbits': ('k', 'kd'), 'eff_vbits': ('v', 'vd'),
+    }
+
     def __init__(self,
                  bits,
                  group_size,
@@ -263,11 +274,23 @@ class LlamaSearchSpace:
             'gate_proj': w_gate, 'up_proj': w_up, 'down_proj': w_down,
         }
 
-        # Evenly spaced (jittered) complexity levels, one per requested arch.
-        levels = None
+        # One INDEPENDENT stratified level per comp_obj axis (Latin-hypercube: each axis
+        # marginally even, permuted independently) so EVERY comp_obj is spread evenly AND the
+        # axes are decoupled. A single shared level ties the axes together (diagonal DOE, e.g.
+        # high-wbits⇔high-eff_kvbits, leaving the off-diagonal box empty). Each per-layer knob
+        # group (w / k-bits / v-bits / k-dim / v-dim) inherits the level of the comp_obj it drives
+        # (_COMP_GROUPS); groups sharing a comp_obj co-vary (spread that axis), groups in
+        # different comp_objs are independent (decouple), and a group in NO comp_obj (a frozen /
+        # non-searched axis, e.g. W during an eff_kvbits search) gets its own level (harmless).
+        group_levels = None
         if stratify and n_samples > 0:
-            levels = (np.arange(n_samples) + np.random.rand(n_samples)) / n_samples
-            np.random.shuffle(levels)
+            def _lvl():
+                a = (np.arange(n_samples) + np.random.rand(n_samples)) / n_samples
+                np.random.shuffle(a); return a
+            comp_lvl = {o: _lvl() for o in self.comp_obj}            # one level array per comp_obj
+            group_levels = {g: (comp_lvl[next(o for o in self.comp_obj if g in self._COMP_GROUPS.get(o, ()))]
+                                if any(g in self._COMP_GROUPS.get(o, ()) for o in self.comp_obj) else _lvl())
+                            for g in ('w', 'k', 'v', 'kd', 'vd')}
 
         data = []
         for j in tqdm(range(n_samples), desc='Sampling'):
@@ -275,10 +298,16 @@ class LlamaSearchSpace:
             while True:
                 # Fall back to a random level if a sample's target band is hard
                 # to hit (so the comp_obj filter can never deadlock the loop).
-                t = None if levels is None else (levels[j] if attempt < 50 else np.random.rand())
+                if group_levels is None:
+                    t_w = t_k = t_v = t_kd = t_vd = None
+                elif attempt < 50:
+                    t_w, t_k, t_v = group_levels['w'][j], group_levels['k'][j], group_levels['v'][j]
+                    t_kd, t_vd = group_levels['kd'][j], group_levels['vd'][j]
+                else:
+                    t_w, t_k, t_v, t_kd, t_vd = np.random.rand(5)
 
                 sampled = {}
-                if t is None:
+                if t_w is None:
                     prob = np.random.rand(self.rand_size)
                     for proj_name, options in w_per_proj.items():
                         p = prob[np.array([self._w_opt_index(_x, proj_name) for _x in options])]
@@ -301,7 +330,7 @@ class LlamaSearchSpace:
                     for proj_name, options in w_per_proj.items():
                         full = getattr(self, f'{proj_name}_option')
                         idxs = np.array([self._w_opt_index(_x, proj_name) for _x in options])
-                        p = self._level_weight(len(full), t, tilt_sigma, ascending=True)[idxs]
+                        p = self._level_weight(len(full), t_w, tilt_sigma, ascending=True)[idxs]
                         p = p / p.sum()
                         if self.w_outlier:
                             sel = np.random.choice(len(options), size=nb, p=p, replace=True)
@@ -309,10 +338,10 @@ class LlamaSearchSpace:
                         else:
                             sampled[proj_name] = np.random.choice(options, size=nb, p=p, replace=True).tolist()
 
-                    kv_k_list = self._pick_kv_level(kv_k, self.k_option, t, tilt_sigma, nb)
-                    kv_v_list = self._pick_kv_level(kv_v, self.v_option, t, tilt_sigma, nb)
-                    k_dim_list = self._pick_dim_level(k_dim_opts, self.k_pruning_dim_option, t, tilt_sigma, nb)
-                    v_dim_list = self._pick_dim_level(v_dim_opts, self.v_pruning_dim_option, t, tilt_sigma, nb)
+                    kv_k_list = self._pick_kv_level(kv_k, self.k_option, t_k, tilt_sigma, nb)
+                    kv_v_list = self._pick_kv_level(kv_v, self.v_option, t_v, tilt_sigma, nb)
+                    k_dim_list = self._pick_dim_level(k_dim_opts, self.k_pruning_dim_option, t_kd, tilt_sigma, nb)
+                    v_dim_list = self._pick_dim_level(v_dim_opts, self.v_pruning_dim_option, t_vd, tilt_sigma, nb)
 
                 # Apply pass_module constraints (freeze at max option)
                 for linear in self.pass_module['w']:
