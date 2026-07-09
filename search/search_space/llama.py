@@ -64,7 +64,6 @@ class LlamaSearchSpace:
         'kvdim': ('kd', 'vd'), 'kdim': ('kd',), 'vdim': ('vd',),
         'eff_kvbits': ('k', 'v', 'kd', 'vd'), 'eff_kbits': ('k', 'kd'), 'eff_vbits': ('v', 'vd'),
     }
-
     def __init__(self,
                  bits,
                  group_size,
@@ -175,11 +174,7 @@ class LlamaSearchSpace:
 
         self.pass_idx_list = sorted(set(self.pass_idx_list))
 
-        # prob[] is indexed by option position during sampling, so it must be at
-        # least as long as the largest option list (QEFT tuples can exceed rand_size).
-        self.rand_size = max(rand_size,
-                             len(self.q_proj_option), len(self.gate_proj_option),
-                             len(self.o_proj_option), len(self.k_option), len(self.v_option))
+        self.rand_size = rand_size
 
         print(f'w_outlier : {self.w_outlier}, n_qeft_column : {self.n_qeft_column}')
         print(f'q_proj_option : {self.q_proj_option}')
@@ -214,46 +209,21 @@ class LlamaSearchSpace:
         return cols
 
     # ------------------------------------------------------------------ sampling
-    @staticmethod
-    def _level_weight(m, t, sigma, ascending=True):
-        """Gaussian weight over m complexity-ordered options, peaked at level
-        t in [0,1]. Option lists run low->high effective complexity, so a higher
-        t favours higher-complexity options; ascending=False mirrors the peak to
-        1-t for the prune axes (a larger prune index removes more channels = LESS
-        complexity). m<=1 -> flat (single/frozen option)."""
-        if m <= 1:
-            return np.ones(max(m, 1))
-        grid = np.linspace(0.0, 1.0, m)
-        center = t if ascending else 1.0 - t
-        return np.exp(-0.5 * ((grid - center) / sigma) ** 2)
-
-    def _pick_kv_level(self, cand, full_option, t, sigma, nb):
-        """Per-layer KV (bits, gs) pick biased toward complexity-level t."""
-        idxs = np.array([np.argwhere((np.array(x) == np.array(full_option)).all(axis=1))[0, 0] for x in cand])
-        p = self._level_weight(len(full_option), t, sigma, ascending=True)[idxs]
-        sel = np.random.choice(len(cand), size=nb, p=p / p.sum(), replace=True)
-        return np.array(cand)[sel].tolist()
-
-    def _pick_dim_level(self, cand, full_option, t, sigma, nb):
-        """Per-layer prune-dim pick biased toward complexity-level t (reversed:
-        more pruning = less complexity)."""
-        idxs = np.array([list(full_option).index(int(d)) for d in cand])
-        p = self._level_weight(len(full_option), t, sigma, ascending=False)[idxs]
-        sel = np.random.choice(len(cand), size=nb, p=p / p.sum(), replace=True)
-        return np.array(cand)[sel].tolist()
+    def _pick_level(self, cand, t, nb, ascending=True):
+        """Per-layer pick from the complexity-ordered `cand`: option index ~
+        Binomial(len-1, t), so the arch mean tracks t and t=0/1 hit the exact
+        bottom/top option. ascending=False mirrors t for the prune axes
+        (larger prune index = less complexity)."""
+        idx = np.random.binomial(len(cand) - 1, t if ascending else 1.0 - t, size=nb)
+        return [cand[i] for i in idx]
 
     def sample(self, n_samples=1, nb=None, w=None, k=None, v=None,
-               k_dim=None, v_dim=None, pool=[], stratify=True, tilt_sigma=0.3):
+               k_dim=None, v_dim=None, pool=[]):
         """Randomly sample architectures in the canonical arch format.
 
-        stratify=True (default) spreads the samples evenly across the comp_obj
-        range: each arch targets a complexity level t in [0,1] (levels laid out
-        evenly over the batch), and every per-layer choice is biased toward t
-        (see _level_weight). Without it, independent-uniform per-layer picks make
-        the arch-level average (e.g. eff_kvbits) concentrate at its CLT mean, so
-        the tails of [min,max] stay empty. stratify=False = legacy uniform draw.
-        tilt_sigma sets the per-arch precision spread (smaller = more uniform
-        within an arch / tighter mean; 0.3 keeps archs mixed-precision)."""
+        Each arch draws one complexity level t ~ U[0,1] per comp_obj and picks
+        per-layer options around it (_pick_level), spreading every comp_obj
+        over its full [min, max] range instead of clustering at the CLT mean."""
         nb = self.n_block if nb is None else nb
 
         w_q    = self.q_proj_option    if w is None else w[0]
@@ -274,74 +244,47 @@ class LlamaSearchSpace:
             'gate_proj': w_gate, 'up_proj': w_up, 'down_proj': w_down,
         }
 
-        # One INDEPENDENT stratified level per comp_obj axis (Latin-hypercube: each axis
-        # marginally even, permuted independently) so EVERY comp_obj is spread evenly AND the
-        # axes are decoupled. A single shared level ties the axes together (diagonal DOE, e.g.
-        # high-wbits⇔high-eff_kvbits, leaving the off-diagonal box empty). Each per-layer knob
-        # group (w / k-bits / v-bits / k-dim / v-dim) inherits the level of the comp_obj it drives
-        # (_COMP_GROUPS); groups sharing a comp_obj co-vary (spread that axis), groups in
-        # different comp_objs are independent (decouple), and a group in NO comp_obj (a frozen /
-        # non-searched axis, e.g. W during an eff_kvbits search) gets its own level (harmless).
-        group_levels = None
-        if stratify and n_samples > 0:
-            def _lvl():
-                a = (np.arange(n_samples) + np.random.rand(n_samples)) / n_samples
-                np.random.shuffle(a); return a
-            comp_lvl = {o: _lvl() for o in self.comp_obj}            # one level array per comp_obj
-            group_levels = {g: (comp_lvl[next(o for o in self.comp_obj if g in self._COMP_GROUPS.get(o, ()))]
-                                if any(g in self._COMP_GROUPS.get(o, ()) for o in self.comp_obj) else _lvl())
-                            for g in ('w', 'k', 'v', 'kd', 'vd')}
+        # One level per comp_obj; knob groups inherit the level of the comp_obj they
+        # drive (_COMP_GROUPS): same-comp_obj groups co-vary (spread that axis),
+        # different comp_objs stay independent (no diagonal DOE), ungrouped knobs get
+        # their own level. Mixed bit+prune comp_objs split the level anti-diagonally
+        # (bits = base+d, prune = base-d, d uniform over the feasible range): the axis
+        # value still tracks base — full spread, exact corners — while d sweeps the
+        # bits↔prune combinations that realise it.
+        _bits, _prune = ('w', 'k', 'v'), ('kd', 'vd')
+        comp_lvl = {}
+        for o in self.comp_obj:
+            grps = self._COMP_GROUPS.get(o, ())
+            base = np.random.rand(n_samples)
+            mixed = any(g in _bits for g in grps) and any(g in _prune for g in grps)
+            d = (np.random.rand(n_samples) * 2 - 1) * np.minimum(base, 1 - base) if mixed else 0.0
+            comp_lvl[o] = {'bits': base + d, 'prune': base - d}
+        group_levels = {}
+        for g in ('w', 'k', 'v', 'kd', 'vd'):
+            drv = next((o for o in self.comp_obj if g in self._COMP_GROUPS.get(o, ())), None)
+            role = 'prune' if g in _prune else 'bits'
+            group_levels[g] = comp_lvl[drv][role] if drv is not None else np.random.rand(n_samples)
 
         data = []
         for j in tqdm(range(n_samples), desc='Sampling'):
             attempt = 0
             while True:
-                # Fall back to a random level if a sample's target band is hard
-                # to hit (so the comp_obj filter can never deadlock the loop).
-                if group_levels is None:
-                    t_w = t_k = t_v = t_kd = t_vd = None
-                elif attempt < 50:
+                # after 50 rejected attempts, re-roll the levels so the comp_obj filter can't deadlock
+                if attempt < 50:
                     t_w, t_k, t_v = group_levels['w'][j], group_levels['k'][j], group_levels['v'][j]
                     t_kd, t_vd = group_levels['kd'][j], group_levels['vd'][j]
                 else:
                     t_w, t_k, t_v, t_kd, t_vd = np.random.rand(5)
 
                 sampled = {}
-                if t_w is None:
-                    prob = np.random.rand(self.rand_size)
-                    for proj_name, options in w_per_proj.items():
-                        p = prob[np.array([self._w_opt_index(_x, proj_name) for _x in options])]
-                        p = p / p.sum()
-                        if self.w_outlier:
-                            sel = np.random.choice(len(options), size=nb, p=p, replace=True)
-                            sampled[proj_name] = [list(options[i]) for i in sel]
-                        else:
-                            sampled[proj_name] = np.random.choice(options, size=nb, p=p, replace=True).tolist()
+                for proj_name, options in w_per_proj.items():
+                    picks = self._pick_level(options, t_w, nb)
+                    sampled[proj_name] = [list(x) for x in picks] if self.w_outlier else picks
 
-                    kv_k_prob = prob[np.array([np.argwhere(_x == np.array(self.k_option))[0, 0] for _x in kv_k])]
-                    kv_k_list = np.array(kv_k)[np.random.choice(len(kv_k), size=nb, p=kv_k_prob / kv_k_prob.sum(), replace=True)].tolist()
-
-                    kv_v_prob = prob[np.array([np.argwhere(_x == np.array(self.v_option))[0, 0] for _x in kv_v])]
-                    kv_v_list = np.array(kv_v)[np.random.choice(len(kv_v), size=nb, p=kv_v_prob / kv_v_prob.sum(), replace=True)].tolist()
-
-                    k_dim_list = np.random.choice(k_dim_opts, size=nb, replace=True).tolist()
-                    v_dim_list = np.random.choice(v_dim_opts, size=nb, replace=True).tolist()
-                else:
-                    for proj_name, options in w_per_proj.items():
-                        full = getattr(self, f'{proj_name}_option')
-                        idxs = np.array([self._w_opt_index(_x, proj_name) for _x in options])
-                        p = self._level_weight(len(full), t_w, tilt_sigma, ascending=True)[idxs]
-                        p = p / p.sum()
-                        if self.w_outlier:
-                            sel = np.random.choice(len(options), size=nb, p=p, replace=True)
-                            sampled[proj_name] = [list(options[i]) for i in sel]
-                        else:
-                            sampled[proj_name] = np.random.choice(options, size=nb, p=p, replace=True).tolist()
-
-                    kv_k_list = self._pick_kv_level(kv_k, self.k_option, t_k, tilt_sigma, nb)
-                    kv_v_list = self._pick_kv_level(kv_v, self.v_option, t_v, tilt_sigma, nb)
-                    k_dim_list = self._pick_dim_level(k_dim_opts, self.k_pruning_dim_option, t_kd, tilt_sigma, nb)
-                    v_dim_list = self._pick_dim_level(v_dim_opts, self.v_pruning_dim_option, t_vd, tilt_sigma, nb)
+                kv_k_list  = self._pick_level(kv_k, t_k, nb)
+                kv_v_list  = self._pick_level(kv_v, t_v, nb)
+                k_dim_list = self._pick_level(k_dim_opts, t_kd, nb, ascending=False)
+                v_dim_list = self._pick_level(v_dim_opts, t_vd, nb, ascending=False)
 
                 # Apply pass_module constraints (freeze at max option)
                 for linear in self.pass_module['w']:

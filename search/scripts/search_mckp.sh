@@ -12,9 +12,12 @@ MODEL_NAME=Llama-3.1-8B-Instruct
 DTYPE=bfloat16
 CONFIG=config/llama.json
 
-COMP_OBJ=wbits
+# env-overridable: COMP_OBJ="wbits eff_kvbits" bash scripts/search_mckp.sh <gpu>
+COMP_OBJ=${COMP_OBJ:-wbits}
 # COMP_OBJ=kvbits
 # COMP_OBJ=kvdim
+# COMP_OBJ="wbits eff_kvbits"   # JOINT additive-MCKP baseline for (loss, wbits, eff_kvbits)
+# COMP_OBJ="wbits kvbits kvdim" # SPLIT 3-axis baseline (KV bits / ThinK dims as separate budgets)
 
 W_METHOD="hqq"
 AXIS=1
@@ -26,22 +29,44 @@ RESIDUAL_LENGTH=128
 # searched axis — a fixed global primitive like RESIDUAL_LENGTH. Recommend 8 when on.
 ATTN_SINK=0
 
-if [ ${COMP_OBJ} == 'wbits' ]; then
+if [ "${COMP_OBJ}" == 'wbits' ]; then
     W_BITS="2 3 4";  W_GROUP_SIZE=128
     KV_BITS="4";     KV_GROUP_SIZE=("128")
     K_PRUNING_DIM="0"; V_PRUNING_DIM="0"
     COMP_OBJ_MIN=${W_BITS:0:1}; COMP_OBJ_MAX=5; N_TOKEN=0
-elif [ ${COMP_OBJ} == 'kvbits' ]; then
+elif [ "${COMP_OBJ}" == 'kvbits' ]; then
     W_BITS="4";      W_GROUP_SIZE=128
     KV_BITS="2 3 4"; KV_GROUP_SIZE=("64 128" "64 128" "128")
     K_PRUNING_DIM="0"; V_PRUNING_DIM="0"
     COMP_OBJ_MIN=1;  COMP_OBJ_MAX=5; N_TOKEN=0
-elif [ ${COMP_OBJ} == 'kvdim' ]; then
+elif [ "${COMP_OBJ}" == 'kvdim' ]; then
     KV_METHOD="think"
     W_BITS="4";      W_GROUP_SIZE=128
     KV_BITS="4";     KV_GROUP_SIZE=("128")
     K_PRUNING_DIM="0 16 32 48 64"; V_PRUNING_DIM="0 16 32 48 64"
     COMP_OBJ_MIN=0;  COMP_OBJ_MAX=128; N_TOKEN=0
+elif [ "${COMP_OBJ}" == 'wbits eff_kvbits' ]; then
+    # JOINT baseline: both axes searched at once; the two DP-MCKPs decompose exactly
+    # (wbits <- W linears only, eff_kvbits <- KV layers only) and the measured front is
+    # the additive product grid. eff_kvbits searches the (bits,gs) x ThinK-prune product,
+    # so kv_method MUST include think (search_mckp.py fails fast otherwise).
+    KV_METHOD="kivi think"
+    W_BITS="2 3 4";  W_GROUP_SIZE=128
+    KV_BITS="2 3 4"; KV_GROUP_SIZE=("64 128" "64 128" "128")
+    K_PRUNING_DIM="0 16 32 48 64"; V_PRUNING_DIM="0 16 32 48 64"
+    COMP_OBJ_MIN="2 1"; COMP_OBJ_MAX="5 5"; N_TOKEN=0
+    MCKP_FRONT_POINTS=16   # per axis -> 16x16 = 256 measured product-front archs
+elif [ "${COMP_OBJ}" == 'wbits kvbits kvdim' ]; then
+    # SPLIT 3-axis baseline: KV bits and ThinK dims as SEPARATE budget axes.
+    # kvbits marginals measured at prune=0, kvdim marginals at 4bit/gs128 — the
+    # within-layer bits x prune interaction is DROPPED (measured exactly in the
+    # folded eff_kvbits mode above; the mode gap quantifies that interaction).
+    KV_METHOD="kivi think"
+    W_BITS="2 3 4";  W_GROUP_SIZE=128
+    KV_BITS="2 3 4"; KV_GROUP_SIZE=("64 128" "64 128" "128")
+    K_PRUNING_DIM="0 16 32 48 64"; V_PRUNING_DIM="0 16 32 48 64"
+    COMP_OBJ_MIN="2 1 0"; COMP_OBJ_MAX="5 5 128"; N_TOKEN=0
+    MCKP_FRONT_POINTS=6    # per axis -> 6x6x6 = 216 measured product-front archs
 fi
 
 QMODEL_PATHS_LIST=()
@@ -80,15 +105,17 @@ QEFT_TAG=""
 [ ${QEFT_OUTLIER} -eq 1 ] && QEFT_TAG="_qeftout${N_QEFT_COLUMN// /-}"
 
 # MCKP knobs
-# 0 = MEASURE the ENTIRE DP-MCKP Pareto frontier (no subsampling). The resulting
-# iter_mckp.stats is directly consumable by post_search.py as a per-axis archive,
-# e.g.  --w_expr ${SAVE}/iter_mckp.stats  (or --kv_expr / --kvdim_expr per COMP_OBJ).
-MCKP_FRONT_POINTS=0
+# 0 = MEASURE the ENTIRE DP-MCKP Pareto frontier (no subsampling; joint mode falls back
+# to 16 pts/axis internally). The resulting iter_mckp.stats is directly consumable by
+# post_search.py as a per-axis archive, e.g.  --w_expr ${SAVE}/iter_mckp.stats
+# (or --kv_expr / --kvdim_expr per COMP_OBJ). The joint branch above pre-sets 16/axis.
+MCKP_FRONT_POINTS=${MCKP_FRONT_POINTS:-0}
 
 # Abbreviated attention-sink tag (e.g. _sk8), only when on so sink=0 names stay comparable.
 SINK_TAG=""
 [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
-SAVE=save/search/mckp/${TODAY}_${MODEL_NAME}_${COMP_OBJ}_${METRIC}_w_${W_METHOD}${QEFT_TAG}_kv_${KV_METHOD}_w${W_BITS// /}kv${KV_BITS// /}bits_${RESIDUAL_LENGTH}res${SINK_TAG}_obj_${COMP_OBJ_MIN}_${COMP_OBJ_MAX}_${LOSS_FUNC}_${DATASET}_${N_SAMPLE}sample_${SEQLEN}seq_${STRIDE}stride_pp${LAST_TOKENS}
+# joint mode: COMP_OBJ / MIN / MAX / KV_METHOD contain spaces -> collapse for the dir name
+SAVE=save/search/mckp/${TODAY}_${MODEL_NAME}_${COMP_OBJ// /-}_${METRIC}_w_${W_METHOD}${QEFT_TAG}_kv_${KV_METHOD// /-}_w${W_BITS// /}kv${KV_BITS// /}bits_${RESIDUAL_LENGTH}res${SINK_TAG}_obj_${COMP_OBJ_MIN// /-}_${COMP_OBJ_MAX// /-}_${LOSS_FUNC}_${DATASET}_${N_SAMPLE}sample_${SEQLEN}seq_${STRIDE}stride_pp${LAST_TOKENS}
 
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \

@@ -130,9 +130,10 @@ mixed-precision model and returns `(metric_dict, complexity_dict)`:
     (+4 = k, v, k_prune, v_prune) ↔ the arch dict; `pass_module` freezes specified
     layers at their max option. `initialize()` seeds boundary anchors over
     `w × (k|v paired) × (kdim|vdim paired)` (diagonal pairing, not cartesian) and
-    fills the rest with `sample(stratify=True)` — stratified complexity-level
-    sampling that spreads the `comp_obj` evenly instead of clustering at the CLT
-    mean. Back-compat aliases `LlamaGroupSizeSearchSpace`,
+    fills the rest with `sample()` — one random complexity level per `comp_obj`
+    per arch with Binomial per-layer picks around it (`_pick_level`), spreading
+    each `comp_obj` over its full range incl. the exact corners instead of
+    clustering at the CLT mean. Back-compat aliases `LlamaGroupSizeSearchSpace`,
     `LlamaGroupSizeQEFTSearchSpace`, `LlamaThinKSearchSpace` all point at it.
   - **`LlamaQEFTSearchSpace`** (+ `build_w_options`, `DEFAULT_QEFT_COLUMNS`,
     `OUTLIER_LINEARS`) — the legacy QEFT-only weight space with the flat
@@ -406,6 +407,34 @@ KV feasible? Answer: no.
   memory + cross-method interaction). GOTCHAs: n_sample>=128 (wikitext2_trainenc
   joins n_sample text rows → too few = empty/None loader); HQQ banks are bfloat16
   on disk (no float16); pass a COPY of vars(args) to SearchThink (it pops keys).
+
+### Joint MCKP baseline (loss × wbits × eff_kvbits) — measured 2026-07-09
+`search_mckp.py` now takes 1-3 comp_obj axes (per-axis DP-MCKPs; module-disjoint
+axes decompose exactly; additive product front, every point re-MEASURED).
+- **Folded 2-axis** `--comp_obj wbits eff_kvbits` (the primary baseline): per-layer
+  KV option = (bits,gs)×ThinK-prune PRODUCT (eff cost couples them; within-layer
+  interaction measured exactly; needs kv_method 'think'). 2241 evals ≈ 2h/GPU:
+  front spans w[2.33,4.25]×eff[1.34,4.25], additivity RMSE 0.081 / ρ 0.994
+  (gap concentrated in the aggressive corner; deployable band w≥3,eff≥2 mean 0.013).
+- **Split 3-axis** `--comp_obj wbits kvbits kvdim` (cheaper ablation, 1177 evals):
+  kvbits marginals @prune0, kvdim @4bit — within-layer bits×prune interaction
+  DROPPED. Folded front DOMINATES split at matched (wbits, eff_kvbits): split worse
+  mean +0.023/median +0.006 JSD (eff<3), tie at eff≥3 ⇒ joint per-layer KV choice
+  is worth real JSD; don't split unless eval budget forces it.
+- **Right-edge guards** (fixed after run 1 truncated eff at 3.52/4.25): marginals
+  clamped ≥0 in the DP (163/1984 measured NEGATIVE, min −4.9e-4 — noise + ref≠teacher
+  cancellation; the DP otherwise harvests them into a below-ref envelope) + exact
+  ref corner anchored per axis. RAW marginals persisted in stats['marginals'] →
+  DP/front re-solvable OFFLINE (tests/mckp_isotonic_analysis.py).
+- **Isotonic marginal correction — verdict: keep clamp.** Isotonic (poset-cone
+  projection; raw KV marginals order-violate 11.8% of comparable pairs) is the
+  better additive PREDICTOR (528-arch band RMSE 0.0146 vs clamp 0.0163) but the
+  induced DP front is NOT better (exact-budget mid-band slightly worse +0.002,
+  1:13) — selection needs cost-effectiveness ordering and is more noise-robust
+  than estimation. Use isotonic only for predictor use-cases.
+- Harness: tests/test_mckp_joint_units.py (GPU-free units incl. right-edge
+  regression), tests/mckp_eval_archs.py (evaluate an arch list with the exact
+  joint protocol), tests/mckp_isotonic_analysis.py (offline marginal analysis).
 
 ### Deferred (recorded, not yet run)
 M2 Hessian/Fisher sensitivity prior into ARD-GP (BAQ); M4 cross-model surrogate
