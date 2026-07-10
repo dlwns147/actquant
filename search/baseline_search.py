@@ -6,9 +6,14 @@ NSGA-III search over the FULL joint space (W bits + KV bits/gs + ThinK pruning) 
 _next; evaluator / RBF surrogate / DOE / stats output are inherited, so a run is
 post_search-consumable exactly like an ours run.
 
-_next = NSGA-III candidate generation, then the SAME post-solver candidate down-select as
-second_search.py::_next (cand_even maximin/grid/hybrid/moo from utils/select + optional AL
-quota) instead of search.py's SubsetProblem.
+_next = NSGA-III candidate generation, then candidate down-select. DEFAULT down-select is
+'subset' = search.py's legacy SubsetProblem: single-objective GA minimizing the pooled
+std-of-gaps over the UNION of the archive front and the picked K, so an isolated edge
+candidate SPLITS the front's largest gap and is REWARDED → comp-space holes (esp. the
+eff_kvbits right end) get filled. The second_search.py-style selectors (maximin/grid/
+hybrid/moo) remain as --cand_even options, but they score the K-subset's OWN geometry
+only, which penalises isolated edge candidates (2607100451/0638 post-mortem: same pool +
+30 injected right-end archs → 'subset' kept 29/30 vs 'moo axis_gap' 13/30, maximin 16/30).
 """
 import os
 import json
@@ -18,15 +23,32 @@ from time import time
 
 from pymoo.optimize import minimize
 from pymoo.algorithms.moo.nsga3 import NSGA3
+from pymoo.algorithms.soo.nonconvex.ga import GA
 from pymoo.util.ref_dirs import get_reference_directions
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from pymoo.operators.crossover.binx import BinomialCrossover
 
-from search import Search, AuxiliarySingleLevelProblemThink
-from utils.ga import IntMutation
+from search import Search, AuxiliarySingleLevelProblemThink, SubsetProblem
+from utils.ga import IntMutation, MySampling, BinaryCrossover, MyMutation
 from utils.func import get_net_info, get_correlation, set_seed, init_accelerator
 from utils.select import maximin_extras, even_select, moo_subset_select
 from utils.second_stage import save_viz
+
+
+def subset_select(comp, nd_F, K, pop_size=100, endpoints=None, n_gen=60, seed=None):
+    """search.py::SubsetProblem down-select on plain arrays: pick K rows of `comp` by a
+    single-objective GA minimizing the pooled std-of-gaps over nd_F(front comps) ∪ picks.
+    The union with the front is what makes it hole-filling: an isolated edge candidate
+    splits the front's largest gap and LOWERS the objective, where subset-only scores
+    (moo axis_gap / gap-std) raise it and drop the candidate. `endpoints` = (2, n_comp)
+    [lo, hi] rows (see Search._subset_endpoints) to anchor the achievable range."""
+    problem = SubsetProblem(np.asarray(comp, float), np.asarray(nd_F, float), K,
+                            comp.shape[1], endpoints=endpoints)
+    algo = GA(pop_size=pop_size, sampling=MySampling(), crossover=BinaryCrossover(),
+              mutation=MyMutation(), eliminate_duplicates=True)
+    res = minimize(problem, algo, ('n_gen', n_gen), verbose=False,
+                   seed=None if seed is None else int(seed))
+    return np.where(np.asarray(res.X).ravel())[0]
 
 
 class BaselineJointSearch(Search):
@@ -36,8 +58,8 @@ class BaselineJointSearch(Search):
         a = self.args
         self.ref_partitions = a.get('ref_partitions', 12)  # 3-obj/12-part = 91 ref dirs
         self.seed = a.get('seed', 0)
-        # post-NSGA-III down-select knobs (mirror second_search.py)
-        self.cand_even = a.get('cand_even', 'moo')
+        # post-NSGA-III down-select knobs ('subset' = legacy SubsetProblem; rest mirror second_search.py)
+        self.cand_even = a.get('cand_even', 'subset')
         self.cand_grid = a.get('cand_grid', 0)
         self.even_frac = a.get('even_frac', 0.5)
         self.moo_algo = a.get('moo_algo', 'nsga3')
@@ -108,7 +130,11 @@ class BaselineJointSearch(Search):
         K_sel = K - n_al
         if len(Xc) > K:
             g = self.cand_grid if self.cand_grid > 0 else int(np.ceil(np.sqrt(max(K, 1))))
-            if self.cand_even == 'maximin':                 # extent coverage
+            if self.cand_even == 'subset':                  # legacy union std-gap (hole-filling; default)
+                ep = self._subset_endpoints() if self.anchor_endpoints else None
+                idx = subset_select(comp, F[front][:, 1:], K_sel, self.subset_pop_size,
+                                    endpoints=ep, seed=self.seed)
+            elif self.cand_even == 'maximin':               # extent coverage
                 z = (comp - comp.mean(0)) / (comp.std(0) + 1e-9)
                 idx = np.asarray(maximin_extras(z, anchor_idx=[], K=K_sel, seed=self.seed), int)
             elif self.cand_even == 'grid':                  # per-axis-even quota over the box
@@ -272,8 +298,12 @@ def build_parser():
     p.add_argument('--ga_algorithm', type=str, default='nsga3')
     p.add_argument('--max_value', type=float, default=0.7, help='loss cap for failed/nan evals')
 
-    # post-NSGA-III candidate down-select (mirrors second_search.py)
-    p.add_argument('--cand_even', default='moo', choices=['maximin', 'grid', 'hybrid', 'moo'])
+    # post-NSGA-III candidate down-select. 'subset' (default) = search.py's legacy
+    # SubsetProblem: union(front, picks) std-of-gaps GA → fills comp-space holes, keeps
+    # edge candidates (29/30 injected right-end kept vs moo 13/30). Others mirror
+    # second_search.py and score the picked subset's own geometry only.
+    p.add_argument('--cand_even', default='subset', choices=['subset', 'maximin', 'grid', 'hybrid', 'moo'])
+    p.add_argument('--subset_pop_size', type=int, default=100, help='subset: GA population size')
     p.add_argument('--cand_grid', type=int, default=0, help='grid side for grid/hybrid/moo (0=auto=ceil(sqrt(n_iter)))')
     p.add_argument('--even_frac', type=float, default=0.5, help='hybrid: fraction of K on grid-even coverage')
     p.add_argument('--moo_algo', default='nsga3', choices=['nsga3', 'nsga2'])

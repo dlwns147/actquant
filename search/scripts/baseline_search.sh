@@ -74,11 +74,17 @@ ANCHOR_LEVELS=3          # full anchor grid explodes; thin each axis to min/mid/
 # For N_PROC>1 set DEVICES=0,1,2,3 (one GPU/rank); needs #calibration batches >= N_PROC.
 N_PROC=1
 
-# post-NSGA-III candidate down-select (as in second_search.py): maximin/grid/hybrid/moo
-CAND_EVEN=moo
+# candidate down-select: subset (default) = legacy search.py SubsetProblem, union(front,
+# picks) std-of-gaps → hole-filling, keeps edge candidates (29/30 injected right-end kept
+# vs moo_axg 13/30 — 2607100451/0638 post-mortem). maximin/grid/hybrid/moo = the
+# second_search.py-style subset-only selectors, kept for ablation.
+CAND_EVEN=subset
 MOO_ALGO=nsga3
 MOO_GAP_STD=False
 MOO_OBJS=axis_gap
+# anchor_endpoints: seed + re-merge + subset-anchor the exact comp corners each iter
+# (SubsetProblem's endpoints branch was designed for this pairing)
+ANCHOR_ENDPOINTS=True
 
 # measurement protocol (matches search.sh)
 LOSS_FUNC=jsd
@@ -97,7 +103,8 @@ SINK_TAG=""; [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
 PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
 QEFT_TAG=""; [ -n "${N_QEFT_COLUMN}" ] && QEFT_TAG="_qc$(echo ${N_QEFT_COLUMN} | sed 's/ /-/g')_ob$(echo ${BASE_OUTLIER_BITS} | sed 's/ //g')"
 DS_TAG="_${CAND_EVEN}"; [ "${CAND_EVEN}" == "moo" ] && [ "${MOO_OBJS}" == "axis_gap" ] && DS_TAG="_moo_axg"
-SAVE=save/baseline_search/${TODAY}_${MODEL_NAME}_baseline_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}${SINK_TAG}_${SURROGATE}_nsga3p${REF_PARTITIONS}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${GA_POP_SIZE}_st${STRIDE}${PP_TAG}${DS_TAG}_s${SEED}
+AE_TAG=""; [ "${ANCHOR_ENDPOINTS}" == "True" ] && AE_TAG="_ae"
+SAVE=save/baseline_search/${TODAY}_${MODEL_NAME}_baseline_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}${SINK_TAG}_${SURROGATE}_nsga3p${REF_PARTITIONS}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${GA_POP_SIZE}_st${STRIDE}${PP_TAG}${DS_TAG}${AE_TAG}_s${SEED}
 
 echo "BASELINE-SEARCH -> ${SAVE}"
 
@@ -152,6 +159,7 @@ for g in "${KV_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 [ ${STRIDE} -gt 0 ] && ARGS+=" --stride ${STRIDE} "
 [ "${PREFILL_PROMPT}" == 'True' ] && ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
 [ "${MOO_GAP_STD}" == 'True' ] && ARGS+=" --moo_gap_std "
+[ "${ANCHOR_ENDPOINTS}" == 'True' ] && ARGS+=" --anchor_endpoints "
 
 if [ -n "${N_QEFT_COLUMN}" ]; then
     OUTLIER_PATH=/NAS/SJ/actquant/search/outlier/${MODEL_NAME}/w16_r${QEFT_RANK_TEXT}_${QEFT_OUTLIER_DATASET}/outlier.pth
