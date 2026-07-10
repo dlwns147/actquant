@@ -138,63 +138,89 @@ class BaselineJointSearch(Search):
             pred = pred[idx]
         return archs, pred
 
-    # ── main loop (search.py/second_search.py-style: per-iter stats + final summary) ──
+    # ── main loop — MULTI-PROCESS SAFE (mirrors search.py's accelerator structure) ──
+    # With `accelerate launch --num_processes N>1`, candidate GENERATION, surrogate FIT,
+    # printing and iter_<it>.stats dumps run on the MAIN rank only; the arch/candidate
+    # lists are broadcast with gather_for_metrics so every rank EVALUATES the same set
+    # (the evaluator shards the calibration batches across ranks and gathers → ~N× eval
+    # speedup). Without these guards every rank reruns the whole loop → the duplicated
+    # prints / redundant search / iter_<it>.stats file-races seen at np>1. Reduces to the
+    # plain single-process loop at num_processes=1 (is_main always True, gather/barrier
+    # no-ops). NOTE: the DP speedup needs #calibration batches >= num_processes.
     def search(self, accelerator):
+        main = accelerator.is_main_process
         t0 = time(); start_it = 1
         if self.resume:                                       # resume from an iter_<it>.stats
             archive, start_it = self._resume_from_dir()
-            self.accelerator.print(f"[resume] {len(archive)} archs → start iter {start_it}")
+            if main:
+                print(f"[resume] {len(archive)} archs → start iter {start_it}")
         else:
-            archs = self.search_space.initialize(self.n_doe, anchor_levels=self.anchor_levels)
-            metric, comp = self._evaluate(archs, accelerator)
-            archive = [[a, m, *c] for a, m, c in zip(archs, metric, comp)]
-            self.accelerator.print(f"[DOE] {len(archive)} archs  loss {min(metric):.4f}-{max(metric):.4f}  ({time()-t0:.1f}s)")
-        ref_pt = np.array([np.max([x[i] for x in archive]) for i in range(1, len(self.comp_obj) + 2)])
-        self.accelerator.print(f'data preparation time : {time()-t0:.2f}s')
+            arch_doe = self.search_space.initialize(self.n_doe, anchor_levels=self.anchor_levels) if main else []
+            arch_doe = accelerator.gather_for_metrics(arch_doe, use_gather_object=True)   # → all ranks
+            accelerator.wait_for_everyone()
+            metric, comp = self._evaluate(arch_doe, accelerator)          # data-parallel across ranks
+            archive = [[a, m, *c] for a, m, c in zip(arch_doe, metric, comp)] if main else []
+            if main:
+                print(f"[DOE] {len(archive)} archs  loss {min(metric):.4f}-{max(metric):.4f}  ({time()-t0:.1f}s)")
+        if main:
+            ref_pt = np.array([np.max([x[i] for x in archive]) for i in range(1, len(self.comp_obj) + 2)])
+            print(f'data preparation time : {time()-t0:.2f}s')
+        accelerator.wait_for_everyone()
 
         for it in range(start_it, self.iterations + 1):
             iter_start = time()
-            predictor_start = time()
-            predictor, a_pred = self._fit_predictor(archive)
-            predictor_time = time() - predictor_start
-            next_start = time()
-            cands, c_pred = self._next(archive, predictor, self.n_iter)
-            next_time = time() - next_start
+            if main:
+                predictor_start = time()
+                predictor, a_pred = self._fit_predictor(archive)
+                predictor_time = time() - predictor_start
+                next_start = time()
+                cands, c_pred = self._next(archive, predictor, self.n_iter)
+                next_time = time() - next_start
+            else:
+                cands = []
+            accelerator.wait_for_everyone()
+            cands = accelerator.gather_for_metrics(cands, use_gather_object=True)   # broadcast to all ranks
             if not cands:
-                self.accelerator.print(f"Iter {it}: no new candidates; stop"); break
-            c_metric, c_comp = self._evaluate(cands, accelerator)
-            # check accuracy predictor's performance (ravel like second_search.py so RMSE is exact)
-            rmse, rho, tau = get_correlation(
-                np.concatenate([np.asarray(a_pred).ravel(), np.asarray(c_pred).ravel()]),
-                np.array([x[1] for x in archive] + c_metric))
-            for a, m, c in zip(cands, c_metric, c_comp):
-                archive.append([a, m, *c])
-            F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
-            hv = self._calc_hv(ref_pt, F); cov = self._front_coverage(archive)
-            iter_time = time() - iter_start
-            self.accelerator.print(f"Iter {it}: hv = {hv:.2f}, iter time : {iter_time:.2f}s, "
-                  f"predictor_time : {predictor_time:.2f}, next_time : {next_time:.2f}")
-            self.accelerator.print(f"fitting {self.predictor}: RMSE = {rmse:.4f}, Spearman's Rho = {rho:.4f}, Kendall's Tau = {tau:.4f}")
-            for obj in self.comp_obj:
-                c = cov[obj]
-                self.accelerator.print(f"  {obj} front-coverage : {c['coverage']*100:.1f}%  "
-                      f"front=[{c['front_min']:.3f}, {c['front_max']:.3f}] / "
-                      f"full=[{c['full_min']:.3f}, {c['full_max']:.3f}]")
-            self.accelerator.print(f'iteration time : {iter_time:.2f}s')
-            # dump stats (+ per-save_iter viz), also always on the final iter
-            if it % self.save_iter == 0 or it == self.iterations:
-                os.makedirs(self.save_path, exist_ok=True)
-                with open(os.path.join(self.save_path, f"iter_{it}.stats"), 'w') as f:
-                    json.dump({'archive': archive, 'candidates': archive[-self.n_iter:], 'hv': hv,
-                               'surrogate': {'model': self.predictor, 'name': self.predictor,
-                                             'winner': self.predictor, 'rmse': rmse, 'rho': rho,
-                                             'tau': tau, 'total_time': iter_time},
-                               'coverage': cov, 'iteration': it}, f)
-                if self.debug:
-                    save_viz(self.save_path, it, archive, c_metric, c_pred, c_comp, cov,
-                             self.comp_obj, self.comp_obj_min, self.comp_obj_max)
-        self.accelerator.print(f"[done] {len(archive)} archs, {time()-t0:.1f}s → {self.save_path}")
-        self._write_results(archive, time() - t0)
+                if main:
+                    print(f"Iter {it}: no new candidates; stop")
+                break
+            c_metric, c_comp = self._evaluate(cands, accelerator)         # data-parallel across ranks
+            if main:
+                # check accuracy predictor's performance (ravel so RMSE is exact, like second_search.py)
+                rmse, rho, tau = get_correlation(
+                    np.concatenate([np.asarray(a_pred).ravel(), np.asarray(c_pred).ravel()]),
+                    np.array([x[1] for x in archive] + c_metric))
+                for a, m, c in zip(cands, c_metric, c_comp):
+                    archive.append([a, m, *c])
+                F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
+                hv = self._calc_hv(ref_pt, F); cov = self._front_coverage(archive)
+                iter_time = time() - iter_start
+                print(f"Iter {it}: hv = {hv:.2f}, iter time : {iter_time:.2f}s, "
+                      f"predictor_time : {predictor_time:.2f}, next_time : {next_time:.2f}")
+                print(f"fitting {self.predictor}: RMSE = {rmse:.4f}, Spearman's Rho = {rho:.4f}, Kendall's Tau = {tau:.4f}")
+                for obj in self.comp_obj:
+                    c = cov[obj]
+                    print(f"  {obj} front-coverage : {c['coverage']*100:.1f}%  "
+                          f"front=[{c['front_min']:.3f}, {c['front_max']:.3f}] / "
+                          f"full=[{c['full_min']:.3f}, {c['full_max']:.3f}]")
+                print(f'iteration time : {iter_time:.2f}s')
+                # dump stats (+ per-save_iter viz), also always on the final iter
+                if it % self.save_iter == 0 or it == self.iterations:
+                    os.makedirs(self.save_path, exist_ok=True)
+                    with open(os.path.join(self.save_path, f"iter_{it}.stats"), 'w') as f:
+                        json.dump({'archive': archive, 'candidates': archive[-self.n_iter:], 'hv': hv,
+                                   'surrogate': {'model': self.predictor, 'name': self.predictor,
+                                                 'winner': self.predictor, 'rmse': rmse, 'rho': rho,
+                                                 'tau': tau, 'total_time': iter_time},
+                                   'coverage': cov, 'iteration': it}, f)
+                    if self.debug:
+                        save_viz(self.save_path, it, archive, c_metric, c_pred, c_comp, cov,
+                                 self.comp_obj, self.comp_obj_min, self.comp_obj_max)
+            accelerator.wait_for_everyone()
+
+        if main:
+            print(f"[done] {len(archive)} archs, {time()-t0:.1f}s → {self.save_path}")
+            self._write_results(archive, time() - t0)
         return archive
 
     def _write_results(self, archive, total_time):
@@ -215,7 +241,7 @@ class BaselineJointSearch(Search):
                          f"full=[{c['full_min']:.3f}, {c['full_max']:.3f}] coverage {c['coverage']*100:.1f}%\n")
         with open(os.path.join(self.save_path, self.result_file), 'w') as f:
             f.writelines(lines)
-        self.accelerator.print(f"[results] {os.path.join(self.save_path, self.result_file)}")
+        print(f"[results] {os.path.join(self.save_path, self.result_file)}")
 
 
 def build_parser():

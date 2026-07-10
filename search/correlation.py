@@ -10,6 +10,14 @@ Two stages, both invoked via this single file:
     near sampling is achieved upstream: pass `--expr_front` to keep only the
     per-axis Pareto frontier of each archive (matches scripts/sample_surrogate.sh).
 
+    `--grid_sample` switches to a PAIRED FACTORIAL design instead: draw
+    `--grid_n` blocks per axis from each axis's Pareto front (random, or
+    comp-stratified with `--grid_stratify`) and emit the full cartesian
+    product (e.g. 12x12 = 144 rows for w x eff_kv). Row order is axis-major
+    and per-axis block ids are written as `grid_<axis>` columns, so a two-way
+    ANOVA / interaction analysis can reconstruct the design directly from
+    archs.csv. Requires `--expr_front`; ignores --n_archs / --quantile_sample.
+
 * `--mode eval`  (stage 2, run once per `--idx`)
     Load `archs.csv`, pick the architecture at `--idx`, and evaluate all
     requested calibration metrics + long-context benchmarks on it.
@@ -74,7 +82,7 @@ from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
                         set_seed, init_accelerator, process_dtype, RunCtx)
 from utils.select import (build_arch, select_valid_nd_idx, assemble_F,
                           LazyPs, draw_random, quantile_select, axis_of_map,
-                          coverage_subset_nsga2_extras)
+                          coverage_subset_nsga2_extras, per_axis_metric)
 from utils.eval import eval_metric, eval_loss
 from utils.data import get_tokenizer
 from utils.longbench import pred_longbench, eval_longbench_preds
@@ -280,6 +288,16 @@ def cmd_sample(args):
           f"{'lazy comp_obj-pruned' if getattr(nd, 'lazy', False) else 'dense'} path  "
           f"(n_total={nd.n_total:.3e}, expr_keys={expr_keys})")
 
+    # ── Factorial grid mode (--grid_sample): random/stratified per-axis
+    # Pareto-front blocks → FULL cartesian product. Bypasses the quantile /
+    # coverage selection entirely (paired design for interaction analysis).
+    if args.grid_sample:
+        valid_nd_idx, grid_meta, samp_desc = _grid_sample(args, nd, expr_keys,
+                                                          ctx)
+        _write_sample_outputs(args, ctx, nd, expr_keys, valid_nd_idx,
+                              samp_desc, grid_meta)
+        return
+
     if args.n_archs is None or args.n_archs <= 0:
         raise SystemExit("[correlation/sample] --n_archs must be > 0")
 
@@ -367,9 +385,117 @@ def cmd_sample(args):
         n_final = len(valid_nd_idx)
         samp_desc = f'random (n_archs={n_final})'
 
-    print(f"[correlation/sample] final |I|={n_final}  method={samp_desc}")
+    _write_sample_outputs(args, ctx, nd, expr_keys, valid_nd_idx, samp_desc)
 
-    F = assemble_F(valid_nd_idx, expr_keys, _efm, nd.comp_nd_list,
+
+def _grid_sample(args, nd, expr_keys, ctx):
+    """--grid_sample: paired factorial design over the per-axis Pareto fronts.
+
+    Draws --grid_n blocks per axis (pure random by default; with
+    --grid_stratify: sort the axis front by its own comp, split into grid_n
+    quantile bins, one random member per bin — pure random from a front
+    oversamples whichever comp region the front is densest in), then emits
+    the FULL cartesian product as valid_nd_idx in axis-major order, so the
+    (block_i, block_j) cell structure is recoverable from the row index (and
+    explicitly from the grid_<axis> CSV columns).
+
+    Single-axis --comp_obj bounds (wbits / eff_kvbits / …) filter their own
+    axis's pool; multi-axis objectives (memory) are rejected — they cannot
+    bound one axis independently of the others.
+    """
+    if getattr(nd, 'lazy', False):
+        raise SystemExit("[grid_sample] requires --expr_front (per-axis "
+                         "Pareto fronts) — the lazy full-archive path has no "
+                         "per-axis front to grid over.")
+    K = len(expr_keys)
+    grid_n = list(args.grid_n or [12])
+    if len(grid_n) == 1:
+        grid_n = grid_n * K
+    if len(grid_n) != K:
+        raise SystemExit(f"[grid_sample] --grid_n takes 1 or {K} values "
+                         f"(expr axes {list(expr_keys)}); got {grid_n}")
+    if not (len(args.comp_obj) == len(args.comp_obj_min)
+            == len(args.comp_obj_max)):
+        raise SystemExit("[grid_sample] comp_obj / comp_obj_min / "
+                         "comp_obj_max lengths must match")
+
+    # single-axis comp_obj bounds → per-axis pool filter
+    amap = axis_of_map(expr_keys)
+    axis_bounds = {}
+    for o, lo, hi in zip(args.comp_obj, args.comp_obj_min, args.comp_obj_max):
+        ax_key = amap.get(o)
+        if ax_key is None or ax_key not in expr_keys:
+            raise SystemExit(f"[grid_sample] comp_obj '{o}' does not reduce "
+                             f"to one expr axis of {list(expr_keys)}; only "
+                             f"single-axis objectives can bound a grid pool.")
+        axis_bounds.setdefault(ax_key, []).append((o, lo, hi))
+
+    rng = np.random.default_rng(args.seed)
+    pa_cache = {}
+    chosen, grid_meta = [], {}
+    for ax, key in enumerate(expr_keys):
+        efm_k = np.asarray(nd.efm[key])
+        n_front = len(efm_k)
+        pool = np.arange(n_front)
+        for o, lo, hi in axis_bounds.get(key, []):
+            _, comp_o = per_axis_metric(o, expr_keys, nd.esm, ctx.config,
+                                        ctx.group_size, args.n_token,
+                                        cache=pa_cache)
+            pool = pool[(comp_o[pool] >= lo) & (comp_o[pool] <= hi)]
+        if len(pool) == 0:
+            raise SystemExit(f"[grid_sample] axis '{key}': comp_obj filter "
+                             f"left an empty pool (front size {n_front})")
+        comp_own = efm_k[:, 1]          # the axis archive's own comp column
+        n_want = grid_n[ax]
+        if len(pool) <= n_want:
+            print(f"[grid_sample] axis '{key}': pool {len(pool)} <= "
+                  f"grid_n {n_want} — taking the whole pool")
+            picks = pool
+        elif args.grid_stratify:
+            # comp-sorted quantile bins, one member per bin; the two endpoint
+            # bins are pinned to the exact min/max-comp members so the budget
+            # corners are always in the design (a random member of a wide
+            # outer bin can sit far from the true corner).
+            order = pool[np.argsort(comp_own[pool])]
+            bins = np.array_split(order, n_want)
+            picks = np.array(
+                [b[0] if bi == 0 else
+                 b[-1] if bi == len(bins) - 1 else rng.choice(b)
+                 for bi, b in enumerate(bins)])
+        else:
+            picks = rng.choice(pool, size=n_want, replace=False)
+        picks = picks[np.argsort(comp_own[picks])]   # comp-ascending rows
+        chosen.append(picks)
+        grid_meta[key] = {
+            'subnet_idx': [int(i) for i in picks],
+            'comp': [float(comp_own[i]) for i in picks],
+            'metric': [float(efm_k[i, 0]) for i in picks],
+        }
+        print(f"[grid_sample] axis '{key}': front={n_front} pool={len(pool)} "
+              f"picked={len(picks)} "
+              f"comp=[{comp_own[picks].min():.3f}, {comp_own[picks].max():.3f}]"
+              + (' stratified' if args.grid_stratify else ' random'))
+
+    mesh = np.meshgrid(*chosen, indexing='ij')
+    valid_nd_idx = np.stack([m.ravel() for m in mesh], axis=1)
+    desc = ('factorial grid '
+            + 'x'.join(str(len(c)) for c in chosen)
+            + f' = {len(valid_nd_idx)} archs'
+            + (' (stratified)' if args.grid_stratify else ' (random)'))
+    return valid_nd_idx, grid_meta, desc
+
+
+def _write_sample_outputs(args, ctx, nd, expr_keys, valid_nd_idx, samp_desc,
+                          grid_meta=None):
+    """Shared archs.csv + sample_meta.json writer for both cmd_sample paths.
+    With grid_meta, per-axis `grid_<axis>` block-id columns (the subnet index
+    into each axis front) are appended so the factorial design is
+    reconstructable from the CSV alone (eval/aggregate use DictReader, so
+    extra columns are transparent to them)."""
+    print(f"[correlation/sample] final |I|={len(valid_nd_idx)}  "
+          f"method={samp_desc}")
+
+    F = assemble_F(valid_nd_idx, expr_keys, nd.efm, nd.comp_nd_list,
                    nd.new_metric_nd)
     # F columns: [combined_metric | (metric_axis_i, comp_axis_i) * K | comp_obj_i]
     per_axis_metric_cols = [F[:, 1 + 2 * i] for i in range(len(expr_keys))]
@@ -378,6 +504,8 @@ def cmd_sample(args):
     metric_col_names = [f"metric_{k}" for k in expr_keys]
     header = (['idx', 'arch_json'] + comp_keys + metric_col_names
               + ['combined_metric'])
+    if grid_meta is not None:
+        header += [f"grid_{k}" for k in expr_keys]
 
     save_dir = args.save or '.'
     os.makedirs(save_dir, exist_ok=True)
@@ -386,14 +514,17 @@ def cmd_sample(args):
         w = csv.writer(f)
         w.writerow(header)
         for i, row in enumerate(valid_nd_idx):
-            arch = build_arch(ctx.default_arch, expr_keys, _esm, row)
+            arch = build_arch(ctx.default_arch, expr_keys, nd.esm, row)
             comp = get_net_info(arch, ctx.config, ctx.group_size,
                                 n_token=args.n_token)
             comp_vals = [comp[k] for k in comp_keys]
             metric_vals = [float(per_axis_metric_cols[ax][i])
                            for ax in range(len(expr_keys))]
-            w.writerow([i, json.dumps(arch, separators=(',', ':'))]
-                       + comp_vals + metric_vals + [float(F[i, 0])])
+            out = ([i, json.dumps(arch, separators=(',', ':'))]
+                   + comp_vals + metric_vals + [float(F[i, 0])])
+            if grid_meta is not None:
+                out += [int(v) for v in row]
+            w.writerow(out)
     print(f"[correlation/sample] wrote {len(valid_nd_idx)} archs → {csv_path}")
 
     # also save the meta (so eval mode can sanity-check the model/expr context)
@@ -404,9 +535,16 @@ def cmd_sample(args):
         'kvdim_expr': args.kvdim_expr, 'eff_kv_expr': args.eff_kv_expr,
         'expr_front': args.expr_front, 'n_token': args.n_token,
         'comp_obj': args.comp_obj, 'comp_obj_min': args.comp_obj_min,
-        'comp_obj_max': args.comp_obj_max, 'n_archs': args.n_archs,
+        'comp_obj_max': args.comp_obj_max,
+        'n_archs': (len(valid_nd_idx) if grid_meta is not None
+                    else args.n_archs),
         'seed': args.seed,
     }
+    if grid_meta is not None:
+        meta['grid'] = {'stratify': bool(args.grid_stratify),
+                        'grid_n': [len(grid_meta[k]['subnet_idx'])
+                                   for k in expr_keys],
+                        'axes': grid_meta}
     with open(os.path.join(save_dir, 'sample_meta.json'), 'w') as f:
         json.dump(meta, f, indent=2)
 
@@ -1506,6 +1644,30 @@ def build_parser():
                         'archs.csv) to sample. NOT to be confused with the '
                         'per-loader n_sample (data examples per metric, set '
                         'inside GROUPS).')
+    # ── factorial grid sampling (paired W×KV design for interaction ANOVA) ──
+    p.add_argument('--grid_sample', action='store_true',
+                   help='(sample) paired factorial design: draw --grid_n '
+                        'blocks per expr axis from its Pareto front and emit '
+                        'the FULL cartesian product (axis-major rows; '
+                        'per-axis block ids in grid_<axis> columns). '
+                        'Requires --expr_front; ignores --n_archs, '
+                        '--quantile_sample and --sampling_method. '
+                        'Single-axis --comp_obj bounds filter their own '
+                        'axis pool.')
+    p.add_argument('--grid_n', type=int, nargs='+', default=[12],
+                   help='(sample, --grid_sample) blocks per axis: one value '
+                        'broadcast to all expr axes, or one per axis in '
+                        'expr_keys order (e.g. --grid_n 12 12 for w × '
+                        'eff_kv).')
+    p.add_argument('--grid_stratify', action='store_true',
+                   help='(sample, --grid_sample) comp-stratified pick '
+                        'instead of pure random: sort the axis front by its '
+                        'own comp, split into grid_n quantile bins, one '
+                        'random member per bin; endpoint bins are pinned to '
+                        'the exact min/max-comp members (budget corners '
+                        'always in the design). Guards against fronts that '
+                        'are dense in one comp region (recommended for '
+                        'ANOVA).')
     # ── quantile + coverage-NSGA2 sampling (mirrors sample_surrogate.py) ──
     p.add_argument('--quantile_sample', type=str, nargs='+', default=[],
                    help='(sample) per-metric quantile anchors. Syntax: '

@@ -69,6 +69,10 @@ N_ITER=50
 SEED=0
 SAVE_ITER=1
 ANCHOR_LEVELS=3          # full anchor grid explodes; thin each axis to min/mid/max
+# data-parallel EVALUATION: N_PROC ranks each replicate the model and evaluate a shard of the
+# calibration batches (search() is multi-process safe → no duplicated output/file races).
+# For N_PROC>1 set DEVICES=0,1,2,3 (one GPU/rank); needs #calibration batches >= N_PROC.
+N_PROC=1
 
 # post-NSGA-III candidate down-select (as in second_search.py): maximin/grid/hybrid/moo
 CAND_EVEN=moo
@@ -157,5 +161,5 @@ if [ -n "${N_QEFT_COLUMN}" ]; then
     --n_outlier ${N_OUTLIER} "
 fi
 
-CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=1 --num_machines=1 \
+CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 \
     --main_process_port=${PORT_NUM} baseline_search.py ${ARGS}

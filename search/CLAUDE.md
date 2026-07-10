@@ -108,6 +108,20 @@ stride / prefill / key-token / needle / gsm8k-unpadded) correlate with
 LongBench / LongBench-E / RULER. Idempotent and incremental per metric key.
 See `analysis/corr_keyppl`, `analysis/band_local_proxy_collapse`.
 
+`--grid_sample` (sample mode) emits a PAIRED FACTORIAL design instead of the
+quantile/coverage combo sampling: `--grid_n` blocks per expr axis drawn from
+that axis's Pareto front (pure random, or `--grid_stratify` = comp-quantile
+bins with endpoint bins pinned to the exact min/max-comp members so budget
+corners are always in the design) → FULL cartesian product, axis-major row
+order, per-axis block ids in `grid_<axis>` CSV columns + full design in
+`sample_meta.json['grid']`. Requires `--expr_front`; single-axis `--comp_obj`
+bounds filter their own axis pool. Purpose: identified W×KV interaction
+(two-way ANOVA / Tukey non-additivity / per-row rank stability) — the QS
+samples reuse almost no blocks (183/200 unique W), so interaction is only
+regression-estimable there. W-only / KV-only marginals: evaluate the same
+archs.csv in a separate save dir with `--kv_method fp16` / `--w_method fp16`
+(or a `--grid_n N 1` one-row grid).
+
 ### Evaluation (`evaluator.py`)
 
 `LlamaEvaluator.eval(arch, metric, loss_func, stride, prefill_prompt)` rebuilds the
