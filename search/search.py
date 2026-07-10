@@ -376,7 +376,7 @@ class Search:
 
     def _evaluate(self, archs, accelerator):
         metric_list, complexity_list = [], []
-        for arch in tqdm(archs, desc='Eval Arch'):
+        for arch in tqdm(archs, desc='Eval Arch', disable=not accelerator.is_main_process):
             metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func, stride=self.stride, prefill_prompt=self.prefill_prompt)
             metric_list.append(min(self.max_value, np.nan_to_num(list(metric.values())[0], nan=self.max_value)))
             complexity_list.append([complexity[obj] for obj in self.comp_obj])

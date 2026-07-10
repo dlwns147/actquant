@@ -1,6 +1,8 @@
 DEVICES=${1}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
+N_PROC=1   # data-parallel marginal/frontier eval ranks (writes are main-rank-guarded).
+           # For N_PROC>1 set DEVICES=0,1,... (one GPU/rank); needs #calibration batches >= N_PROC.
 
 # ── Stage-1 per-method search by MEASURED DP-MCKP (drop-in alt to scripts/search.sh).
 #    Same LlamaEvaluator / protocol; measures per-module marginal JSD + frontier
@@ -160,5 +162,5 @@ if [ ${QEFT_OUTLIER} -eq 1 ]; then
     ARGS+=" --n_qeft_column ${N_QEFT_COLUMN} --base_outlier_bits ${BASE_OUTLIER_BITS} --outlier_path ${OUTLIER_PATH} --n_outlier ${OUTLIER_RANK} "
 fi
 
-CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=1 --num_machines=1 \
+CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 \
     --main_process_port=${PORT_NUM} search_mckp.py ${ARGS}

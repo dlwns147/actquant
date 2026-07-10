@@ -43,6 +43,8 @@ ITERATIONS=200       # search iterations (fit ↔ measure)
 N_ITER=50          # candidates measured per iteration
 SEED=0
 SAVE_ITER=10       # dump iter_<it>.stats + iter_<it>.png (via --debug) every SAVE_ITER iters (and the last)
+N_PROC=1           # data-parallel eval ranks (search() is multi-process safe). For N_PROC>1 set
+                   # DEVICES=0,1,... (one GPU/rank); needs #calibration batches >= N_PROC.
 
 ATTN_SINK=8
 N_TOKEN=0
@@ -129,6 +131,6 @@ if [ ${PREFILL_PROMPT} == 'True' ]; then
     ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
 fi
 
-CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=1 --num_machines=1 \
+CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 \
     --main_process_port=${PORT_NUM} second_search.py ${ARGS}
 
