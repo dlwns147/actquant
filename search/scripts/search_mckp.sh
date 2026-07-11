@@ -57,7 +57,8 @@ elif [ "${COMP_OBJ}" == 'wbits eff_kvbits' ]; then
     KV_BITS="2 3 4"; KV_GROUP_SIZE=("64 128" "64 128" "128")
     K_PRUNING_DIM="0 16 32 48 64"; V_PRUNING_DIM="0 16 32 48 64"
     COMP_OBJ_MIN="2 1"; COMP_OBJ_MAX="5 5"; N_TOKEN=0
-    MCKP_FRONT_POINTS=16   # per axis -> 16x16 = 256 measured product-front archs
+    # FRONT_EVAL=predict (default): full un-thinned product front, 0 frontier evals.
+    # For FRONT_EVAL=measure set MCKP_FRONT_POINTS=16 (16x16 = 256 measured archs).
 elif [ "${COMP_OBJ}" == 'wbits kvbits kvdim' ]; then
     # SPLIT 3-axis baseline: KV bits and ThinK dims as SEPARATE budget axes.
     # kvbits marginals measured at prune=0, kvdim marginals at 4bit/gs128 — the
@@ -68,7 +69,8 @@ elif [ "${COMP_OBJ}" == 'wbits kvbits kvdim' ]; then
     KV_BITS="2 3 4"; KV_GROUP_SIZE=("64 128" "64 128" "128")
     K_PRUNING_DIM="0 16 32 48 64"; V_PRUNING_DIM="0 16 32 48 64"
     COMP_OBJ_MIN="2 1 0"; COMP_OBJ_MAX="5 5 128"; N_TOKEN=0
-    MCKP_FRONT_POINTS=6    # per axis -> 6x6x6 = 216 measured product-front archs
+    # FRONT_EVAL=predict (default): product front auto-capped at 100k rows, 0 frontier
+    # evals. For FRONT_EVAL=measure set MCKP_FRONT_POINTS=6 (6^3 = 216 measured archs).
 fi
 
 QMODEL_PATHS_LIST=()
@@ -107,10 +109,13 @@ QEFT_TAG=""
 [ ${QEFT_OUTLIER} -eq 1 ] && QEFT_TAG="_qeftout${N_QEFT_COLUMN// /-}"
 
 # MCKP knobs
-# 0 = MEASURE the ENTIRE DP-MCKP Pareto frontier (no subsampling; joint mode falls back
-# to 16 pts/axis internally). The resulting iter_mckp.stats is directly consumable by
-# post_search.py as a per-axis archive, e.g.  --w_expr ${SAVE}/iter_mckp.stats
-# (or --kv_expr / --kvdim_expr per COMP_OBJ). The joint branch above pre-sets 16/axis.
+# FRONT_EVAL=predict (default): archive = UN-THINNED DP product front, loss column =
+#   additive PREDICTION, 0 frontier evals (rows auto-capped at 100k). Consume via
+#   post_search --second_expr ${SAVE}/iter_mckp.stats --select_measured_best --verify_topk K
+#   (in-band additive ranking is measured-faithful; the K verify evals make the pick real).
+# FRONT_EVAL=measure: legacy — re-measure each frontier arch (thin via MCKP_FRONT_POINTS,
+#   e.g. 16 for 2-axis / 6 for 3-axis) and report the measured-vs-additive gap.
+FRONT_EVAL=${FRONT_EVAL:-predict}
 MCKP_FRONT_POINTS=${MCKP_FRONT_POINTS:-0}
 
 # Abbreviated attention-sink tag (e.g. _sk8), only when on so sink=0 names stay comparable.
@@ -149,6 +154,7 @@ ARGS="--gpu_id ${DEVICES} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \
 --dataset ${DATASET} \
+--front_eval ${FRONT_EVAL} \
 --mckp_front_points ${MCKP_FRONT_POINTS}"
 
 for g in "${KV_GROUP_SIZE[@]}"; do ARGS+=" --k_group_size ${g} "; done

@@ -49,7 +49,9 @@ N_PROC=1           # data-parallel eval ranks (search() is multi-process safe). 
 ATTN_SINK=8
 N_TOKEN=0
 
-CAND_EVEN=moo        # maximin / grid / hybrid / moo
+CAND_EVEN=subset     # subset / maximin / grid / hybrid / moo. subset = legacy search.py
+                     # SubsetProblem: union(archive front, picks) std-of-gaps → hole-filling,
+                     # keeps edge candidates (29/30 injected right-end kept vs moo 13/30)
 MOO_GAP_STD=True     # moo 3rd objective ON: (pred-loss × cov_rad × gap-std) knee.
 GRID_SEED=True       # True = inject per-cell block-product seeds each iter
 SEED_POOL=full       # seed block source: full (FULL ε-band pools W~9k/KV~3k ∪ archive parts;
