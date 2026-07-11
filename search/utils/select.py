@@ -540,7 +540,7 @@ def stratified_proxy_indices(pool_z, n_target=3000, n_bins=None, seed=0):
     return np.array(sel, dtype=np.int64)
 
 
-def maximin_extras(M, anchor_idx, K, seed=0):
+def maximin_extras(M, anchor_idx, K, seed=0, anchors=None):
     """Model-free farthest-point (maximin) coverage extras: return K positions
     into ``M`` (rows = per-axis search-metric vectors) that greedily maximise
     the min-distance to ``anchor_idx`` ∪ already-picked, in per-axis
@@ -548,8 +548,37 @@ def maximin_extras(M, anchor_idx, K, seed=0):
     NO measured y — the validated best global-representation acquisition
     (beats random / uncertainty-AL on R²/worst-bin/tail across seeds; works
     with ANY deployed surrogate incl. rbf-tps). Memory-safe for tens-of-millions
-    of rows (loops anchors; greedy is O(K·N))."""
+    of rows (loops anchors; greedy is O(K·N)).
+
+    ``anchors`` (optional, (A, d)): EXTERNAL anchor rows — e.g. the archive
+    Pareto front's comp rows — that repel picks without being selectable.
+    Makes the selection HOLE-FILLING relative to what is already evaluated
+    (picks land far from the front, i.e. in its comp-space holes) instead of
+    only spreading the K picks among themselves. Standardization is over
+    M ∪ anchors so both live in the same space."""
     M = np.asarray(M, dtype=float)
+    if anchors is not None and len(anchors):
+        A = np.asarray(anchors, float)
+        U = np.vstack([A, M])
+        sd = U.std(0); sd[sd < 1e-9] = 1.0
+        mu = U.mean(0)
+        Ms_ = (M - mu) / sd
+        As_ = (A - mu) / sd
+        dmin = np.full(len(Ms_), np.inf)
+        for a in As_:                            # repel from every front row
+            dmin = np.minimum(dmin, np.linalg.norm(Ms_ - a, axis=1))
+        for a in [int(x) for x in (anchor_idx if anchor_idx is not None else [])]:
+            if 0 <= a < len(Ms_):
+                dmin[a] = -1.0
+        sel = []
+        for _ in range(int(min(K, len(Ms_)))):
+            j = int(np.argmax(dmin))
+            if dmin[j] < 0:
+                break
+            sel.append(j)
+            dmin = np.minimum(dmin, np.linalg.norm(Ms_ - Ms_[j], axis=1))
+            dmin[j] = -1.0
+        return np.array(sel, int)
     sd = M.std(0); sd[sd < 1e-9] = 1.0
     Ms = (M - M.mean(0)) / sd
     n = len(Ms)
@@ -579,12 +608,18 @@ def _comb(n, k):
     return comb(n, k)
 
 
-def even_select(comp, score, K, g, lo, hi):
+def even_select(comp, score, K, g, lo, hi, nd_F=None):
     """Coordinate-agnostic grid-quota selection: bucket `comp` rows ((N, d), any
     coordinate system — e.g. (wbits, eff_kvbits) box or (memory, split)) into a
     g^d grid over [lo, hi], round-robin the occupied cells, take the best `score`
     (lowest) first WITHIN a cell → per-axis-uniform marginal density + quality.
-    Returns selected indices into `comp` (≤ K)."""
+    Returns selected indices into `comp` (≤ K).
+
+    ``nd_F`` (optional, (A, d)): archive Pareto-front comp rows. When given, the
+    round-robin becomes DEFICIT-driven: cells are filled emptiest-first counting
+    front occupancy + picks so far, so K flows into the cells the archive has NOT
+    covered yet (hole-filling) instead of being spread evenly over the pool's own
+    cells. nd_F=None keeps the legacy pool-only round-robin exactly."""
     comp = np.asarray(comp, float)
     lo, hi = np.asarray(lo, float), np.asarray(hi, float)
     cell = np.clip(((comp - lo) / (hi - lo + 1e-9) * g).astype(int), 0, g - 1)
@@ -597,6 +632,21 @@ def even_select(comp, score, K, g, lo, hi):
     for c in buckets:                                # within-cell: best score first
         buckets[c].sort(key=lambda i: score[i])
     cells, sel = list(buckets), []
+    if nd_F is not None and len(nd_F):
+        fc = np.clip(((np.asarray(nd_F, float) - lo) / (hi - lo + 1e-9) * g).astype(int), 0, g - 1)
+        fid = np.zeros(len(fc), int)
+        for d in range(fc.shape[1]):
+            fid = fid * g + fc[:, d]
+        occ = {c: 0 for c in buckets}
+        for c in fid:
+            if int(c) in occ:
+                occ[int(c)] += 1
+        while len(sel) < K and cells:                # emptiest union cell first
+            c = min(cells, key=lambda c: occ[c])
+            if not buckets[c]:
+                cells.remove(c); continue
+            sel.append(buckets[c].pop(0)); occ[c] += 1
+        return np.array(sel, int)
     while len(sel) < K and cells:                    # round-robin over occupied cells
         for c in list(cells):
             if not buckets[c]:
@@ -607,9 +657,35 @@ def even_select(comp, score, K, g, lo, hi):
     return np.array(sel, int)
 
 
+def subset_select(comp, nd_F, K, pop_size=100, endpoints=None, n_gen=60, seed=None):
+    """search.py::SubsetProblem down-select on plain arrays: pick K rows of `comp` by a
+    single-objective GA minimizing the pooled std-of-gaps over nd_F(front comps) ∪ picks.
+    The union with the front is what makes it HOLE-FILLING: an isolated edge candidate
+    splits the front's largest gap and LOWERS the objective, where subset-only scores
+    (moo axis_gap / gap-std below) raise it and drop the candidate (verified on a real
+    NSGA-III pool + 30 injected right-end archs: 29/30 kept vs moo 13/30, maximin 16/30).
+    `endpoints` = (2, n_comp) [lo_row, hi_row] to anchor the achievable range (see
+    SubsetProblem's endpoints branch). NOTE: gaps are pooled across comp columns in RAW
+    scale — fine for similar-range axes (wbits/eff_kvbits); normalise comp+nd_F first when
+    mixing axes with very different ranges (e.g. kvdim 96-128)."""
+    import numpy as np
+    from pymoo.optimize import minimize
+    from pymoo.algorithms.soo.nonconvex.ga import GA
+    from search import SubsetProblem                     # lazy: keeps select.py import light
+    from utils.ga import MySampling, BinaryCrossover, MyMutation
+    comp = np.asarray(comp, float)
+    problem = SubsetProblem(comp, np.asarray(nd_F, float), K, comp.shape[1],
+                            endpoints=endpoints)
+    algo = GA(pop_size=pop_size, sampling=MySampling(), crossover=BinaryCrossover(),
+              mutation=MyMutation(), eliminate_duplicates=True)
+    res = minimize(problem, algo, ('n_gen', n_gen), verbose=False,
+                   seed=None if seed is None else int(seed))
+    return np.where(np.asarray(res.X).ravel())[0]
+
+
 def moo_subset_select(comp, pred, K, comp_min, comp_max, g, algo='nsga3',
                       pop=80, n_gen=80, seed=0, gap_std=False, coverage='rad',
-                      objs='loss_cov'):
+                      objs='loss_cov', nd_F=None):
     """Pick K candidate indices (into `comp`/`pred`) by a 2/3-objective subset-selection GA
     that balances arch QUALITY against even COVERAGE of the [comp_min, comp_max] box —
     the principled replacement for a hard exploit/explore split (validated in tests/:
@@ -640,6 +716,17 @@ def moo_subset_select(comp, pred, K, comp_min, comp_max, g, algo='nsga3',
     explore↔exploit subset. Guarantees K picks: any de-dup shortfall is filled by farthest-
     point maximin (keeps coverage). O(pop·n_gen) cheap comp-space evals (no model calls).
 
+    ``nd_F`` (optional, (A, d)): archive Pareto-front comp rows. When given, every
+    COVERAGE objective is scored on the UNION front ∪ picks instead of the picks alone —
+    cov_rad = biggest hole left after adding the picks to the front, per-axis 'gap' =
+    1D covering radius of the union (replaces the subset std-of-gaps, whose knee actively
+    DROPS isolated edge candidates: a lone right-end pick raises subset gap-std 5.7× but
+    fills the union's biggest gap). The unit box is then the OBSERVED comp∪front range,
+    not [comp_min, comp_max] — generous CLI bounds put unreachable cells in the grid whose
+    irreducible distance floors cov_rad (measured 0.414 for an ideal-even subset on the
+    wbits/eff_kvbits budget box) and bury the coverage signal. nd_F=None keeps the legacy
+    subset-only scoring exactly.
+
     NOTE: operates on the SUPPLIED pool only — pair with supply seeding
     (utils.second_stage.grid_seed) so the high-comp corner NSGA drops is present."""
     from scipy.spatial.distance import cdist
@@ -656,10 +743,21 @@ def moo_subset_select(comp, pred, K, comp_min, comp_max, g, algo='nsga3',
     N, d = comp.shape
     if N <= K:
         return np.arange(N)
-    lo, hi = np.asarray(comp_min, float), np.asarray(comp_max, float)
+    if nd_F is not None and len(nd_F):
+        nd_F = np.asarray(nd_F, float)
+        P = np.vstack([comp, nd_F])                              # OBSERVED union box (no
+        lo, hi = P.min(0), P.max(0)                              # unreachable-cell floor)
+    else:
+        nd_F = None
+        lo, hi = np.asarray(comp_min, float), np.asarray(comp_max, float)
     cn = (comp - lo) / (hi - lo + 1e-9)                          # comp → unit box
     centers = np.stack(np.meshgrid(*([np.linspace(0, 1, g)] * d), indexing='ij'),
                        -1).reshape(-1, d)                        # g^d box cell centres
+    if nd_F is not None:                                         # union-coverage precompute:
+        from scipy.spatial.distance import cdist as _cdist
+        an = (nd_F - lo) / (hi - lo + 1e-9)                      # front rows in the unit box
+        d_arch2 = _cdist(centers, an).min(1)                     # cell→front dist (fixed) for 2D reach
+        an_ax = [np.asarray(an[:, ax]) for ax in range(d)]       # per-axis front coords for union gaps
     # obj1 scale-free AND outlier-robust: RANK-normalised predictions, not min-max — exact-
     # interpolant surrogates (rbf/tps) extrapolate wildly at mutated/seed candidates (observed
     # candidate RMSE ~120 on a 0.02-0.7 JSD scale at production iter 1); one blown-up value
@@ -676,28 +774,51 @@ def moo_subset_select(comp, pred, K, comp_min, comp_max, g, algo='nsga3',
         def _evaluate(self, X, out, *a, **k):
             Xi = X.astype(int)
             dup = np.array([K - len(set(r.tolist())) for r in Xi], float) / K   # penalise dup picks
-            if objs == 'axis_gap':                               # GEOMETRY-ONLY (no loss): per-axis std-of-gaps + 2D cov_rad
+            if objs == 'axis_gap':                               # GEOMETRY-ONLY (no loss): per-axis marginal + 2D cov_rad
                 picks = cn[Xi]                                   # (npop, K, d) in the unit box
                 cols = []
-                for ax in range(d):                              # marginal evenness per axis: (wbits_gap, eff_kvbits_gap)
-                    Sd = np.sort(picks[:, :, ax], axis=1)
-                    cols.append(np.std(np.diff(Sd, axis=1), axis=1) + dup)
-                cov_rad = np.array([cdist(centers, cn[row]).min(1).max() for row in Xi])  # 2D reach (biggest hole)
+                for ax in range(d):                              # marginal evenness per axis: (wbits, eff_kvbits)
+                    if nd_F is not None:                         # UNION std-of-gaps (SubsetProblem semantics,
+                        # per-axis/unit-box): density-seeking — splitting the front's big gaps
+                        # keeps paying after 1-per-cell reach saturates (a union covering
+                        # radius plateaus there and stops rewarding edge picks)
+                        U = np.concatenate([np.broadcast_to(an_ax[ax], (len(Xi), len(an_ax[ax]))),
+                                            picks[:, :, ax]], axis=1)
+                        Sd = np.sort(U, axis=1)
+                        cols.append(np.std(np.diff(Sd, axis=1), axis=1) + dup)
+                    else:                                        # legacy: subset std-of-gaps
+                        Sd = np.sort(picks[:, :, ax], axis=1)
+                        cols.append(np.std(np.diff(Sd, axis=1), axis=1) + dup)
+                if nd_F is not None:                             # 2D reach of front ∪ picks
+                    cov_rad = np.array([np.minimum(d_arch2, cdist(centers, cn[row]).min(1)).max() for row in Xi])
+                else:
+                    cov_rad = np.array([cdist(centers, cn[row]).min(1).max() for row in Xi])  # 2D reach (biggest hole)
                 cols.append(cov_rad + dup)                       # → n_obj = d + 1 = (wbits_gap, eff_kvbits_gap, cov_rad)
                 out['F'] = np.column_stack(cols)
                 return
             f_loss = Ln[Xi].mean(1)
             need_rad = (coverage == 'rad') or gap_std
             need_gap = (coverage == 'gap') or gap_std
-            f_cov = (np.array([cdist(centers, cn[row]).min(1).max() for row in Xi])
-                     if need_rad else None)
+            if need_rad:
+                if nd_F is not None:                             # 2D reach of front ∪ picks
+                    f_cov = np.array([np.minimum(d_arch2, cdist(centers, cn[row]).min(1)).max() for row in Xi])
+                else:
+                    f_cov = np.array([cdist(centers, cn[row]).min(1).max() for row in Xi])
+            else:
+                f_cov = None
             f_gap = None
             if need_gap:                                         # per-axis spacing evenness
                 picks = cn[Xi]                                   # (npop, K, d)
                 f_gap = np.zeros(len(Xi))
                 for ax in range(d):
-                    Sd = np.sort(picks[:, :, ax], axis=1)
-                    f_gap = np.maximum(f_gap, np.std(np.diff(Sd, axis=1), axis=1))
+                    if nd_F is not None:                         # union std-of-gaps (density-seeking)
+                        U = np.concatenate([np.broadcast_to(an_ax[ax], (len(Xi), len(an_ax[ax]))),
+                                            picks[:, :, ax]], axis=1)
+                        Sd = np.sort(U, axis=1)
+                        f_gap = np.maximum(f_gap, np.std(np.diff(Sd, axis=1), axis=1))
+                    else:                                        # legacy: subset std-of-gaps
+                        Sd = np.sort(picks[:, :, ax], axis=1)
+                        f_gap = np.maximum(f_gap, np.std(np.diff(Sd, axis=1), axis=1))
             main = f_cov if coverage == 'rad' else f_gap
             cols = [f_loss + dup, main + dup]
             if gap_std:                                          # 3-obj: add the OTHER criterion
@@ -746,7 +867,7 @@ def moo_subset_select(comp, pred, K, comp_min, comp_max, g, algo='nsga3',
     for pk in knee:                                             # de-dup within the knee subset
         if int(pk) not in seen: seen.add(int(pk)); out.append(int(pk))
     if len(out) < K:                                            # fill shortfall by farthest-point coverage
-        for e in maximin_extras(comp, anchor_idx=out, K=K - len(out), seed=seed):
+        for e in maximin_extras(comp, anchor_idx=out, K=K - len(out), seed=seed, anchors=nd_F):
             if int(e) not in seen: seen.add(int(e)); out.append(int(e))
     return np.array(out[:K], int)
 

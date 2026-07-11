@@ -28,7 +28,7 @@ from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from search_space.llama import LlamaSearchSpace
 from predictor.factory import get_predictor
 from utils.func import set_seed, get_correlation, get_net_info
-from utils.select import maximin_extras, even_select, moo_subset_select
+from utils.select import maximin_extras, even_select, moo_subset_select, subset_select
 from utils.second_stage import (
     encoding_xu, nw_split, load_block_pools, load_band_blocks, load_extra_parts,
     gene_weights, freeze_mask, block_segments, derive_options, derive_qeft,
@@ -287,23 +287,35 @@ class SecondSearch:
         K_sel = K - n_al
         if len(Xc) > K:
             comp = self._comp.batch(Xc, self.comp_obj)   # (N,2) [wbits, eff_kvbits], vectorized
-            if self.args.cand_even == 'maximin':         # extent coverage (legacy default)
-                z = (comp - comp.mean(0)) / (comp.std(0) + 1e-9)
-                idx = np.asarray(maximin_extras(z, anchor_idx=[], K=K_sel, seed=self.args.seed), int)
-            elif self.args.cand_even == 'grid':          # per-axis-even quota over the box
-                idx = even_select(comp, pred, K_sel, g, self.comp_obj_min, self.comp_obj_max)
+            # archive Pareto-front comps: every selector below scores coverage on
+            # front ∪ picks (hole-filling — legacy search.py::SubsetProblem semantics:
+            # an isolated edge candidate splits the front's largest gap and is KEPT,
+            # where subset-only geometry drops it), not on the picked K alone.
+            Fa = np.column_stack([[x[i] for x in archive] for i in (1, 2, 3)])
+            fr_nd = NonDominatedSorting().do(Fa, only_non_dominated_front=True)
+            nd_C = Fa[fr_nd][:, 1:]
+            if self.args.cand_even == 'subset':          # union(front, picks) std-gap GA
+                idx = subset_select(comp, nd_C, K_sel, self.args.subset_pop_size,
+                                    endpoints=np.array([self.comp_obj_min, self.comp_obj_max], float),
+                                    seed=self.args.seed)
+            elif self.args.cand_even == 'maximin':       # farthest from front ∪ picked
+                idx = np.asarray(maximin_extras(comp, anchor_idx=[], K=K_sel, seed=self.args.seed,
+                                                anchors=nd_C), int)
+            elif self.args.cand_even == 'grid':          # emptiest-union-cell quota over the box
+                idx = even_select(comp, pred, K_sel, g, self.comp_obj_min, self.comp_obj_max,
+                                  nd_F=nd_C)
             elif self.args.cand_even == 'moo':           # 2/3-obj (loss × coverage [× gap-std]) → knee
                 idx = moo_subset_select(comp, pred, K_sel, self.comp_obj_min, self.comp_obj_max, g,
                                         algo=self.args.moo_algo, pop=self.args.moo_pop,
                                         n_gen=self.args.moo_gen, seed=self.args.seed,
                                         gap_std=self.args.moo_gap_std,
-                                        coverage=self.args.moo_coverage)
-            else:                                        # hybrid: front pressure + grid-even coverage
+                                        coverage=self.args.moo_coverage, nd_F=nd_C)
+            else:                                        # hybrid: front pressure + union-even coverage
                 k_even = int(round(self.args.even_frac * K_sel)); k_front = K_sel - k_even
                 front = np.argsort(pred)[:k_front]       # low predicted loss = keep the front moving
                 rest = np.setdiff1d(np.arange(len(Xc)), front)
                 even = (rest[even_select(comp[rest], pred[rest], k_even, g,
-                                         self.comp_obj_min, self.comp_obj_max)]
+                                         self.comp_obj_min, self.comp_obj_max, nd_F=nd_C)]
                         if len(rest) else np.array([], int))
                 idx = np.concatenate([front, even]).astype(int)
             if n_al > 0:                                 # AL quota: farthest-from-archive extras
@@ -477,7 +489,11 @@ def build_parser():
     # balance, dominates hybrid's hard split; --moo_algo nsga3 ≥ nsga2). --grid_seed additionally
     # injects nearest-block genomes per cell so the high-comp corner NSGA drops (right-end
     # collapse) still gets sampled — pair it with grid/hybrid/moo. Defaults keep legacy behaviour.
-    p.add_argument('--cand_even', default='maximin', choices=['maximin', 'grid', 'hybrid', 'moo'])
+    # 'subset' = search.py's legacy SubsetProblem: union(archive front, picks) std-of-gaps
+    # GA → hole-filling, keeps edge candidates (29/30 injected right-end kept vs moo 13/30,
+    # maximin 16/30 on the same pool — baseline_search 2607100451/0638 post-mortem).
+    p.add_argument('--cand_even', default='maximin', choices=['subset', 'maximin', 'grid', 'hybrid', 'moo'])
+    p.add_argument('--subset_pop_size', type=int, default=100, help='subset: GA population size')
     p.add_argument('--cand_grid', type=int, default=0, help='grid side for grid/hybrid/moo even-select (0=auto=ceil(sqrt(n_iter)))')
     p.add_argument('--even_frac', type=float, default=0.5, help='hybrid: fraction of K spent on grid-even coverage (rest = front pressure)')
     p.add_argument('--grid_seed', action='store_true', help='seed nearest-block genomes per box cell into the candidate pool each iter (guarantees high-comp supply)')

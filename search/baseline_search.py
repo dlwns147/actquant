@@ -23,32 +23,15 @@ from time import time
 
 from pymoo.optimize import minimize
 from pymoo.algorithms.moo.nsga3 import NSGA3
-from pymoo.algorithms.soo.nonconvex.ga import GA
 from pymoo.util.ref_dirs import get_reference_directions
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from pymoo.operators.crossover.binx import BinomialCrossover
 
-from search import Search, AuxiliarySingleLevelProblemThink, SubsetProblem
-from utils.ga import IntMutation, MySampling, BinaryCrossover, MyMutation
+from search import Search, AuxiliarySingleLevelProblemThink
+from utils.ga import IntMutation
 from utils.func import get_net_info, get_correlation, set_seed, init_accelerator
-from utils.select import maximin_extras, even_select, moo_subset_select
+from utils.select import maximin_extras, even_select, moo_subset_select, subset_select
 from utils.second_stage import save_viz
-
-
-def subset_select(comp, nd_F, K, pop_size=100, endpoints=None, n_gen=60, seed=None):
-    """search.py::SubsetProblem down-select on plain arrays: pick K rows of `comp` by a
-    single-objective GA minimizing the pooled std-of-gaps over nd_F(front comps) ∪ picks.
-    The union with the front is what makes it hole-filling: an isolated edge candidate
-    splits the front's largest gap and LOWERS the objective, where subset-only scores
-    (moo axis_gap / gap-std) raise it and drop the candidate. `endpoints` = (2, n_comp)
-    [lo, hi] rows (see Search._subset_endpoints) to anchor the achievable range."""
-    problem = SubsetProblem(np.asarray(comp, float), np.asarray(nd_F, float), K,
-                            comp.shape[1], endpoints=endpoints)
-    algo = GA(pop_size=pop_size, sampling=MySampling(), crossover=BinaryCrossover(),
-              mutation=MyMutation(), eliminate_duplicates=True)
-    res = minimize(problem, algo, ('n_gen', n_gen), verbose=False,
-                   seed=None if seed is None else int(seed))
-    return np.where(np.asarray(res.X).ravel())[0]
 
 
 class BaselineJointSearch(Search):
@@ -130,25 +113,30 @@ class BaselineJointSearch(Search):
         K_sel = K - n_al
         if len(Xc) > K:
             g = self.cand_grid if self.cand_grid > 0 else int(np.ceil(np.sqrt(max(K, 1))))
+            nd_C = F[front][:, 1:]                          # archive Pareto-front comps: every
+            # selector below scores coverage on front ∪ picks (hole-filling), not picks alone
             if self.cand_even == 'subset':                  # legacy union std-gap (hole-filling; default)
                 ep = self._subset_endpoints() if self.anchor_endpoints else None
-                idx = subset_select(comp, F[front][:, 1:], K_sel, self.subset_pop_size,
+                idx = subset_select(comp, nd_C, K_sel, self.subset_pop_size,
                                     endpoints=ep, seed=self.seed)
-            elif self.cand_even == 'maximin':               # extent coverage
-                z = (comp - comp.mean(0)) / (comp.std(0) + 1e-9)
-                idx = np.asarray(maximin_extras(z, anchor_idx=[], K=K_sel, seed=self.seed), int)
-            elif self.cand_even == 'grid':                  # per-axis-even quota over the box
-                idx = np.asarray(even_select(comp, predr, K_sel, g, self.comp_obj_min, self.comp_obj_max), int)
+            elif self.cand_even == 'maximin':               # farthest from front ∪ picked
+                idx = np.asarray(maximin_extras(comp, anchor_idx=[], K=K_sel, seed=self.seed,
+                                                anchors=nd_C), int)
+            elif self.cand_even == 'grid':                  # emptiest-union-cell quota over the box
+                idx = np.asarray(even_select(comp, predr, K_sel, g, self.comp_obj_min, self.comp_obj_max,
+                                             nd_F=nd_C), int)
             elif self.cand_even == 'moo':                   # loss×coverage knee, OR geometry-only axis_gap+cov_rad
                 idx = np.asarray(moo_subset_select(comp, predr, K_sel, self.comp_obj_min, self.comp_obj_max, g,
                                                    algo=self.moo_algo, pop=self.moo_pop, n_gen=self.moo_gen,
                                                    seed=self.seed, gap_std=self.moo_gap_std,
-                                                   coverage=self.moo_coverage, objs=self.moo_objs), int)
-            else:                                           # hybrid: front pressure + grid-even coverage
+                                                   coverage=self.moo_coverage, objs=self.moo_objs,
+                                                   nd_F=nd_C), int)
+            else:                                           # hybrid: front pressure + union-even coverage
                 k_even = int(round(self.even_frac * K_sel)); k_front = K_sel - k_even
                 fr = np.argsort(predr)[:k_front]
                 rest = np.setdiff1d(np.arange(len(Xc)), fr)
-                ev = (rest[even_select(comp[rest], predr[rest], k_even, g, self.comp_obj_min, self.comp_obj_max)]
+                ev = (rest[even_select(comp[rest], predr[rest], k_even, g, self.comp_obj_min, self.comp_obj_max,
+                                       nd_F=nd_C)]
                       if len(rest) else np.array([], int))
                 idx = np.concatenate([fr, ev]).astype(int)
             if n_al > 0:

@@ -13,8 +13,13 @@ Procedure (exact MCKP under measured additive rate-distortion):
      -> n_module*(n_option-1) real evals (vs NSGA's n_doe+iter*n_iter).
   3. size-aware DP-MCKP over the comp budget -> per-budget optimal allocation
      (exact, recovers non-convex frontier points).
-  4. MEASURE each frontier arch's real JSD and write iter_mckp.stats
-     (same layout as search.py, post_search-consumable).
+  4. write the DP product front to iter_mckp.stats (same layout as search.py,
+     post_search-consumable). DEFAULT --front_eval predict stores the UN-THINNED
+     front with loss = ADDITIVE PREDICTION (0 extra evals; consume via post_search
+     --second_expr + --select_measured_best --verify_topk K so the final pick is
+     measured — in-band the additive RANKING is measured-faithful).
+     --front_eval measure = legacy: re-measure each (thinned) frontier arch and
+     report the measured-vs-additive gap.
 
 JOINT mode (--comp_obj wbits eff_kvbits) — the additive-MCKP BASELINE for the
 (loss, wbits, eff_kvbits) 3-objective search: because the two budget axes are
@@ -188,7 +193,12 @@ def solve_axis(d, cost, comp_ref, dp_res, lo, hi):
     span = max(1e-9, -sum(min(c) for c in cost))   # min(c) <= 0 (index 0 = ref = 0)
     res = dp_res if dp_res > 0 else max(span / 400.0, 1e-6)
     dp = dp_mckp(d, cost, res)
-    pts = sorted((comp_ref + k, v[0], v[1]) for k, v in dp.items())
+    # Re-derive the EXACT comp of each DP state from its choice vector: the DP key is
+    # BINNED and the per-module rounding DRIFTS (measured +0.11 wbits over 224 modules
+    # at res=0.005), which would mis-filter narrow budget boxes and mislabel envelope
+    # budgets. The binned key is only the DP state-merging device, never the output.
+    pts = sorted((comp_ref + sum(cost[m][j] for m, j in enumerate(ch)), dist, ch)
+                 for _k, (dist, ch) in dp.items())
     # non-dominated lower envelope (comp asc, distortion strictly decreasing as comp rises)
     env, best = [], np.inf
     for comp, dist, ch in pts:
@@ -206,6 +216,20 @@ def subsample_env(env, n_points):
         idx = np.linspace(0, len(env) - 1, n_points).round().astype(int)
         env = [env[i] for i in sorted(set(idx))]
     return env
+
+
+def assemble_product(envs, mods_per_axis, ref_arch, base):
+    """Product of the per-axis envelopes → (archs, additive predictions, exact comps).
+    comps come from the envelopes' exact per-choice sums (== get_net_info to 1e-9)."""
+    front_archs, pred, comps = [], [], []
+    for combo in itertools.product(*envs):
+        a = deepcopy(ref_arch)
+        for mods, (_comp, _dist, ch) in zip(mods_per_axis, combo):
+            apply_choices(a, mods, ch)
+        front_archs.append(a)
+        pred.append(base + sum(dist for _comp, dist, _ch in combo))
+        comps.append([comp for comp, _dist, _ch in combo])
+    return front_archs, pred, comps
 
 
 def main():
@@ -285,30 +309,43 @@ def main():
         accelerator.print(f"[search_mckp] axis={axis}: DP-MCKP solved {n_states} comp-states "
                           f"({len(env)} frontier pts) in {(_t()-t0)*1000:.0f} ms (res={res:.4g})")
         n_pts = front_points
-        if len(axes) > 1 and n_pts <= 0:
+        if args.front_eval == 'measure' and len(axes) > 1 and n_pts <= 0:
             n_pts = {2: 16, 3: 6}[len(axes)]   # measured combos = n_pts ** n_axes
-            accelerator.print(f"[search_mckp] joint mode: thinning {axis} envelope to {n_pts} pts "
-                              f"(set --mckp_front_points to override)")
+            accelerator.print(f"[search_mckp] joint measure mode: thinning {axis} envelope to "
+                              f"{n_pts} pts (set --mckp_front_points to override)")
         envs.append(subsample_env(env, n_pts))
 
-    # ---- assemble frontier archs (product over axes; additive prediction) + MEASURE ----
-    front_archs, pred = [], []
-    for combo in itertools.product(*envs):
-        a = deepcopy(ref_arch)
-        for mods, (_comp, _dist, ch) in zip(mods_per_axis, combo):
-            apply_choices(a, mods, ch)
-        front_archs.append(a)
-        pred.append(base + sum(dist for _comp, dist, _ch in combo))
-    accelerator.print(f"[search_mckp] measuring {len(front_archs)} frontier archs (real JSD)…")
-    fmetrics, fcomp = engine._evaluate(archs=front_archs, accelerator=accelerator)
+    # ---- assemble frontier archs (product over axes; additive prediction) ----
+    if args.front_eval == 'predict':
+        # full product with no eval cost — cap only the ARCHIVE SIZE (json/rows)
+        cap = 100_000
+        n_prod = int(np.prod([len(e) for e in envs]))
+        if n_prod > cap:
+            per = max(2, int(cap ** (1.0 / len(envs))))
+            envs = [subsample_env(e, per) for e in envs]
+            accelerator.print(f"[search_mckp] predict front: product {n_prod} > {cap} row cap → "
+                              f"thinned to {'x'.join(str(len(e)) for e in envs)}")
+    front_archs, pred, comps = assemble_product(envs, mods_per_axis, ref_arch, base)
+
+    if args.front_eval == 'measure':
+        accelerator.print(f"[search_mckp] measuring {len(front_archs)} frontier archs (real JSD)…")
+        fmetrics, fcomp = engine._evaluate(archs=front_archs, accelerator=accelerator)
+        # additive-vs-measured gap on the frontier — in joint mode this quantifies the
+        # cross-axis interaction the additive baseline ignores (its known failure mode).
+        rmse, rho, tau = get_correlation(np.array(pred), np.array(fmetrics))
+        additivity = {'rmse': float(rmse), 'rho': float(rho), 'tau': float(tau)}
+    else:
+        # loss column = ADDITIVE PREDICTION (NOT 0/empty: post_search::select_joint ranks
+        # by this column, and in-band the additive RANKING is measured-faithful — pair
+        # with --select_measured_best --verify_topk K so the final pick is measured).
+        accelerator.print(f"[search_mckp] front_eval=predict: storing {len(front_archs)} un-thinned "
+                          f"product-front archs with PREDICTED loss (0 frontier evals)")
+        fmetrics, fcomp = pred, comps
+        additivity = None
 
     archive = []
     for a, mtr, cmp in zip(front_archs, fmetrics, fcomp):
         archive.append([a, float(mtr), *[float(c) for c in cmp]])
-
-    # additive-vs-measured gap on the frontier — in joint mode this quantifies the
-    # cross-axis interaction the additive baseline ignores (its known failure mode).
-    rmse, rho, tau = get_correlation(np.array(pred), np.array(fmetrics))
 
     if accelerator.is_main_process:
         os.makedirs(save_dir, exist_ok=True)
@@ -318,8 +355,9 @@ def main():
                        'axis': axes[0] if len(axes) == 1 else axes, 'axes': axes,
                        'comp_ref': comp_ref[axes[0]] if len(axes) == 1 else comp_ref,
                        'base_jsd': base, 'n_marginal_evals': 1 + len(index),
+                       'front_eval': args.front_eval,
                        'additive_pred': [float(p) for p in pred],
-                       'additivity': {'rmse': float(rmse), 'rho': float(rho), 'tau': float(tau)},
+                       'additivity': additivity,
                        # RAW (unclamped) per-module marginal measurements — the expensive part.
                        # Lets the DP / envelope / front grid be re-solved OFFLINE (different box,
                        # dp_res, front_points, clamping...) without re-measuring ~2k archs.
@@ -332,17 +370,22 @@ def main():
                                         for mod, dd, cc in zip(mods, d[ai], cost[ai])]}
                            for ai, (axis, mods) in enumerate(zip(axes, mods_per_axis))],
                        'surrogate': {'model': 'measured_dp_mckp'}}, f)
-        accelerator.print(f"[search_mckp] wrote {len(archive)} MEASURED frontier "
+        tag = 'MEASURED' if args.front_eval == 'measure' else 'PREDICTED-loss'
+        accelerator.print(f"[search_mckp] wrote {len(archive)} {tag} frontier "
                           f"archs -> {out}")
-        accelerator.print("\n" + " | ".join(f"{axis:>12}" for axis in axes)
-                          + f" | {'measured JSD':>12} | {'additive pred':>13}")
-        for (a, mtr, *cmp), p in zip(archive, pred):
-            accelerator.print(" | ".join(f"{c:>12.4f}" for c in cmp)
-                              + f" | {mtr:>12.5f} | {p:>13.5f}")
-        accelerator.print(f"\n[evals] MCKP total = {1+len(index)+len(front_archs)} "
+        if args.front_eval == 'measure':
+            accelerator.print("\n" + " | ".join(f"{axis:>12}" for axis in axes)
+                              + f" | {'measured JSD':>12} | {'additive pred':>13}")
+            for (a, mtr, *cmp), p in zip(archive, pred):
+                accelerator.print(" | ".join(f"{c:>12.4f}" for c in cmp)
+                                  + f" | {mtr:>12.5f} | {p:>13.5f}")
+        n_front_evals = len(front_archs) if args.front_eval == 'measure' else 0
+        accelerator.print(f"\n[evals] MCKP total = {1+len(index)+n_front_evals} "
                           f"(vs NSGA n_doe+iter*n_iter). base_jsd={base:.5f}")
-        accelerator.print(f"[additivity] measured vs additive on the frontier: "
-                          f"RMSE = {rmse:.4f}, Spearman's Rho = {rho:.4f}, Kendall's Tau = {tau:.4f}")
+        if additivity is not None:
+            accelerator.print(f"[additivity] measured vs additive on the frontier: "
+                              f"RMSE = {additivity['rmse']:.4f}, Spearman's Rho = "
+                              f"{additivity['rho']:.4f}, Kendall's Tau = {additivity['tau']:.4f}")
 
 
 def build_parser():
@@ -402,10 +445,17 @@ def build_parser():
     p.add_argument('--prefill_prompt', action='store_true')
     p.add_argument('--verbosity', type=str, default='FATAL')
     # MCKP knobs
+    p.add_argument('--front_eval', type=str, default='predict', choices=['predict', 'measure'],
+                   help="'predict' (default): NO frontier measurement — the archive stores the "
+                        "un-thinned DP product front with loss = ADDITIVE PREDICTION (in-band "
+                        "ranking is measured-faithful; consume via post_search --second_expr "
+                        "with --select_measured_best --verify_topk K so the final pick is "
+                        "measured). 'measure': legacy — re-measure each (thinned) frontier arch "
+                        "and report the additivity gap.")
     p.add_argument('--mckp_front_points', type=int, default=0,
-                   help='frontier budgets to MEASURE per axis; <=0 = ENTIRE frontier '
-                        '(single-axis) / 16 per axis (2-axis joint) / 6 per axis (3-axis); '
-                        'measured combos = product over axes')
+                   help='frontier budgets kept per axis; <=0 = ENTIRE frontier (predict mode; '
+                        'archive rows auto-capped at 100k) / 16 per axis (2-axis measure) / '
+                        '6 per axis (3-axis measure); combos = product over axes')
     p.add_argument('--dp_res', type=float, default=0.0,
                    help='comp-budget DP bin width (0 = auto = span/400, per axis)')
     return p
