@@ -15,8 +15,10 @@ CONFIG=config/llama.json
 # MODEL_NAME=Mistral-7B-Instruct-v0.3
 # CONFIG=config/mistral.json
 
-W_EXPR=save/search/think/2606070017_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_128stride_pp512
-EFF_KV_EXPR=save/search/think/2606181423_Llama-3.1-8B-Instruct_eff_kvbits_kivi_sk8_w4kv234_gs3264128x2_128_r128_kd0-64x5_vd0-64x5_obj_0.1_5_st128_pp512
+# W_EXPR=save/search/think/2606070017_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2048seq_0token_rbf_128stride_pp512
+# EFF_KV_EXPR=save/search/think/2606181423_Llama-3.1-8B-Instruct_eff_kvbits_kivi_sk8_w4kv234_gs3264128x2_128_r128_kd0-64x5_vd0-64x5_obj_0.1_5_st128_pp512
+W_EXPR=save/search/think/2606302046_Llama-3.1-8B-Instruct_wbits_kivi_sk8_w234kv4_gs128_r128_kd0_vd0_obj_2_5_st128_pp512/iter_200.stats
+EFF_KV_EXPR=save/search/think/2606302047_Llama-3.1-8B-Instruct_eff_kvbits_kivi_think_sk8_w4kv234_gs3264128x2_128_r128_kd0to64x16_vd0to64x16_obj_0.1_5_st128_pp512/iter_200.stats
 
 for VAR_NAME in W_EXPR EFF_KV_EXPR; do
     VAR_VALUE="${!VAR_NAME}"
@@ -25,7 +27,8 @@ for VAR_NAME in W_EXPR EFF_KV_EXPR; do
     fi
 done
 
-W_METHOD=hqq       # hqq = in-process eval (accelerate DP) | awq = AWQ-native arch-parallel eval pool
+W_METHOD=hqq
+# W_METHOD=awq
 W_BITS="2 3 4"; W_GROUP_SIZE=128; AXIS=1
 KV_METHOD="kivi think"
 W_METHOD_TEXT=${W_METHOD}
@@ -70,12 +73,7 @@ fi
 ATTN_SINK=8
 N_TOKEN=0
 
-# down-select = subset selector, mutation = band-conditional (P1), seeds = staircase (P2);
-# losing variants (maximin/grid/hybrid/moo, --al_frac, global-draw/block-seed arms) were
-# removed 2026-07 after the offline evidence + 2-seed A/B pilots.
 GRID_SEED=True       # True = inject staircase even-supply genomes per box cell each iter
-                     # (band counts + seed freshness are AUTO — no knobs)
-
 
 FRONT_EPS_REL=0.3   # adaptive ε band = front_jsd·(1+rel): scale-free, auto-wider in the corner
 DIV_K=200           # structural-diversity blocks/axis (maximin; richest crossover — dominant for hv)
