@@ -74,6 +74,7 @@ N_TOKEN=0
 # losing variants (maximin/grid/hybrid/moo, --al_frac, global-draw/block-seed arms) were
 # removed 2026-07 after the offline evidence + 2-seed A/B pilots.
 GRID_SEED=True       # True = inject staircase even-supply genomes per box cell each iter
+                     # (band counts + seed freshness are AUTO — no knobs)
 
 
 FRONT_EPS_REL=0.3   # adaptive ε band = front_jsd·(1+rel): scale-free, auto-wider in the corner

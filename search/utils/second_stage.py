@@ -270,16 +270,47 @@ class BandTable:
         monotone — but the extreme right corner is NOT reachable (top-band modal ≠
         corner arch), so stair_seed must be paired with explicit corner genomes.
     """
-    def __init__(self, Wb, w_comp, KVb, kv_comp, xu, nw, n_bands=20, alpha=0.5):
-        self.nw, self.n_bands = nw, n_bands
-        self.we, self.Pw, self.Sw = self._fit(np.asarray(Wb, int), np.asarray(w_comp, float),
-                                              np.asarray(xu[:nw], int), n_bands, alpha)
-        self.ke, self.Pk, self.Sk = self._fit(np.asarray(KVb, int), np.asarray(kv_comp, float),
-                                              np.asarray(xu[nw:], int), n_bands, alpha)
+    def __init__(self, Wb, w_comp, KVb, kv_comp, xu, nw, n_bands=None, alpha=0.5):
+        self.nw = nw
+        Wb = np.asarray(Wb, int); KVb = np.asarray(KVb, int)
+        w_comp = np.asarray(w_comp, float); kv_comp = np.asarray(kv_comp, float)
+        if n_bands:                              # explicit override: uniform quantile bands
+            ew = np.quantile(w_comp, np.linspace(0, 1, n_bands + 1))
+            ek = np.quantile(kv_comp, np.linspace(0, 1, n_bands + 1))
+            ew[0] -= 1e-9; ew[-1] += 1e-9; ek[0] -= 1e-9; ek[-1] += 1e-9
+        else:                                    # AUTO: change-point edges (data-driven)
+            ew = self._changepoint_edges(Wb, w_comp)
+            ek = self._changepoint_edges(KVb, kv_comp)
+        self.we, self.Pw, self.Sw = self._fit(Wb, w_comp, np.asarray(xu[:nw], int), ew, alpha)
+        self.ke, self.Pk, self.Sk = self._fit(KVb, kv_comp, np.asarray(xu[nw:], int), ek, alpha)
 
     @staticmethod
-    def _fit(G, cc, xu_part, B, alpha):
-        edges = np.quantile(cc, np.linspace(0, 1, B + 1)); edges[0] -= 1e-9; edges[-1] += 1e-9
+    def _changepoint_edges(G, cc, n_fine=64):
+        """AUTO band edges at the comps where the staircase MEANINGFULLY changes: 64 fine
+        quantile bins; a boundary is kept only where adjacent bins' modal genomes differ by
+        MORE than the noise floor (median split-half modal Hamming within a bin) — flat
+        stretches merge, dense-switching regions keep resolution. Measured vs uniform bands
+        (0630 archives, joint-front eval): bits/cell W −0.935 / KV −1.273 vs uniform-20
+        −0.958/−1.340, stair decode err KV 0.068 vs 0.123 — better on both axes (band
+        widths end up 0.02–0.16, ~47/49 bands)."""
+        rng = np.random.default_rng(0)                     # fixed: deterministic across ranks
+        q = np.quantile(cc, np.linspace(0, 1, n_fine + 1)); q[0] -= 1e-9; q[-1] += 1e-9
+        modals, noise = [], []
+        for b in range(n_fine):
+            Gb = G[(cc > q[b]) & (cc <= q[b + 1])]
+            modals.append(np.array([np.bincount(Gb[:, c]).argmax() for c in range(G.shape[1])]))
+            h = rng.permutation(len(Gb))
+            m1 = np.array([np.bincount(Gb[h[::2], c]).argmax() for c in range(G.shape[1])])
+            m2 = np.array([np.bincount(Gb[h[1::2], c]).argmax() for c in range(G.shape[1])])
+            noise.append((m1 != m2).sum())
+        nf = np.median(noise)
+        edges = [q[0]] + [q[b] for b in range(1, n_fine)
+                          if (modals[b] != modals[b - 1]).sum() > nf] + [q[-1]]
+        return np.array(edges)
+
+    @staticmethod
+    def _fit(G, cc, xu_part, edges, alpha):
+        B = len(edges) - 1
         D = G.shape[1]; MO = int(xu_part.max()) + 1
         P = np.zeros((B, D, MO)); S = np.zeros((B, D), int)
         valid = np.arange(MO)[None, :] <= xu_part[:, None]       # legal options per cell
@@ -295,7 +326,7 @@ class BandTable:
     def band(self, comp, axis):
         """comp value(s) → band index(es) on axis 'w' | 'kv'."""
         e = self.we if axis == 'w' else self.ke
-        return np.clip(np.searchsorted(e, comp) - 1, 0, self.n_bands - 1)
+        return np.clip(np.searchsorted(e, comp) - 1, 0, len(e) - 2)
 
     def draw(self, g_idx, band_w, band_kv):
         """sample ONE genome cell from the individual's own-axis band distribution (P1)."""
@@ -490,27 +521,35 @@ def grid_seed(Wg, KVg, w_comp, kv_comp, comp_min, comp_max, g):
     return np.array([np.concatenate([Wg[a], KVg[b]]) for a in wi for b in ki])
 
 
-def stair_seed(bt, comp_min, comp_max, g, n_stoch=0, corners=None):
-    """P2 supply seeding (--grid_seed): one staircase-decoded genome per
-    (t_w × t_kv) grid point over the budget box, + n_stoch stochastic in-band samples
-    per point (diversity), + explicit corner genomes.
+def stair_seed(bt, comp_min, comp_max, g, seen=None, corners=None, retries=4):
+    """P2 supply seeding (--grid_seed): ONE FRESH genome per (t_w × t_kv) grid point over
+    the budget box, + explicit corner genomes.
 
-    Drop-in alternative to grid_seed (same output contract: genome array → candidate
-    pool) that SYNTHESISES the per-cell band consensus instead of copying the nearest
-    WHOLE 1st-stage block — supply quality no longer degrades where the 1st-stage pool
-    is sparse (exactly the right-end-collapse region: nearest-block distance grows with
-    pool sparsity, while comp(stair(t)) tracks t within 0.037 (W) / 0.123 (KV) —
-    tests/p1p2_band_table.py). `corners` is REQUIRED for full box coverage: the
-    top-band modal genome is NOT the extreme corner (measured reach W 4.11/4.25,
-    KV 3.73/4.25), so pass the pool-extreme combos (as in SecondSearch._initialize)."""
-    tws = np.linspace(comp_min[0], comp_max[0], g)
-    tks = np.linspace(comp_min[1], comp_max[1], g)
-    out = [bt.stair(a, b) for a in tws for b in tks]
-    for a in tws:
-        for b in tks:
-            out += [bt.sample_genome(a, b) for _ in range(n_stoch)]
-    if corners is not None and len(corners):
-        out += [np.asarray(c) for c in corners]
+    Freshness is SELF-REGULATING (no knob): the deterministic staircase genome is used
+    while unmeasured; once it is in `seen` (the archive — a static BandTable emits the
+    same modal genome every iter, so after its first measurement it would be dedup'd to
+    zero supply), the point falls back to stochastic in-band samples (each cell drawn
+    from its band distribution) retried up to `retries` times for a fresh one — supply
+    per budget cell stays alive for the whole run.
+
+    Synthesises the per-cell band consensus instead of copying the nearest WHOLE
+    1st-stage block — supply quality no longer degrades where the 1st-stage pool is
+    sparse (the right-end-collapse region); comp(stair(t)) tracks t within 0.037 (W) /
+    0.123 (KV) — tests/p1p2_band_table.py. `corners` is REQUIRED for full box coverage:
+    the top-band modal genome is NOT the extreme corner (measured reach W 4.11/4.25,
+    KV 3.73/4.25) — pass the pool-extreme combos (as in SecondSearch._initialize)."""
+    seen = seen if seen is not None else set()
+    out = []
+    for a in np.linspace(comp_min[0], comp_max[0], g):
+        for b in np.linspace(comp_min[1], comp_max[1], g):
+            cand = bt.stair(a, b)
+            for _ in range(retries):
+                if tuple(cand.tolist()) not in seen:
+                    break
+                cand = bt.sample_genome(a, b)
+            out.append(cand)
+    if corners is not None:
+        out += [np.asarray(c) for c in corners if tuple(np.asarray(c).tolist()) not in seen]
     return np.array(out)
 
 

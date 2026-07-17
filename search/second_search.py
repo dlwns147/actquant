@@ -67,6 +67,12 @@ class SecondSearch:
         ss.encode() covers every arch (model/archive-general; no hardcoded grids). QEFT-on-HQQ:
         a W archive with (bits, n_outlier) entries rebuilds the SAME option ladder."""
         wbits, kvbits, gs_lists, kprune, vprune = derive_options(args.w_expr, args.eff_kv_expr)
+        # --w_bits is a CONSISTENCY CHECK, not a control: the archive decides the options;
+        # this guards the silent mismatch where the HQQ banks passed via --quant_model_paths
+        # (built from the script's W_BITS) don't cover the archive's bit ladder.
+        if args.w_bits and sorted(args.w_bits) != wbits:
+            raise SystemExit(f"[options] --w_bits {sorted(args.w_bits)} != archive-derived {wbits}; "
+                             f"the archives decide the search space — fix W_BITS / the bank list.")
         n_qeft_column, qeft_bits = derive_qeft(args.w_expr, args.eff_kv_expr)
         self._uses_qeft = qeft_bits is not None; self._n_qeft_column = n_qeft_column
         self.wbits, self.kvbits = wbits, kvbits
@@ -133,12 +139,12 @@ class SecondSearch:
         Wb, wbc, KVb, kbc = load_band_blocks(args.w_expr, args.eff_kv_expr, self.ss,
                                              w_eps=args.w_front_eps, kv_eps=args.kv_front_eps,
                                              eps_rel=args.front_eps_rel)
-        self.band_table = BandTable(Wb, wbc, KVb, kbc, self.xu, self.nw, n_bands=args.band_n)
+        self.band_table = BandTable(Wb, wbc, KVb, kbc, self.xu, self.nw)   # band counts auto (~300/band)
         ws = sorted({int(np.argmin(self.w_comp)), int(np.argmax(self.w_comp))})
         ks = sorted({int(np.argmin(self.kv_comp)), int(np.argmax(self.kv_comp))})
         self._corner_genomes = [np.concatenate([self.Wg[a], self.KVg[b]]) for a in ws for b in ks]
-        self.accelerator.print(f"[band table] {args.band_n} bands × (W {len(Wb)} | KV {len(KVb)}) blocks "
-              f"(+{len(self._corner_genomes)} corners)")
+        self.accelerator.print(f"[band table] auto bands W {len(self.band_table.we) - 1} × {len(Wb)} blocks | "
+              f"KV {len(self.band_table.ke) - 1} × {len(KVb)} blocks (+{len(self._corner_genomes)} corners)")
         # predictor active set is recomputed data-driven per fit (_fit_predictor): cols that
         # vary in the current archive, capped below N for RBF (else singular → nan).
         self.active = np.where(self.w > 0.05)[0]
@@ -370,14 +376,14 @@ class SecondSearch:
         Ga = self._encode_archive(archive)                          # archive genomes (cached)
         g = grid_side(K, self.args.cand_grid)
         pool = res.pop.get('X')
+        seen = {tuple(gg) for gg in Ga}
         if self.args.grid_seed:
             # P2 even-supply (the right-end-collapse fix: NSGA's dominance drops high-comp
-            # candidates where loss is flat): staircase-decoded band-consensus genome per
-            # box grid point (+ --seed_stoch stochastic in-band samples) + corner genomes.
+            # candidates where loss is flat): one FRESH staircase/in-band genome per box
+            # grid point (self-regulating vs `seen` — see stair_seed) + corner genomes.
             pool = np.vstack([pool, stair_seed(self.band_table, self.comp_obj_min,
-                                               self.comp_obj_max, g, n_stoch=self.args.seed_stoch,
+                                               self.comp_obj_max, g, seen=seen,
                                                corners=self._corner_genomes)])
-        seen = {tuple(gg) for gg in Ga}
         Xc = np.unique(np.clip(np.round(pool), 0, self.xu).astype(int), axis=0)
         Xc = np.array([gg for gg in Xc if tuple(gg) not in seen])
         if len(Xc) == 0:
@@ -592,15 +598,15 @@ def build_parser():
     # are BAND-CONDITIONAL (P1) and supply seeds are staircase-decoded (P2) — the legacy
     # global-draw / nearest-block arms were removed 2026-07 after losing the 2-seed A/B
     # pilot (HV .2523/.2620 vs .2481/.2580; per-cell best-loss 14-6/14-8; corner better).
-    p.add_argument('--seed_stoch', type=int, default=0,
-                   help='stair mode: extra STOCHASTIC in-band samples per grid point (diversity; '
-                        '0 = deterministic staircase only)')
-    p.add_argument('--band_n', type=int, default=20,
-                   help='number of comp-quantile bands in the P1/P2 BandTable (20 measured)')
+    # Band counts and seed freshness are AUTO (BandTable._auto_bands / stair_seed seen-retry).
     p.add_argument('--mut_p_val', type=float, default=0.5, help='prob a mutated cell takes a 1st-stage value (else ±1)')
     p.add_argument('--mut_p_mod', type=float, default=0.15, help='prob/indiv of a 1st-stage module-transplant')
-    # search-space options are AUTO-DERIVED from the 1st-stage archives (derive_options);
-    # only the W group size is a free knob here.
+    # search-space options are AUTO-DERIVED from the 1st-stage archives (derive_options).
+    # --w_bits is kept as a consistency CHECK against the HQQ bank list (not a control);
+    # the W group size is the only free space knob here.
+    p.add_argument('--w_bits', type=int, nargs='+', default=[],
+                   help='expected W bit ladder — verified against the archive-derived options '
+                        '(guards a quant_model_paths/archive mismatch); empty = skip check')
     p.add_argument('--w_group_size', type=int, default=128)
     # arch-parallel eval pool (for expensive backends: --w_method awq)
     p.add_argument('--eval_workers', type=int, default=0,
