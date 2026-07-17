@@ -28,12 +28,12 @@ from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from search_space.llama import LlamaSearchSpace
 from predictor.factory import get_predictor
 from utils.func import set_seed, get_correlation, get_net_info
-from utils.select import subset_select
+from utils.select import maximin_extras, even_select, moo_subset_select, subset_select
 from utils.second_stage import (
-    encoding_xu, nw_split, load_block_pools, load_band_blocks,
+    encoding_xu, nw_split, load_block_pools, load_band_blocks, load_extra_parts,
     gene_weights, freeze_mask, block_segments, derive_options, derive_qeft,
-    FrontierProductSampling, AxisBlockCrossover, KnowledgeMutation, JointAuxProblem, JointComp,
-    ArchFeatures, BandTable, grid_side, stair_seed, calc_hv, front_coverage, save_viz)
+    FrontierProductSampling, AxisBlockCrossover, WeightedIntMutation, KnowledgeMutation, JointAuxProblem, JointComp,
+    ArchFeatures, BandTable, grid_side, grid_seed, stair_seed, calc_hv, front_coverage, save_viz)
 
 
 class SecondSearch:
@@ -86,10 +86,11 @@ class SecondSearch:
         self.segments = block_segments(self.ss)
 
     def _load_pools(self, args):
-        """1st-stage CROSSOVER pools (ε-band → div_k diversity) + budget box.
+        """1st-stage CROSSOVER pools (ε-band → div_k diversity) + budget box + SEED pools.
         Box: any unset --comp_obj_min/max edge is AUTO-derived from the pools' achievable
         comp range (the input files decide the range); pools are then filtered to the box
-        per axis (every W×KV combination stays feasible)."""
+        per axis (every W×KV combination stays feasible). Seed pools (--seed_pool full /
+        --seed_expr) are the denser blocks used only for supply seeding."""
         self.Wg, self.KVg, _, _, w_comp, kv_comp = load_block_pools(
             args.w_expr, args.eff_kv_expr, self.ss, w_eps=args.w_front_eps, kv_eps=args.kv_front_eps,
             eps_rel=args.front_eps_rel, div_k=args.div_k, seed=args.seed)
@@ -113,6 +114,24 @@ class SecondSearch:
             self.accelerator.print(f"[budget box] W {len(self.Wg)}→{int(wm.sum())} | KV {len(self.KVg)}→{int(km.sum())}")
         self.Wg, self.KVg = self.Wg[wm], self.KVg[km]
         self.w_comp, self.kv_comp = w_comp[wm], kv_comp[km]   # in-box comp (for endpoint corners)
+        self.Wseed = self.KVseed = None
+        if args.seed_pool == 'full':                 # FULL ε-band blocks (no div_k pruning)
+            Wb, wbc, KVb, kbc = load_band_blocks(args.w_expr, args.eff_kv_expr, self.ss,
+                                                 w_eps=args.w_front_eps, kv_eps=args.kv_front_eps,
+                                                 eps_rel=args.front_eps_rel)
+            wm2 = (wbc >= self.comp_obj_min[0]) & (wbc <= self.comp_obj_max[0])
+            km2 = (kbc >= self.comp_obj_min[1]) & (kbc <= self.comp_obj_max[1])
+            self.Wseed, self.wseed_comp = Wb[wm2], wbc[wm2]
+            self.KVseed, self.kvseed_comp = KVb[km2], kbc[km2]
+            self.accelerator.print(f"[seed_pool full] band blocks W {len(self.Wseed)} | KV {len(self.KVseed)} (in-box)")
+        if args.seed_expr:                           # extra archives' W/KV parts join the seeds
+            xW, xwc, xK, xkc, n_skip = load_extra_parts(args.seed_expr, self.ss, self._comp)
+            bW, bwc = (self.Wseed, self.wseed_comp) if self.Wseed is not None else (self.Wg, self.w_comp)
+            bK, bkc = (self.KVseed, self.kvseed_comp) if self.KVseed is not None else (self.KVg, self.kv_comp)
+            self.Wseed = np.vstack([bW, xW]); self.wseed_comp = np.concatenate([bwc, xwc])
+            self.KVseed = np.vstack([bK, xK]); self.kvseed_comp = np.concatenate([bkc, xkc])
+            self.accelerator.print(f"[seed_expr] +{len(xW)} W / +{len(xK)} KV parts from {len(args.seed_expr)} "
+                  f"archives (skipped {n_skip} non-encodable)")
 
     def _build_knowledge(self, args):
         """1st-stage knowledge wired into the operators:
@@ -130,15 +149,20 @@ class SecondSearch:
               f"→ free(contested) dims {int(self.contested.sum())} "
               f"(W {int(self.contested[:self.nw].sum())}/{self.nw}, "
               f"KV {int(self.contested[self.nw:].sum())}/{self.n_var-self.nw})")
-        Wb, wbc, KVb, kbc = load_band_blocks(args.w_expr, args.eff_kv_expr, self.ss,
-                                             w_eps=args.w_front_eps, kv_eps=args.kv_front_eps,
-                                             eps_rel=args.front_eps_rel)
-        self.band_table = BandTable(Wb, wbc, KVb, kbc, self.xu, self.nw, n_bands=args.band_n)
-        ws = sorted({int(np.argmin(self.w_comp)), int(np.argmax(self.w_comp))})
-        ks = sorted({int(np.argmin(self.kv_comp)), int(np.argmax(self.kv_comp))})
-        self._corner_genomes = [np.concatenate([self.Wg[a], self.KVg[b]]) for a in ws for b in ks]
-        self.accelerator.print(f"[band table] {args.band_n} bands × (W {len(Wb)} | KV {len(KVb)}) blocks "
-              f"(+{len(self._corner_genomes)} corners)")
+        self.band_table = self._corner_genomes = None
+        if args.mut_cond == 'band' or (args.grid_seed and args.seed_mode == 'stair'):
+            if self.Wseed is not None and not args.seed_expr:      # pure ε-band already loaded
+                Wb, wbc, KVb, kbc = self.Wseed, self.wseed_comp, self.KVseed, self.kvseed_comp
+            else:
+                Wb, wbc, KVb, kbc = load_band_blocks(args.w_expr, args.eff_kv_expr, self.ss,
+                                                     w_eps=args.w_front_eps, kv_eps=args.kv_front_eps,
+                                                     eps_rel=args.front_eps_rel)
+            self.band_table = BandTable(Wb, wbc, KVb, kbc, self.xu, self.nw, n_bands=args.band_n)
+            ws = sorted({int(np.argmin(self.w_comp)), int(np.argmax(self.w_comp))})
+            ks = sorted({int(np.argmin(self.kv_comp)), int(np.argmax(self.kv_comp))})
+            self._corner_genomes = [np.concatenate([self.Wg[a], self.KVg[b]]) for a in ws for b in ks]
+            self.accelerator.print(f"[band table] {args.band_n} bands × (W {len(Wb)} | KV {len(KVb)}) blocks "
+                  f"| mut_cond={args.mut_cond} seed_mode={args.seed_mode} (+{len(self._corner_genomes)} corners)")
         # predictor active set is recomputed data-driven per fit (_fit_predictor): cols that
         # vary in the current archive, capped below N for RBF (else singular → nan).
         self.active = np.where(self.w > 0.05)[0]
@@ -367,16 +391,11 @@ class SecondSearch:
         """one candidate round: NSGA-III generation → supply seeding (--grid_seed) →
         dedup vs archive → predict → down-select K (--cand_even [+ --al_frac quota])."""
         res = self._nsga(predictor)
-        Ga = self._encode_archive(archive)                          # archive genomes (cached)
+        Ga = self._encode_archive(archive)                          # archive genomes (cached; reused below)
         g = grid_side(K, self.args.cand_grid)
         pool = res.pop.get('X')
         if self.args.grid_seed:
-            # P2 even-supply (the right-end-collapse fix: NSGA's dominance drops high-comp
-            # candidates where loss is flat): staircase-decoded band-consensus genome per
-            # box grid point (+ --seed_stoch stochastic in-band samples) + corner genomes.
-            pool = np.vstack([pool, stair_seed(self.band_table, self.comp_obj_min,
-                                               self.comp_obj_max, g, n_stoch=self.args.seed_stoch,
-                                               corners=self._corner_genomes)])
+            pool = np.vstack([pool, self._seed_supply(archive, Ga, g)])
         seen = {tuple(gg) for gg in Ga}
         Xc = np.unique(np.clip(np.round(pool), 0, self.xu).astype(int), axis=0)
         Xc = np.array([gg for gg in Xc if tuple(gg) not in seen])
@@ -384,7 +403,7 @@ class SecondSearch:
             return [], np.zeros((0,))
         pred = np.asarray(predictor.predict(Xc[:, self.active].astype(float))).ravel()
         if len(Xc) > K:
-            idx = self._downselect(Xc, archive, K)
+            idx = self._downselect(Xc, pred, archive, Ga, K, g)
             Xc, pred = Xc[idx], pred[idx]
         return [self.ss.decode(gg) for gg in Xc], pred
 
@@ -394,30 +413,91 @@ class SecondSearch:
         problem = JointAuxProblem(self.ss, predictor, self.active, self.xu, self.comp_obj,
                                   self.comp_obj_min, self.comp_obj_max, self.n_token, self.attn_sink,
                                   comp=self._comp)
-        mut = KnowledgeMutation(self.w, self.xu, self.Wg, self.KVg, self.nw, self.segments,
-                                p_val=self.args.mut_p_val, p_mod=self.args.mut_p_mod,
-                                band_table=self.band_table, comp=self._comp, comp_obj=self.comp_obj)
+        if self.args.mutation == 'knowledge':
+            mut = KnowledgeMutation(self.w, self.xu, self.Wg, self.KVg, self.nw, self.segments,
+                                    p_val=self.args.mut_p_val, p_mod=self.args.mut_p_mod,
+                                    band_table=self.band_table if self.args.mut_cond == 'band' else None,
+                                    comp=self._comp, comp_obj=self.comp_obj)
+        else:
+            mut = WeightedIntMutation(self.w, self.xu)
         algo = NSGA3(pop_size=self.ga_pop_size, ref_dirs=self.ref_dirs,
                      sampling=FrontierProductSampling(self.Wg, self.KVg),
                      crossover=AxisBlockCrossover(self.nw, self.n_var),
                      mutation=mut, eliminate_duplicates=False)
-        return minimize(problem, algo, ('n_gen', 20), seed=self.args.seed, verbose=True)
+        return minimize(problem, algo, ('n_gen', 20), seed=self.args.seed, save_history=True, verbose=True)
 
-    def _downselect(self, Xc, archive, K):
-        """pick K candidates with the subset selector: union(archive front, picks)
-        std-of-gaps GA — hole-filling, keeps edge candidates (an isolated edge candidate
-        splits the front's largest gap and is KEPT, where subset-only geometry drops it).
-        The only selector that survived the right-end replay post-mortem (29/30 injected
-        edge candidates kept vs moo 13/30 / maximin 16/30 — baseline_search 2607100451/0638);
-        the losing variants (maximin/grid/hybrid/moo) and the measured-negative --al_frac
-        AL quota were removed 2026-07 (utils/select.py keeps the selectors for the
-        visualize/ studies)."""
+    def _seed_supply(self, archive, Ga, g):
+        """--grid_seed even-supply genomes over the budget box (the right-end-collapse fix:
+        NSGA's dominance drops high-comp candidates where loss is flat, so every box cell
+        gets material injected each iter).
+        'stair' (P2): staircase-decoded band-consensus genome per grid point (+ --seed_stoch
+          stochastic in-band samples + corner genomes) — no pool bookkeeping / nearest
+          search, and supply stays on-target where the 1st-stage pool is sparse.
+        'block' (legacy): nearest-comp whole-block assembly from the seed pools
+          (--seed_pool first/archive/full; 'archive' adds the current archive's W/KV parts)."""
+        if self.args.seed_mode == 'stair':
+            return stair_seed(self.band_table, self.comp_obj_min, self.comp_obj_max, g,
+                              n_stoch=self.args.seed_stoch, corners=self._corner_genomes)
+        if self.Wseed is not None:
+            Wp, wc, KVp, kc = self.Wseed, self.wseed_comp, self.KVseed, self.kvseed_comp
+        else:
+            Wp, wc, KVp, kc = self.Wg, self.w_comp, self.KVg, self.kv_comp
+        if self.args.seed_pool != 'first':               # + archive W/KV sub-blocks (2nd-stage mutants)
+            aw = np.array([x[2] for x in archive]); ak = np.array([x[3] for x in archive])
+            uW, iW = np.unique(Ga[:, :self.nw], axis=0, return_index=True)
+            uK, iK = np.unique(Ga[:, self.nw:], axis=0, return_index=True)
+            Wp = np.vstack([Wp, uW]); wc = np.concatenate([wc, aw[iW]])
+            KVp = np.vstack([KVp, uK]); kc = np.concatenate([kc, ak[iK]])
+        return grid_seed(Wp, KVp, wc, kc, self.comp_obj_min, self.comp_obj_max, g)
+
+    def _downselect(self, Xc, pred, archive, Ga, K, g):
+        """pick K of the candidates: --cand_even selector scored on front ∪ picks
+        (hole-filling — legacy search.py::SubsetProblem semantics: an isolated edge
+        candidate splits the front's largest gap and is KEPT), + optional --al_frac
+        ACTIVE-LEARNING quota = candidates farthest (standardized active-dims distance)
+        from every measured arch (model-free uncertainty proxy; default 0 — in-house
+        evidence says AL payoff is tail-only)."""
+        n_al = int(round(self.args.al_frac * K))
+        K_sel = K - n_al
         comp = self._comp.batch(Xc, self.comp_obj)       # (N,2) [wbits, eff_kvbits], vectorized
         Fa = np.column_stack([[x[i] for x in archive] for i in (1, 2, 3)])
         fr_nd = NonDominatedSorting().do(Fa, only_non_dominated_front=True)
-        return subset_select(comp, Fa[fr_nd][:, 1:], K, self.args.subset_pop_size,
-                             endpoints=np.array([self.comp_obj_min, self.comp_obj_max], float),
-                             seed=self.args.seed)
+        nd_C = Fa[fr_nd][:, 1:]                          # archive Pareto-front comps
+        if self.args.cand_even == 'subset':              # union(front, picks) std-gap GA
+            idx = subset_select(comp, nd_C, K_sel, self.args.subset_pop_size,
+                                endpoints=np.array([self.comp_obj_min, self.comp_obj_max], float),
+                                seed=self.args.seed)
+        elif self.args.cand_even == 'maximin':           # farthest from front ∪ picked
+            idx = np.asarray(maximin_extras(comp, anchor_idx=[], K=K_sel, seed=self.args.seed,
+                                            anchors=nd_C), int)
+        elif self.args.cand_even == 'grid':              # emptiest-union-cell quota over the box
+            idx = even_select(comp, pred, K_sel, g, self.comp_obj_min, self.comp_obj_max,
+                              nd_F=nd_C)
+        elif self.args.cand_even == 'moo':               # 2/3-obj (loss × coverage [× gap-std]) → knee
+            idx = moo_subset_select(comp, pred, K_sel, self.comp_obj_min, self.comp_obj_max, g,
+                                    algo=self.args.moo_algo, pop=self.args.moo_pop,
+                                    n_gen=self.args.moo_gen, seed=self.args.seed,
+                                    gap_std=self.args.moo_gap_std,
+                                    coverage=self.args.moo_coverage, nd_F=nd_C)
+        else:                                            # hybrid: front pressure + union-even coverage
+            k_even = int(round(self.args.even_frac * K_sel)); k_front = K_sel - k_even
+            front = np.argsort(pred)[:k_front]           # low predicted loss = keep the front moving
+            rest = np.setdiff1d(np.arange(len(Xc)), front)
+            even = (rest[even_select(comp[rest], pred[rest], k_even, g,
+                                     self.comp_obj_min, self.comp_obj_max, nd_F=nd_C)]
+                    if len(rest) else np.array([], int))
+            idx = np.concatenate([front, even]).astype(int)
+        if n_al > 0:                                     # AL quota: farthest-from-archive extras
+            rest = np.setdiff1d(np.arange(len(Xc)), idx)
+            if len(rest):
+                act = self.active
+                mu = Ga[:, act].mean(0); sd = Ga[:, act].std(0); sd[sd < 1e-9] = 1.0
+                A = (Ga[:, act] - mu) / sd
+                Rz = (Xc[rest][:, act] - mu) / sd
+                from scipy.spatial.distance import cdist
+                dmin = cdist(Rz, A).min(1)
+                idx = np.concatenate([idx, rest[np.argsort(-dmin)[:n_al]]]).astype(int)
+        return idx
 
     def _initialize(self):
         """DOE seed, mirroring search_space.llama.initialize: enumerate the BOUNDARY corners
@@ -581,17 +661,56 @@ def build_parser():
     p.add_argument('--front_eps_rel', type=float, default=0.0, help='relative ε band = front_jsd·(1+rel); scale-free, auto-wider in the high-loss corner')
     p.add_argument('--div_k', type=int, default=0, help='keep div_k structurally-diverse blocks per axis (maximin; 0=off)')
     p.add_argument('--agree_frac', type=float, default=0.95, help='L2 freeze: cells where ≥ this fraction of 1st-stage blocks agree are frozen at consensus (mutation skips them); >1.0 disables. 0.95 is loss-free per tests/joint_reabsorption.py')
-    # per-iteration candidate down-select = subset selector (union(archive front, picks)
-    # std-of-gaps GA — hole-filling, keeps edge candidates: 29/30 injected right-end kept
-    # vs moo 13/30 / maximin 16/30, baseline_search 2607100451/0638 post-mortem; the losing
-    # selector variants and the measured-negative --al_frac AL quota were removed 2026-07).
-    p.add_argument('--subset_pop_size', type=int, default=100, help='down-select subset-GA population size')
-    p.add_argument('--cand_grid', type=int, default=0, help='seed grid side over the budget box (0=auto=ceil(sqrt(n_iter)))')
-    p.add_argument('--grid_seed', action='store_true', help='inject staircase even-supply genomes per box grid cell into the candidate pool each iter (guarantees high-comp supply)')
-    # mutation = 1st-stage-knowledge-guided (value-resample + module-transplant); value draws
-    # are BAND-CONDITIONAL (P1) and supply seeds are staircase-decoded (P2) — the legacy
-    # global-draw / nearest-block arms were removed 2026-07 after losing the 2-seed A/B
-    # pilot (HV .2523/.2620 vs .2481/.2580; per-cell best-loss 14-6/14-8; corner better).
+    # per-iteration candidate down-select across the (wbits × eff_kvbits) budget box.
+    # maximin = extent coverage (legacy). grid = per-axis-even quota (bucket the box into a
+    # g×g grid, round-robin cells, best predicted loss within a cell). hybrid = even_frac of K
+    # on grid-even coverage + the rest on lowest-predicted-loss front pressure. moo = 2-obj
+    # (mean pred-loss × box covering-radius) subset GA → knee (principled explore↔exploit
+    # balance, dominates hybrid's hard split; --moo_algo nsga3 ≥ nsga2). --grid_seed additionally
+    # injects nearest-block genomes per cell so the high-comp corner NSGA drops (right-end
+    # collapse) still gets sampled — pair it with grid/hybrid/moo. Defaults keep legacy behaviour.
+    # 'subset' = search.py's legacy SubsetProblem: union(archive front, picks) std-of-gaps
+    # GA → hole-filling, keeps edge candidates (29/30 injected right-end kept vs moo 13/30,
+    # maximin 16/30 on the same pool — baseline_search 2607100451/0638 post-mortem).
+    p.add_argument('--cand_even', default='maximin', choices=['subset', 'maximin', 'grid', 'hybrid', 'moo'])
+    p.add_argument('--subset_pop_size', type=int, default=100, help='subset: GA population size')
+    p.add_argument('--cand_grid', type=int, default=0, help='grid side for grid/hybrid/moo even-select (0=auto=ceil(sqrt(n_iter)))')
+    p.add_argument('--even_frac', type=float, default=0.5, help='hybrid: fraction of K spent on grid-even coverage (rest = front pressure)')
+    p.add_argument('--grid_seed', action='store_true', help='seed nearest-block genomes per box cell into the candidate pool each iter (guarantees high-comp supply)')
+    p.add_argument('--seed_pool', default='archive', choices=['first', 'archive', 'full'],
+                   help="block source for --grid_seed: 'first' = div_k-pruned 1st-stage pools; "
+                        "'archive' = + the current archive's W/KV sub-blocks (2nd-stage mutants) "
+                        "— seeds adapt as the search finds better parts; 'full' = + the FULL "
+                        "ε-band 1st-stage blocks (no div_k pruning — densest nearest-comp match)")
+    p.add_argument('--seed_expr', nargs='*', default=[],
+                   help='extra iter_N.stats archives (e.g. prior 2nd-stage runs) whose W/KV '
+                        'sub-blocks join the seed pool (QEFT [b,0] entries auto-normalized; '
+                        'n_outlier>0 archs skipped for a scalar-bit space)')
+    p.add_argument('--al_frac', type=float, default=0.0,
+                   help='fraction of K reserved for ACTIVE-LEARNING picks = candidates farthest '
+                        '(standardized active-dims distance) from all measured archs; model-free '
+                        'uncertainty proxy. 0 = off (in-house evidence: AL payoff is tail-only)')
+    p.add_argument('--moo_algo', default='nsga3', choices=['nsga3', 'nsga2'], help='moo down-select MOO solver (nsga3 = reference-direction, recommended)')
+    p.add_argument('--moo_pop', type=int, default=80, help='moo down-select subset-GA population')
+    p.add_argument('--moo_gen', type=int, default=80, help='moo down-select subset-GA generations')
+    p.add_argument('--moo_coverage', default='rad', choices=['rad', 'gap'],
+                   help="moo 2nd objective: 'rad' = box covering radius (2D reach), "
+                        "'gap' = max-axis spacing gap-std (1D marginal evenness)")
+    p.add_argument('--moo_gap_std', action='store_true',
+                   help='moo: add a 3rd objective = max-axis std of consecutive sorted-coordinate '
+                        'gaps of the subset (per-axis spacing evenness, as in '
+                        "coverage_subset_nsga2_extras marginal/max)")
+    # mutation: 1st-stage-knowledge-guided (value-resample + module-transplant) vs lever-weighted ±1
+    p.add_argument('--mutation', default='knowledge', choices=['knowledge', 'weighted'])
+    p.add_argument('--mut_cond', default='band', choices=['band', 'global'],
+                   help="P1: knowledge-mutation value draws from 'band' = the individual's "
+                        "own-axis comp-band 1st-stage distribution (+0.43/+0.59 bits/cell on "
+                        "joint-front values, 0%% mode-collapse cells — tests/p1p2_band_table.py) "
+                        "or 'global' = legacy whole-pool column draw")
+    p.add_argument('--seed_mode', default='stair', choices=['stair', 'block'],
+                   help="P2: --grid_seed supply source. 'stair' = staircase-decoded band-consensus "
+                        "genome per box grid point (+corner genomes; on-target even where the pool "
+                        "is sparse). 'block' = legacy nearest-comp whole-block assembly")
     p.add_argument('--seed_stoch', type=int, default=0,
                    help='stair mode: extra STOCHASTIC in-band samples per grid point (diversity; '
                         '0 = deterministic staircase only)')
@@ -599,9 +718,11 @@ def build_parser():
                    help='number of comp-quantile bands in the P1/P2 BandTable (20 measured)')
     p.add_argument('--mut_p_val', type=float, default=0.5, help='prob a mutated cell takes a 1st-stage value (else ±1)')
     p.add_argument('--mut_p_mod', type=float, default=0.15, help='prob/indiv of a 1st-stage module-transplant')
-    # search-space options are AUTO-DERIVED from the 1st-stage archives (derive_options);
-    # only the W group size is a free knob here.
-    p.add_argument('--w_group_size', type=int, default=128)
+    # search-space options (must cover both 1st-stage archives)
+    p.add_argument('--w_bits', type=int, nargs='+', default=[2, 3, 4]); p.add_argument('--k_bits', type=int, nargs='+', default=[2, 3, 4])
+    p.add_argument('--v_bits', type=int, nargs='+', default=[2, 3, 4]); p.add_argument('--w_group_size', type=int, default=128)
+    p.add_argument('--k_pruning_dim', type=int, nargs='+', default=[0, 16, 32, 48, 64])
+    p.add_argument('--v_pruning_dim', type=int, nargs='+', default=[0, 16, 32, 48, 64])
     # arch-parallel eval pool (for expensive backends: --w_method awq)
     p.add_argument('--eval_workers', type=int, default=0,
                    help='N arch-parallel GPU eval workers (persistent LlamaEvaluator each). '

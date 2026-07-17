@@ -25,16 +25,19 @@ for VAR_NAME in W_EXPR EFF_KV_EXPR; do
     fi
 done
 
-W_METHOD=hqq
+W_METHOD=hqq       # hqq = in-process eval (accelerate DP) | awq = AWQ-native arch-parallel eval pool
 W_BITS="2 3 4"; W_GROUP_SIZE=128; AXIS=1
 KV_METHOD="kivi think"
 W_METHOD_TEXT=${W_METHOD}
 KV_METHOD_TEXT=${KV_METHOD// /_}
-QMODEL_PATHS_LIST=()
-for B in ${W_BITS}; do
-    QMODEL_PATHS_LIST+=( "/SSD/hqq/${MODEL_NAME}_${B}bit_${W_GROUP_SIZE}gs_${AXIS}axis_${DTYPE}" )
-done
-QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
+QMODEL_PATHS=""
+if [ "${W_METHOD}" == "hqq" ]; then   # pre-quantized banks are HQQ-only (AWQ quantizes per-arch in sample())
+    QMODEL_PATHS_LIST=()
+    for B in ${W_BITS}; do
+        QMODEL_PATHS_LIST+=( "/SSD/hqq/${MODEL_NAME}_${B}bit_${W_GROUP_SIZE}gs_${AXIS}axis_${DTYPE}" )
+    done
+    QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
+fi
 
 SURROGATE=rbf      # arch-input predictor: rbf (needs N_DOE > #active genes ≈ 360) / gp / ard_gp / carts
 POP=200             # NSGA-III pop (≥ das-dennis 3-obj/12-part = 91 ref dirs; 200 as in search.sh)
@@ -46,17 +49,31 @@ SAVE_ITER=10       # dump iter_<it>.stats + iter_<it>.png (via --debug) every SA
 N_PROC=1           # data-parallel eval ranks (search() is multi-process safe). For N_PROC>1 set
                    # DEVICES=0,1,... (one GPU/rank); needs #calibration batches >= N_PROC.
 
+# ── AWQ-native mode (W_METHOD=awq) ────────────────────────────────────────────
+# Per-arch AWQ build+eval ≈ 8.5 min → whole archs are farmed to a persistent
+# per-GPU worker pool (utils/awq_pool.py). accelerate DP would DUPLICATE the
+# build on every rank, so this mode launches plain `python -u` (num_processes=1
+# is enforced); workers pin their own GPUs from DEVICES (absolute ids).
+SURROGATE_INPUT=genome  # genome (legacy) / feat / cv. AWQ archives are SMALL (~500):
+                        # genome-rbf collapses there (OOS rho 0.14 @N=88) → awq mode
+                        # switches to cv (per-iter 5-fold winner, logs [surrogate_cv])
+WORKER_RECYCLE=32       # recycle each worker after this many archs (run_awq inter-build leak)
+SEED_RESULTS=""         # pre-measured result dirs (*specs*.json + *results*.jsonl) appended
+                        # to the DOE archive. Protocol (stride/pp/last_tokens/sink/n_sample/
+                        # dataset) AND W_METHOD of those measurements must match this run.
+if [ "${W_METHOD}" == "awq" ]; then
+    SURROGATE_INPUT=cv
+    SEED_RESULTS="tests/awq_alloc_flip"          # 88 AWQ-measured archs (pilot + round-0)
+    N_DOE=200; ITERATIONS=10; N_ITER=25          # 450 evals ≈ 16h on 4 GPUs @ ~509s/arch
+fi
+
 ATTN_SINK=8
 N_TOKEN=0
 
-CAND_EVEN=subset     # subset / maximin / grid / hybrid / moo. subset = legacy search.py
-                     # SubsetProblem: union(archive front, picks) std-of-gaps → hole-filling,
-                     # keeps edge candidates (29/30 injected right-end kept vs moo 13/30)
-MOO_GAP_STD=True     # moo 3rd objective ON: (pred-loss × cov_rad × gap-std) knee.
-GRID_SEED=True       # True = inject per-cell block-product seeds each iter
-SEED_POOL=full       # seed block source: full (FULL ε-band pools W~9k/KV~3k ∪ archive parts;
-MOO_ALGO=nsga3       # moo solver: nsga3 (recommended) / nsga2
-EVEN_FRAC=0.5        # hybrid only: fraction of K on grid-even coverage
+# down-select = subset selector, mutation = band-conditional (P1), seeds = staircase (P2);
+# losing variants (maximin/grid/hybrid/moo, --al_frac, global-draw/block-seed arms) were
+# removed 2026-07 after the offline evidence + 2-seed A/B pilots.
+GRID_SEED=True       # True = inject staircase even-supply genomes per box cell each iter
 
 
 FRONT_EPS_REL=0.3   # adaptive ε band = front_jsd·(1+rel): scale-free, auto-wider in the corner
@@ -76,12 +93,10 @@ LAST_TOKENS=512
 SINK_TAG=""; [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
 QEFT_TAG=""; [ "${USE_QEFT}" == "True" ] && QEFT_TAG="_qc${QEFT_RANK_TEXT}"
 PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
-CAND_TAG=${CAND_EVEN}                                           # maximin/grid/hybrid/moo
-[ "${CAND_EVEN}" == "moo" ]    && CAND_TAG=moo${MOO_ALGO#nsga}  # moo3/moo2 (=nsga ver.)
-[ "${CAND_EVEN}" == "moo" ] && [ "${MOO_GAP_STD}" == "True" ] && CAND_TAG+=gs  # +gap-std obj
-[ "${CAND_EVEN}" == "hybrid" ] && CAND_TAG=hyb${EVEN_FRAC}
-[ "${GRID_SEED}" == "True" ]   && CAND_TAG+=-g${SEED_POOL:0:2}  # -gfu/-gar/-gfi = full/archive/first
-SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURROGATE}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}_s${SEED}
+CAND_TAG=subset                                                 # down-select = subset (fixed)
+[ "${GRID_SEED}" == "True" ] && CAND_TAG+=-st                   # staircase supply seeds on
+SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}  # e.g. rbfcv
+SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}_s${SEED}
 
 echo "SECOND-SEARCH -> ${SAVE}"
 
@@ -90,10 +105,6 @@ ARGS="--config ${CONFIG} \
 --w_expr ${W_EXPR} \
 --eff_kv_expr ${EFF_KV_EXPR} \
 --surrogate ${SURROGATE} \
---cand_even ${CAND_EVEN} \
---seed_pool ${SEED_POOL} \
---moo_algo ${MOO_ALGO} \
---even_frac ${EVEN_FRAC} \
 --pop ${POP} \
 --n_doe ${N_DOE} \
 --iterations ${ITERATIONS} \
@@ -108,14 +119,22 @@ ARGS="--config ${CONFIG} \
 --save ${SAVE}"
 
 [ "${GRID_SEED}" == "True" ] && ARGS+=" --grid_seed"
-[ "${MOO_GAP_STD}" == "True" ] && ARGS+=" --moo_gap_std"
 
-ARGS+=" --gpu_id ${DEVICES} \
+ARGS+=" --surrogate_input ${SURROGATE_INPUT}"
+[ -n "${QMODEL_PATHS}" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS}"
+GPU_ID=${DEVICES}
+if [ "${W_METHOD}" == "awq" ]; then
+    GPU_ID=${DEVICES%%,*}                                     # main process; workers own the rest
+    EVAL_WORKERS=$(echo ${DEVICES} | awk -F',' '{print NF}')  # one worker per DEVICES entry
+    ARGS+=" --eval_workers ${EVAL_WORKERS} --worker_gpus ${DEVICES} --worker_recycle ${WORKER_RECYCLE}"
+    [ -n "${SEED_RESULTS}" ] && ARGS+=" --seed_results ${SEED_RESULTS}"
+fi
+
+ARGS+=" --gpu_id ${GPU_ID} \
 --model_path ${MODEL_PATH} \
 --dtype ${DTYPE} \
 --w_method ${W_METHOD} \
 --kv_method ${KV_METHOD} \
---quant_model_paths ${QMODEL_PATHS} \
 --w_bits ${W_BITS} \
 --w_group_size ${W_GROUP_SIZE} \
 --residual_length ${RESIDUAL_LENGTH} \
@@ -133,6 +152,17 @@ if [ ${PREFILL_PROMPT} == 'True' ]; then
     ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
 fi
 
-CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 \
-    --main_process_port=${PORT_NUM} second_search.py ${ARGS}
+if [ "${W_METHOD}" == "awq" ]; then
+    # pool mode: plain unbuffered python (pool enforces num_processes=1); workers pin their
+    # own GPUs from --worker_gpus. A full awq run is ~16h — launch DETACHED so it survives
+    # the launching session:
+    #   cd /NAS/SJ/actquant/search && setsid nohup bash scripts/second_search.sh 0,1,2,3 \
+    #       > awq_run.log 2>&1 < /dev/null &
+    # Resume after a kill: add RESUME=<save_dir>/iter_N.stats (archive+seeds restored from it).
+    [ -n "${RESUME}" ] && ARGS+=" --resume ${RESUME}"
+    python -u second_search.py ${ARGS}
+else
+    CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 \
+        --main_process_port=${PORT_NUM} second_search.py ${ARGS}
+fi
 

@@ -516,7 +516,8 @@ def _write_sample_outputs(args, ctx, nd, expr_keys, valid_nd_idx, samp_desc,
         for i, row in enumerate(valid_nd_idx):
             arch = build_arch(ctx.default_arch, expr_keys, nd.esm, row)
             comp = get_net_info(arch, ctx.config, ctx.group_size,
-                                n_token=args.n_token)
+                                n_token=args.n_token,
+                                attn_sink=args.attn_sink)
             comp_vals = [comp[k] for k in comp_keys]
             metric_vals = [float(per_axis_metric_cols[ax][i])
                            for ax in range(len(expr_keys))]
@@ -534,6 +535,7 @@ def _write_sample_outputs(args, ctx, nd, expr_keys, valid_nd_idx, samp_desc,
         'w_expr': args.w_expr, 'kv_expr': args.kv_expr,
         'kvdim_expr': args.kvdim_expr, 'eff_kv_expr': args.eff_kv_expr,
         'expr_front': args.expr_front, 'n_token': args.n_token,
+        'attn_sink': args.attn_sink,
         'comp_obj': args.comp_obj, 'comp_obj_min': args.comp_obj_min,
         'comp_obj_max': args.comp_obj_max,
         'n_archs': (len(valid_nd_idx) if grid_meta is not None

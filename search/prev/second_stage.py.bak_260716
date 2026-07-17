@@ -76,6 +76,34 @@ def select_eps_band(jsd, comp, eps, eps_rel=0.0):
     return np.where(jsd <= best * (1.0 + eps_rel) + eps)[0]
 
 
+def per_comp_bin_topq(jsd, comp, idx, q, n_bins):
+    """within `idx`, keep the q lowest-jsd archs per comp bin → budget-UNIFORM density
+    (fixes the ε-band's skew toward the flat/saturated region; guarantees the steep
+    aggressive corner is represented)."""
+    if q <= 0 or len(idx) == 0:
+        return idx
+    edges = np.linspace(comp[idx].min(), comp[idx].max(), n_bins + 1)
+    keep = []
+    for b in range(n_bins):
+        m = idx[(comp[idx] >= edges[b]) & (comp[idx] <= edges[b + 1])]
+        if len(m): keep += list(m[np.argsort(jsd[m])[:q]])
+    return np.array(sorted(set(keep)))
+
+
+def per_comp_window_topq(jsd, comp, idx, q, h, n_centers):
+    """CONTINUOUS/uniform version of per_comp_bin_topq: q-best within an OVERLAPPING
+    window [c-h, c+h] at n_centers uniform comp positions → smooth budget-uniform density
+    (no hard bin-edge artifacts; overlap h smooths). Use instead of bins for 'continuous'."""
+    if q <= 0 or len(idx) == 0:
+        return idx
+    ci, ji = comp[idx], jsd[idx]
+    keep = set()
+    for ct in np.linspace(ci.min(), ci.max(), n_centers):
+        m = np.where(np.abs(ci - ct) <= h)[0]
+        if len(m): keep.update(idx[m[np.argsort(ji[m])[:q]]].tolist())
+    return np.array(sorted(keep))
+
+
 def diversity_prune(blocks, k, seed=0):
     """keep k blocks that are FARTHEST apart in encoding space (maximin) → drop near-
     duplicates, keep structurally-distinct allocation patterns (richer crossover)."""
@@ -84,16 +112,18 @@ def diversity_prune(blocks, k, seed=0):
     return np.asarray(maximin_extras(blocks.astype(float), anchor_idx=[], K=k, seed=seed))
 
 
-def _select_blocks(j, c, encode_fn, eps, eps_rel, div_k, seed):
-    """ε-band → encode → structural-diversity prune. Returns blocks (+ per-block comp for
-    budget-box filtering). Per-comp-bin/window thinning was removed 2026-07 — measured
-    HARMFUL (band→div hv .265 > window .237 > hardbin .20); the ablation helpers live on
-    in tests/pool_analysis.py."""
+def _select_blocks(j, c, encode_fn, eps, eps_rel, per_bin_q, n_bins, window_h, div_k, seed):
+    """ε-band → per-comp-bin top-q (hard bins) OR sliding-window (window_h>0) → encode →
+    structural-diversity prune. Returns blocks."""
     f = _front(j, c)
     idx = select_eps_band(j, c, eps, eps_rel)
+    if window_h > 0:
+        idx = per_comp_window_topq(j, c, idx, per_bin_q, window_h, n_bins)
+    else:
+        idx = per_comp_bin_topq(j, c, idx, per_bin_q, n_bins)
     blocks = np.stack([encode_fn(i) for i in idx])
     di = diversity_prune(blocks, div_k, seed)
-    return f, idx, blocks[di], c[idx][di]
+    return f, idx, blocks[di], c[idx][di]      # also per-block comp (for budget-box filtering)
 
 
 def _w_bits_of(b):
@@ -145,18 +175,18 @@ def derive_qeft(w_expr, kv_expr):
 
 
 def load_block_pools(w_expr, kv_expr, ss, w_eps=0.0, kv_eps=0.0, eps_rel=0.0,
-                     div_k=0, seed=0):
+                     per_bin_q=0, n_bins=10, window_h=0.0, div_k=0, seed=0):
     """W/KV building-block pools from the 1st-stage archives, via ε-band (abs `*_eps` and/or
-    relative `eps_rel`) → structural-diversity prune (data-driven, no random)."""
+    relative `eps_rel`) ∪ per-comp-bin top-q ∪ structural-diversity (data-driven, no random)."""
     nw = nw_split(ss)
     dw = json.load(open(_last_stats(w_expr))); Ew = dw['archive'] + dw.get('candidates', [])
     jw = np.array([e[1] for e in Ew]); cw = np.array([e[2] for e in Ew])
     fw, sw, Wg, w_comp = _select_blocks(jw, cw, lambda i: ss.encode(Ew[i][0])[:nw],
-                                        w_eps, eps_rel, div_k, seed)
+                                        w_eps, eps_rel, per_bin_q, n_bins, window_h, div_k, seed)
     dk = json.load(open(_last_stats(kv_expr))); Ek = dk['archive'] + dk.get('candidates', [])
     jk = np.array([e[1] for e in Ek]); ck = np.array([e[2] for e in Ek])
     fk, sk, KVg, kv_comp = _select_blocks(jk, ck, lambda i: ss.encode(Ek[i][0])[nw:],
-                                          kv_eps, eps_rel, div_k, seed)
+                                          kv_eps, eps_rel, per_bin_q, n_bins, window_h, div_k, seed)
     ow = np.argsort(cw[fw]); wcurve = (cw[fw][ow], jw[fw][ow])     # proxy curve = front (not band)
     ok = np.argsort(ck[fk]); kcurve = (ck[fk][ok], jk[fk][ok])
     print(f"[pools] W: front {len(fw)} → ε{w_eps}-band {len(sw)} → blocks {len(Wg)} | "
@@ -369,6 +399,18 @@ class AxisBlockCrossover(Crossover):
         return Y
 
 
+class WeightedIntMutation(Mutation):
+    """per-gene ±1 step, prob ∝ 1st-stage lever weight (ε-floor → coverage; direction free)."""
+    def __init__(self, w, xu, base=0.06): super().__init__(); self.w, self.xu, self.base = w, xu, base
+
+    def _do(self, problem, X, **kw):
+        X = X.copy()
+        for i in range(len(X)):
+            hit = np.random.random(len(self.xu)) < (self.base * self.w)
+            X[i] = np.where(hit, np.clip(X[i] + np.random.choice([-1, 1], len(self.xu)), 0, self.xu), X[i])
+        return X
+
+
 def block_segments(ss):
     """coherent gene segments = the 7 W modules + (k, v, k_dim, v_dim) KV rows, each ×n_block.
     Used by knowledge-mutation to transplant a whole 1st-stage sub-pattern."""
@@ -379,7 +421,7 @@ def block_segments(ss):
 
 
 class KnowledgeMutation(Mutation):
-    """1st-stage-KNOWLEDGE-guided mutation:
+    """1st-stage-KNOWLEDGE-guided mutation (vs WeightedIntMutation's lever-weighted ±1):
       WHERE: cells chosen ∝ 1st-stage lever weight (ε-floor → all reachable).
       HOW per cell: with prob p_val → set to a value DRAWN FROM that cell's 1st-stage
         value distribution — a meaningful, 1st-stage-plausible value; else ±1 local step
@@ -467,6 +509,47 @@ def load_band_blocks(w_expr, kv_expr, ss, w_eps=0.0, kv_eps=0.0, eps_rel=0.0):
     return Wb, cw[iw], KVb, ck[ik]
 
 
+def load_extra_parts(exprs, ss, comp):
+    """W/KV sub-block pools from EXTRA archives (--seed_expr: prior 2nd-stage runs or any
+    iter_N.stats over the same module space). Each arch is encoded, split at nw, and per-part
+    comps (wbits / eff_kvbits) come from a vectorized JointComp batch (wbits depends only on
+    the W part, eff_kvbits only on the KV part — exact). QEFT-format W entries [bits, 0] are
+    normalized to scalar bits when ss uses scalar options (n_outlier>0 archs are SKIPPED for
+    a scalar space — not representable). Returns (Wp, wc, KVp, kc, n_skip)."""
+    nw = nw_split(ss)
+    scalar_w = not isinstance(ss.q_proj_option[0], (list, tuple))
+    G, n_skip = [], 0
+    for pth in exprs:
+        d = json.load(open(_last_stats(pth)))
+        for e in d['archive'] + d.get('candidates', []):
+            a = e[0]
+            if scalar_w:                                # normalize [b, 0] → b; skip n_out>0
+                w = a['q']['w']
+                ok = True
+                for k, mod in w.items():
+                    nb = []
+                    for b in mod:
+                        if isinstance(b, (list, tuple)):
+                            if int(b[1]) > 0: ok = False; break
+                            nb.append(int(b[0]))
+                        else:
+                            nb.append(b)
+                    if not ok: break
+                    w[k] = nb
+                if not ok: n_skip += 1; continue
+            try:
+                G.append(ss.encode(a))
+            except Exception:
+                n_skip += 1
+    if not G:
+        return (np.zeros((0, nw), int), np.zeros(0), np.zeros((0, 0), int), np.zeros(0), n_skip)
+    G = np.array(G)
+    c = comp.batch(G, ['wbits', 'eff_kvbits'])
+    uW, iW = np.unique(G[:, :nw], axis=0, return_index=True)
+    uK, iK = np.unique(G[:, nw:], axis=0, return_index=True)
+    return uW, c[iW, 0], uK, c[iK, 1], n_skip
+
+
 # ─────────────── per-iteration supply seeding + archive stats + viz ───────────────
 # (the auxiliary halves of second_search.py; the generic subset SELECTORS —
 #  even_select / moo_subset_select — live in utils.select)
@@ -491,7 +574,7 @@ def grid_seed(Wg, KVg, w_comp, kv_comp, comp_min, comp_max, g):
 
 
 def stair_seed(bt, comp_min, comp_max, g, n_stoch=0, corners=None):
-    """P2 supply seeding (--grid_seed): one staircase-decoded genome per
+    """P2 supply seeding (--seed_mode stair): one staircase-decoded genome per
     (t_w × t_kv) grid point over the budget box, + n_stoch stochastic in-band samples
     per point (diversity), + explicit corner genomes.
 

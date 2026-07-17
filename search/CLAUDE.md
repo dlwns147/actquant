@@ -229,6 +229,32 @@ results land. Quant primitive hook point: every arch's attention calls
 Monkeypatching that ONE function injects rotation/sink into the whole pipeline
 with no change to search.py / search_space / surrogate / NSGA2.
 
+### W×EffKV split→joint decomposition — theory + paired evidence (2026-07)
+**`tests/docs/wkv_split_joint.md`** — the consolidated doc (Q1/Q2/Q3 framing):
+coverage needs only monotone z-reduction NOT additivity (+transfer-robustness
+corollary: cheap-method stage-1 is loss-free if per-axis transfer is monotone —
+measured Spearman 1.0000, T_W slope 0.705 = the HQQ→AWQ shrinkage, T_KV 0.970);
+interaction is real-but-local (paired 20×20 ANOVA: main 98.3%, Tukey p~1e-16,
+corner −0.03); exchange rate unidentifiable from per-axis data (protocol 0.4↔3.9,
+saturation slope 1.26→−0.06). Margin-41 (`2607120854_*_marginal425`) measured:
+41→400 additive audit = deployable RMSE 0.0010 / corner max 0.223 / rank 0.9966;
+**MCKP verdict is two-regime** — uncalibrated raw-sum fails (iso-mem regret
++0.033) but harness-matched-margin additive selects near-perfectly in-box
+(cross-mix regret ≤0.009, top5-verify 0) → stage-2's residual role = corner
+values + block generation + per-layer allocation. y(KV4-only)=1.2e-4 = harness
+floor; KV=(16,0) arch encoding CRASHES KIVI (use --kv_method fp16 dir instead;
+(W4,KVfp)/(FP,FP) still pending). Scripts in `tests/docs/scripts/`.
+**Paper-ready theory package: `tests/docs/paper_theory.md`** — English theorem
+statements (Thm 1 coverage + Cor 1.1-1.3 + Prop 2 identification + regret
+ledger), assumption-audit table, explicit demotion list (ANOVA/mechanism/√JSD
+= instruments not theory), reviewer attack surface, pre-submission TODOs
+(off-front audit, r_stage1 quantification, noise floor).
+NARRATIVE = D-frame (2-question ordinal/cardinal split, adopted 2026-07-12):
+"stage 1 supplies the ORDER (Thm 1, τ≥0.942, transfer Spearman 1.0); only
+joint measurement supplies the VALUES (Prop 2, corner err 0.22) — and the
+value gap is small & corner-localized (1.7%) so a small stage-2 closes it."
+Headline figure: tests/docs/fig/fig6_order_vs_values.png.
+
 ### KV Hadamard rotation (RotateKV/QuaRot-style) — search-combinable
 `test_rotation_feasibility.py`, `test_rotation_speed_micro.py`,
 `test_rotation_speed_longctx.py`, `test_rotation_decode_speed.py`,

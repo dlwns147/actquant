@@ -63,6 +63,13 @@ SEED=0
 # At target 5.316e9, n_token 16384: ×0.00001→0 archs, ×0.001→55, ×0.005→234.
 COMP_OBJ=(memory)
 COMP_OBJ_VAL=(5315764224)
+
+# COMP_OBJ=4969209856
+# COMP_OBJ=6141255680
+# BIN=12
+# COMP_OBJ=( $(linspace "${COMP_OBJ_MIN}" "${COMP_OBJ_MAX}" "${BIN}") )
+# N_TOKEN=16384
+
 # COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
 COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.005)" | bc))
 # COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.00001)" | bc))
