@@ -319,6 +319,115 @@ class SecondSearch:
                 return np.asarray(inner.predict(feats(np.asarray(X, float)))).ravel()
         return _FeatPred()
 
+    def _pls_features(self, Xf):
+        """'plstyp' input: HQQ-SUPERVISED low-rank embedding (PLS, 8 comps/axis, fit ONCE
+        on the FULL 1st-stage per-axis archives' (block, per-axis JSD) pairs — N≈10k
+        supports the per-layer input) + comp + BandTable-P1 typicality (mean own-band
+        log-prob, 2d; skipped when band_table is off). Transfer-learning frame: cheap
+        HQQ supervision learns the representation, the expensive AWQ archive fits the
+        head — recovers within-cell allocation ranking that mean13 washes out."""
+        X = np.clip(np.round(np.asarray(Xf, float)), 0, self.xu).astype(int)
+        if getattr(self, '_pls', None) is None:
+            from sklearn.cross_decomposition import PLSRegression
+            from utils.second_stage import _last_stats
+            def pairs(expr, half):
+                e = json.load(open(_last_stats(expr)))
+                arcs = e['archive'] + e.get('candidates', [])
+                G = np.array([self.ss.encode(a[0]) for a in arcs])
+                return (G[:, :self.nw] if half == 'w' else G[:, self.nw:]), \
+                    np.array([a[1] for a in arcs], float)
+            GW, mW = pairs(self.args.w_expr, 'w')
+            GK, mK = pairs(self.args.eff_kv_expr, 'kv')
+            self._pls = (PLSRegression(8).fit(GW, mW), PLSRegression(8).fit(GK, mK))
+            self.accelerator.print(
+                f"[pls] embedding fit: {len(mW)} W / {len(mK)} KV HQQ pairs → 8+8 comps"
+                + ("" if getattr(self, 'band_table', None) is None else " + typicality"))
+        pw, pk = self._pls
+        C = self._comp.batch(X, ['wbits', 'eff_kvbits'])
+        cols = [pw.transform(X[:, :self.nw]), pk.transform(X[:, self.nw:]), C]
+        bt = getattr(self, 'band_table', None)
+        if bt is not None:
+            bw = bt.band(C[:, 0], 'w'); bk = bt.band(C[:, 1], 'kv')
+            nk = self.n_var - self.nw
+            tw = np.array([np.log(np.maximum(bt.Pw[bw[i], np.arange(self.nw), X[i, :self.nw]], 1e-9)).mean()
+                           for i in range(len(X))])
+            tk = np.array([np.log(np.maximum(bt.Pk[bk[i], np.arange(nk), X[i, self.nw:]], 1e-9)).mean()
+                           for i in range(len(X))])
+            cols.append(np.column_stack([tw, tk]))
+        return np.column_stack(cols)
+
+    def _fit_plstyp(self, Xf, targets):
+        """pls+typ family — measured best WITHIN-CELL input on the 538-arch AWQ archive
+        (tests/awq_alloc_flip/embedding_input_check.py): B_low(w2.8) OOS ρ .51 vs feat
+        .29, C_kv18 .77 vs .34, cell-mean .63 vs .46, global tied (.996). Kitchen-sink
+        pls+feat+typ was WORSE (.55 — feature dilution at this N): keep the family lean."""
+        inner = get_predictor('ard_gp', self._pls_features(Xf), targets, device=self._pred_device)
+        featf = self._pls_features
+        class _PlsPred:
+            name = 'plstyp_ard_gp'
+            def predict(self, X):
+                return np.asarray(inner.predict(featf(np.asarray(X, float)))).ravel()
+        return _PlsPred()
+
+    def _fit_selfpls(self, Xf, targets):
+        """SELF-bootstrapped PLS input: PLS(16) fit on the CURRENT archive's own
+        (genome → measured loss) pairs + comp → ard_gp head. Needs NO 1st-stage
+        archive and its supervision IS the target backend (no HQQ-prior ceiling).
+        Measured (tests/awq_alloc_flip/selfpls_check.py, 538-arch AWQ archive,
+        fold-internal PLS — no leakage): cell-mean OOS ρ .64 = TIES archive-plstyp
+        (.63) and beats feat15 (.46); learning curve crosses feat at N≈200
+        (N=100 .34 / N=200 .51 / N=430 .60). Cross-model transfer of a foreign
+        embedding never beats this or mean-features in any regime
+        (crossmodel_transfer_check.py) — self-supervision + generic cold-start
+        features are the archive-free answer."""
+        from sklearn.cross_decomposition import PLSRegression
+        p = PLSRegression(min(16, max(2, len(targets) // 12))).fit(Xf, targets)
+        comp = self._comp
+        def featf(X):
+            X = np.asarray(X, float)
+            return np.column_stack([p.transform(X), comp.batch(
+                np.clip(np.round(X), 0, self.xu).astype(int), ['wbits', 'eff_kvbits'])])
+        inner = get_predictor('ard_gp', featf(Xf), targets, device=self._pred_device)
+        class _SelfPred:
+            name = 'selfpls_ard_gp'
+            def predict(self, X):
+                return np.asarray(inner.predict(featf(X))).ravel()
+        return _SelfPred()
+
+    def _hist_features(self, Xf):
+        """(module, option) OCCUPANCY-HISTOGRAM input (+comp): the PRINCIPLED
+        (non-hand-crafted) representation — under the measured additivity
+        (v5 Sobol ~99%, MCKP additive R² .979) the per-row option-fraction vector
+        is the sufficient statistic of the additive part (y ≈ Σ count·d), and it
+        preserves the bit-MIX that per-module MEANS destroy (30%@2b+70%@4b vs
+        100%@3b: same mean, different histograms → within-cell signal). NOTE the
+        head must be NONLINEAR: hist+ridge (= pure additive fit) FAILS within-cell
+        (cell-mean .14-.29 — same-cell archs have near-equal additive predictions;
+        within-cell ranking lives in the residual interactions the GP captures)."""
+        X = np.clip(np.round(np.asarray(Xf, float)), 0, self.xu).astype(int)
+        nrow = self.ss.n_linear + 4
+        Xr = X.reshape(len(X), nrow, self.ss.n_block)
+        xur = self.xu.reshape(nrow, self.ss.n_block)
+        cols = []
+        for row in range(nrow):
+            for o in range(int(xur[row].max()) + 1):
+                cols.append((Xr[:, row, :] == o).mean(1))
+        return np.column_stack(cols + [self._comp.batch(X, ['wbits', 'eff_kvbits'])])
+
+    def _fit_hist(self, Xf, targets):
+        """hist+GP — measured (tests/awq_alloc_flip/hist_input_check.py, fold-subsample
+        learning curve on the 538-arch AWQ archive, cell-mean OOS ρ):
+          N=100: hist .42 > selfpls .34 > feat .32 | N=200: hist .57 > selfpls .51 >
+          feat .32 | N=430: selfpls .60 ≈ hist .54 > feat .46; global ≥.986 from N=50.
+        One fixed representation from DOE onward — no family switching."""
+        inner = get_predictor('ard_gp', self._hist_features(Xf), targets, device=self._pred_device)
+        featf = self._hist_features
+        class _HistPred:
+            name = 'hist_ard_gp'
+            def predict(self, X):
+                return np.asarray(inner.predict(featf(np.asarray(X, float)))).ravel()
+        return _HistPred()
+
     def _kfold_rho(self, Xf, targets, which, k=5):
         """OUT-of-sample 5-fold Spearman of a predictor family on the archive (rbf
         interpolates exactly, so in-sample rho is meaningless for this comparison)."""
@@ -329,6 +438,9 @@ class SecondSearch:
             te = np.sort(idx[f::k]); tr = np.setdiff1d(np.arange(n), te)
             if which == 'feat':
                 m = self._fit_feat(Xf[tr], targets[tr])
+                pred[te] = m.predict(Xf[te])
+            elif which == 'plstyp':
+                m = self._fit_plstyp(Xf[tr], targets[tr])
                 pred[te] = m.predict(Xf[te])
             else:
                 m, act = self._fit_genome(Xf[tr], targets[tr])
@@ -349,20 +461,41 @@ class SecondSearch:
             self._pred_dev_logged = True
         # input mode: 'genome' = legacy per-cell encoding (needs large N — right for the
         # 10k+ HQQ archive); 'feat' = 15d ArchFeatures (right for small AWQ archives);
-        # 'cv' = per-iter 5-fold out-of-sample compare, use the winner (logged).
+        # 'self' = FIXED archive-free schedule (RECOMMENDED for awq runs): feat15 below
+        # --selfpls_n0 (cold start — generic mean-features win there in BOTH tests),
+        # self-bootstrapped PLS(16)+comp above it (ties archive-plstyp within-cell with
+        # NO 1st-stage archive). Deterministic — replaces the per-iter cv bake-off,
+        # whose winner criterion (GLOBAL OOS rho) is saturated ~0.99 across families
+        # and thus effectively noise w.r.t. the within-cell quality that matters;
+        # 'cv' / 'plstyp' are kept for research.
         mode = getattr(self.args, 'surrogate_input', 'genome')
+        if mode == 'hist':
+            self.active = np.arange(self.n_var)
+            pred = self._fit_hist(Xf, targets)
+            return pred, pred.predict(Xf)
+        if mode == 'self':
+            n0 = int(getattr(self.args, 'selfpls_n0', 200))
+            if len(targets) >= n0:
+                self.active = np.arange(self.n_var)
+                pred = self._fit_selfpls(Xf, targets)
+                return pred, pred.predict(Xf)
+            mode = 'feat'
         if mode == 'cv':
             if len(targets) >= 30:
-                rho_g = self._kfold_rho(Xf, targets, 'genome')
-                rho_f = self._kfold_rho(Xf, targets, 'feat')
-                mode = 'feat' if rho_f > rho_g else 'genome'
-                self.accelerator.print(f"[surrogate_cv] genome-{self.predictor} rho {rho_g:.3f} vs "
-                                       f"feat-ard_gp rho {rho_f:.3f} → {mode}")
+                rhos = {'genome': self._kfold_rho(Xf, targets, 'genome'),
+                        'feat':   self._kfold_rho(Xf, targets, 'feat')}
+                try:                       # plstyp needs the 1st-stage archives (skip if absent)
+                    rhos['plstyp'] = self._kfold_rho(Xf, targets, 'plstyp')
+                except Exception as e:     # noqa: BLE001 — cv degrades gracefully
+                    self.accelerator.print(f"[surrogate_cv] plstyp unavailable ({type(e).__name__}: {e})")
+                mode = max(rhos, key=rhos.get)
+                self.accelerator.print("[surrogate_cv] " + "  ".join(
+                    f"{k} {v:.3f}" for k, v in rhos.items()) + f" → {mode}")
             else:
                 mode = 'feat'          # tiny archive: the low-dim input is the safe default
-        if mode == 'feat':
-            self.active = np.arange(self.n_var)      # feat pred consumes the full genome
-            pred = self._fit_feat(Xf, targets)
+        if mode in ('feat', 'plstyp'):
+            self.active = np.arange(self.n_var)      # these preds consume the full genome
+            pred = self._fit_feat(Xf, targets) if mode == 'feat' else self._fit_plstyp(Xf, targets)
             return pred, pred.predict(Xf)
         pred, active = self._fit_genome(Xf, targets)
         self.active = active                                                 # _next reads this (set before it)
@@ -561,7 +694,12 @@ def build_parser():
     p.add_argument('--w_expr', required=True, help='1st-stage W-axis archive dir or iter_N.stats')
     p.add_argument('--eff_kv_expr', required=True, help='1st-stage eff_kvbits archive dir or iter_N.stats')
     p.add_argument('--surrogate', default='rbf', help='arch-input predictor (rbf/gp/ard_gp/carts)')
-    p.add_argument('--surrogate_input', default='genome', choices=['genome', 'feat', 'cv'],
+    p.add_argument('--selfpls_n0', type=int, default=200,
+                   help="'self' input mode: archive size at which the surrogate input "
+                        "switches feat15 → self-bootstrapped PLS (measured crossover "
+                        "N≈200, tests/awq_alloc_flip/selfpls_check.py)")
+    p.add_argument('--surrogate_input', default='genome',
+                   choices=['genome', 'feat', 'plstyp', 'self', 'hist', 'cv'],
                    help="predictor input: 'genome' = per-cell encoding (needs large N — the 10k+ "
                         "HQQ-archive regime); 'feat' = 15d ArchFeatures per-module means + comp "
                         "(sample-efficient — ties measured per-axis-JSD input within-band, works "
