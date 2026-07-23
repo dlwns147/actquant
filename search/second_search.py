@@ -175,7 +175,14 @@ class SecondSearch:
                        attn_sink=args.attn_sink, k_quant_scheme=args.k_quant_scheme,
                        v_quant_scheme=args.v_quant_scheme, loss_func=args.loss_func,
                        last_tokens=args.last_tokens, stride=args.stride,
-                       prefill_prompt=args.prefill_prompt)
+                       prefill_prompt=args.prefill_prompt,
+                       # QUIET WORKERS (default): each worker redirects its OS-level stdout/stderr
+                       # (fd 1/2 — catches run_awq/tqdm/C-extension spew) to a per-worker log file
+                       # under <save>/awq_logs/, so the terminal shows only the main-process
+                       # [awq_pool] X/N aggregate progress (results flow over the queue, unaffected).
+                       # --awq_verbose_workers keeps the old inline spew (None = no redirect).
+                       worker_log_dir=None if args.awq_verbose_workers
+                                      else os.path.join(self.save_path, 'awq_logs'))
             gpus = [g.strip() for g in args.worker_gpus.split(',') if g.strip()]
             self.pool = AWQEvalPool(gpus[:args.eval_workers] if args.eval_workers <= len(gpus) else gpus,
                                     cfg, recycle_after=args.worker_recycle, log=self.accelerator.print)
@@ -322,11 +329,20 @@ class SecondSearch:
     def _pls_features(self, Xf):
         """'plstyp' input: HQQ-SUPERVISED low-rank embedding (PLS, 8 comps/axis, fit ONCE
         on the FULL 1st-stage per-axis archives' (block, per-axis JSD) pairs — N≈10k
-        supports the per-layer input) + comp + BandTable-P1 typicality (mean own-band
-        log-prob, 2d; skipped when band_table is off). Transfer-learning frame: cheap
-        HQQ supervision learns the representation, the expensive AWQ archive fits the
-        head — recovers within-cell allocation ranking that mean13 washes out."""
+        supports the per-layer input) + comp (EXACT wbits/eff_kvbits: a denoised copy of
+        the PLS budget direction, |corr(PLS1, comp)|≈0.997; small consistent corner gain
+        +0.002–0.035). Transfer-learning frame: cheap HQQ supervision learns the
+        representation, the expensive AWQ archive fits the head — recovers within-cell
+        allocation ranking that mean13 washes out.
+
+        BandTable-P1 typicality (mean own-band log-prob, 2d) is OPTIONAL, OFF by default
+        (--plstyp_typ to add): a disjoint-split ablation on the 538-arch AWQ archive found
+        it NEUTRAL (corner Δ −0.012…+0.006, within the n≈15 noise) — a hand-crafted score
+        that neither earns its place nor clearly hurts; dropped for leanness. (An earlier
+        ablation showing it 'harmful' was a train/test-overlap artifact — see
+        tests/awq_alloc_flip/embedding_input_check.py.)"""
         X = np.clip(np.round(np.asarray(Xf, float)), 0, self.xu).astype(int)
+        use_typ = getattr(self, 'band_table', None) is not None and getattr(self.args, 'plstyp_typ', False)
         if getattr(self, '_pls', None) is None:
             from sklearn.cross_decomposition import PLSRegression
             from utils.second_stage import _last_stats
@@ -340,13 +356,13 @@ class SecondSearch:
             GK, mK = pairs(self.args.eff_kv_expr, 'kv')
             self._pls = (PLSRegression(8).fit(GW, mW), PLSRegression(8).fit(GK, mK))
             self.accelerator.print(
-                f"[pls] embedding fit: {len(mW)} W / {len(mK)} KV HQQ pairs → 8+8 comps"
-                + ("" if getattr(self, 'band_table', None) is None else " + typicality"))
+                f"[pls] embedding fit: {len(mW)} W / {len(mK)} KV HQQ pairs → 8+8 comps + comp"
+                + (" + typicality" if use_typ else ""))
         pw, pk = self._pls
         C = self._comp.batch(X, ['wbits', 'eff_kvbits'])
         cols = [pw.transform(X[:, :self.nw]), pk.transform(X[:, self.nw:]), C]
-        bt = getattr(self, 'band_table', None)
-        if bt is not None:
+        if use_typ:
+            bt = self.band_table
             bw = bt.band(C[:, 0], 'w'); bk = bt.band(C[:, 1], 'kv')
             nk = self.n_var - self.nw
             tw = np.array([np.log(np.maximum(bt.Pw[bw[i], np.arange(self.nw), X[i, :self.nw]], 1e-9)).mean()
@@ -703,8 +719,13 @@ def build_parser():
                    help="predictor input: 'genome' = per-cell encoding (needs large N — the 10k+ "
                         "HQQ-archive regime); 'feat' = 15d ArchFeatures per-module means + comp "
                         "(sample-efficient — ties measured per-axis-JSD input within-band, works "
-                        "from N~30; use for small AWQ archives); 'cv' = 5-fold out-of-sample "
-                        "compare per iter, use the winner (logged)")
+                        "from N~30; use for small AWQ archives); 'plstyp' = HQQ-supervised PLS "
+                        "embedding + comp (best within-cell at small N — the AWQ default); "
+                        "'cv' = 5-fold out-of-sample compare per iter, use the winner (logged)")
+    p.add_argument('--plstyp_typ', action='store_true',
+                   help="plstyp: append the 2d BandTable typicality features (OFF by default — "
+                        "ablation-neutral on the AWQ archive, corner Δ within noise; kept as a "
+                        "research toggle)")
     p.add_argument('--predictor_device', default='auto', help="surrogate compute device: 'auto' (=cuda when visible; the RBF saddle solve is ridge-stabilised) / 'cuda' / 'cuda:N' / 'cpu'")
     p.add_argument('--iterations', type=int, default=8); p.add_argument('--n_doe', type=int, default=512)
     p.add_argument('--n_iter', type=int, default=60); p.add_argument('--pop', type=int, default=92)
@@ -756,10 +777,16 @@ def build_parser():
                    help='comma-separated GPU ids for --eval_workers')
     p.add_argument('--worker_recycle', type=int, default=32,
                    help='recycle each eval worker after this many archs (run_awq inter-build leak defense)')
+    p.add_argument('--awq_verbose_workers', action='store_true',
+                   help='keep each AWQ eval worker printing its run_awq/tqdm build output inline '
+                        '(default: workers redirect stdout/stderr to <save>/awq_logs/worker*.log '
+                        'so the terminal shows only the main [awq_pool] X/N aggregate progress)')
     p.add_argument('--seed_results', nargs='*', default=[],
                    help='dirs of pre-measured results (*specs*.json + *results*.jsonl, e.g. '
-                        'tests/awq_alloc_flip) appended to the DOE archive; measurement protocol '
-                        'AND w_method must match this run')
+                        'save/awq_alloc_flip = the curated 88-arch pilot+round-0 seed set) '
+                        'appended to the DOE archive; measurement protocol AND w_method must '
+                        'match this run. NOTE: every *specs*.json in the dir is globbed and must '
+                        "carry an 'idx' key — keep probe/other-format files out of the seed dir")
     # hqq-mode model/quant args (mirror search.py / evaluator.py)
     p.add_argument('--gpu_id', default='0'); p.add_argument('--model_path', default='/SSD/huggingface/meta-llama')
     p.add_argument('--dtype', default='bfloat16'); p.add_argument('--w_method', nargs='+', default=['hqq'])

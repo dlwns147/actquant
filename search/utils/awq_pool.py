@@ -26,6 +26,16 @@ MAX_TRIES = 3
 
 def _worker_main(gpu_id, wid, task_q, result_q, cfg, recycle_after):
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)   # before any CUDA init
+    # QUIET WORKERS: redirect this worker's OS-level stdout+stderr (fd 1/2) to a per-worker
+    # log file BEFORE any import/CUDA init, so run_awq / tqdm / C-extension prints don't flood
+    # the terminal — only the main process's [awq_pool] aggregate lines show. dup2 (not just
+    # sys.stdout) is required to catch C-level and tqdm(stderr) output. Progress still reaches
+    # main via result_q (unaffected). worker_log_dir=None keeps the old inline spew.
+    log_dir = cfg.get('worker_log_dir')
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        _f = open(os.path.join(log_dir, f'worker{wid}_gpu{gpu_id}.log'), 'a', buffering=1)
+        os.dup2(_f.fileno(), 1); os.dup2(_f.fileno(), 2)
     import json
     from evaluator import LlamaEvaluator
     from utils.func import init_accelerator, set_seed, process_dtype, clean_up
