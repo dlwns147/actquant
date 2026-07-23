@@ -251,6 +251,7 @@ class SecondSearch:
         seen = {tuple(self.ss.encode(x[0]).tolist()) for x in archive}
         out, n_skip = [], 0
         for d in self.args.seed_results:
+            os.makedirs(d, exist_ok=True)   # auto-create a missing seed/cache dir (no hard fail)
             specs = {}
             for p in sorted(glob.glob(os.path.join(d, '*specs*.json'))):
                 for s in json.load(open(p)):
@@ -281,6 +282,29 @@ class SecondSearch:
         if n_skip:
             self.accelerator.print(f"[seed_results] skipped {n_skip} (dup / out-of-box / non-encodable / nan)")
         return out
+
+    def _cache_seed(self, tag, archs, metrics):
+        """Persist freshly-measured (arch -> loss) pairs into the FIRST --seed_results dir as
+        a run-tagged specs/results pair, so a future run of the SAME protocol warm-starts from
+        them (AWQ ~509s/arch — measurements are worth caching). Format matches
+        _load_seed_results (idx-keyed specs list + {idx, y_awq} jsonl); string idx = run+tag+i
+        can't collide across runs; dedup-on-READ by encoded arch makes cross-run duplicates
+        harmless. No-op when --seed_results is unset."""
+        if not getattr(self.args, 'seed_results', None):
+            return
+        d = self.args.seed_results[0]
+        os.makedirs(d, exist_ok=True)
+        run = os.path.basename(self.save_path.rstrip('/'))
+        rows = [(f"{run}_{tag}_{i}", a, float(m)) for i, (a, m) in enumerate(zip(archs, metrics))
+                if np.isfinite(m)]
+        if not rows:
+            return
+        with open(os.path.join(d, f"{run}_{tag}_specs.json"), 'w') as f:
+            json.dump([{'idx': idx, 'arch': a} for idx, a, _ in rows], f)
+        with open(os.path.join(d, f"{run}_{tag}_results.jsonl"), 'w') as f:
+            for idx, _, y in rows:
+                f.write(json.dumps({'idx': idx, 'y_awq': y}) + "\n")
+        self.accelerator.print(f"[seed_cache] +{len(rows)} measured archs -> {d}/{run}_{tag}_*")
 
     # ───────────────── incremental encode cache (append-only archive) ─────────────────
     def _encode_archive(self, archive):
@@ -574,7 +598,7 @@ class SecondSearch:
                              endpoints=np.array([self.comp_obj_min, self.comp_obj_max], float),
                              seed=self.args.seed)
 
-    def _initialize(self):
+    def _initialize(self, n_doe=None):
         """DOE seed, mirroring search_space.llama.initialize: enumerate the BOUNDARY corners
         first, then fill the remaining budget with random samples → n_doe total. Here the
         boundary corners are the {W min/max comp} × {KV min/max comp} block combos (both edges
@@ -583,7 +607,8 @@ class SecondSearch:
         ws = sorted({int(np.argmin(self.w_comp)), int(np.argmax(self.w_comp))})   # W block extremes
         ks = sorted({int(np.argmin(self.kv_comp)), int(np.argmax(self.kv_comp))}) # KV block extremes
         corners = [np.concatenate([self.Wg[wi], self.KVg[ki]]) for wi in ws for ki in ks]
-        rand = FrontierProductSampling(self.Wg, self.KVg)._do(None, max(self.n_doe - len(corners), 0))
+        n_doe = self.n_doe if n_doe is None else n_doe
+        rand = FrontierProductSampling(self.Wg, self.KVg)._do(None, max(n_doe - len(corners), 0))
         doe_g = np.concatenate([np.array(corners), rand], axis=0) if len(rand) else np.array(corners)
         return [self.ss.decode(g) for g in doe_g], len(corners), len(rand)
 
@@ -604,22 +629,36 @@ class SecondSearch:
             if main:
                 acc.print(f"[resume] {len(archive)} archs from iter {rf['iteration']} → start iter {start_it}")
         else:
+            # cached measurements count toward N_DOE: load them first, then MEASURE ONLY the
+            # shortfall (N_DOE - cached). If the cache (folder already exists) already has
+            # >= N_DOE archs, skip DOE measurement entirely and use them as-is.
             if main:
-                archs, n_corner, n_rand = self._initialize()
+                seeded = self._load_seed_results([]) if self.args.seed_results else []
+                n_need = max(0, self.n_doe - len(seeded))
+                archs, n_corner, n_rand = self._initialize(n_need) if n_need > 0 else ([], 0, 0)
+                if seeded and archs:                       # don't re-measure already-cached archs
+                    _seen = {tuple(self.ss.encode(x[0]).tolist()) for x in seeded}
+                    archs = [a for a in archs if tuple(self.ss.encode(a).tolist()) not in _seen]
+                if seeded:
+                    acc.print(f"[seed_results] {len(seeded)} cached (dir exists) → DOE measures "
+                              f"{'0 (>= N_DOE, skip)' if n_need == 0 else str(len(archs)) + ' more'} "
+                              f"(target N_DOE={self.n_doe})")
             else:
                 archs, n_corner, n_rand = [], 0, 0
             archs = acc.gather_for_metrics(archs, use_gather_object=True)   # → all ranks
             acc.wait_for_everyone()
-            kept, metric, comp = self._evaluate(archs)        # data-parallel across ranks
-            archive = [[archs[i], m, *c] for i, m, c in zip(kept, metric, comp)] if main else []
+            kept, metric, comp = self._evaluate(archs) if archs else ([], [], [])
             if main:
-                acc.print(f"[DOE] {len(archive)} archs ({n_corner} budget corners + {n_rand} random)  "
-                      f"loss {min(metric):.4f}-{max(metric):.4f}  ({time()-t0:.1f}s)")
-                if self.args.seed_results:
-                    seeded = self._load_seed_results(archive)
-                    archive += seeded
-                    acc.print(f"[seed_results] +{len(seeded)} pre-measured archs from "
-                              f"{self.args.seed_results} → archive {len(archive)}")
+                measured = [[archs[i], m, *c] for i, m, c in zip(kept, metric, comp)]
+                if kept:
+                    self._cache_seed('doe', [archs[i] for i in kept], metric)   # persist new measurements
+                archive = seeded + measured
+                losses = [x[1] for x in archive]
+                acc.print(f"[DOE] {len(archive)} archs = {len(seeded)} cached + {len(measured)} measured"
+                      + (f" ({n_corner} corners + {n_rand} random)" if measured else " (N_DOE met by cache)")
+                      + f"  loss {min(losses):.4f}-{max(losses):.4f}  ({time()-t0:.1f}s)")
+            else:
+                archive = []
         if main:
             ref_pt = np.array([np.max([x[i] for x in archive]) for i in range(1, len(self.comp_obj) + 2)])
             acc.print(f'data preparation time : {time() - t0:.2f}s')
@@ -651,6 +690,7 @@ class SecondSearch:
                     np.array([x[1] for x in archive] + c_metric))
                 for i, m, c in zip(kept, c_metric, c_comp):
                     archive.append([cands[i], m, *c])
+                self._cache_seed(f'it{it}', [cands[i] for i in kept], c_metric)
                 F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
                 hv = calc_hv(ref_pt, F); cov = front_coverage(archive, self.comp_obj)
                 iter_time = time() - iter_start
