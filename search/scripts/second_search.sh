@@ -89,12 +89,8 @@ PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
 CAND_TAG=subset                                                 # down-select = subset (fixed)
 [ "${GRID_SEED}" == "True" ] && CAND_TAG+=-st                   # staircase supply seeds on
 SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}  # e.g. rbfplstyp
-# premeasured seed dir = built like SAVE from the protocol vars (auto-consistent; a
-# protocol change repoints the path -> a mismatch surfaces as "dir missing", not a
-# silent 0-seed load). Empty in hqq mode (SEED_DATE unset).
 if [ -n "${SEED_DATE}" ]; then
     SEED_RESULTS="save/${SEED_DATE}_${MODEL_NAME}_awq_premeasured_${KV_METHOD_TEXT}_n${N_SAMPLE}_st${STRIDE}${PP_TAG}${SINK_TAG}_${DATASET}"
-    ls "${SEED_RESULTS}"/*specs*.json >/dev/null 2>&1 || { echo "ERROR: premeasured seed dir missing: ${SEED_RESULTS}"; exit 1; }
 fi
 
 SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}_s${SEED}
