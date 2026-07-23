@@ -27,8 +27,8 @@ for VAR_NAME in W_EXPR EFF_KV_EXPR; do
     fi
 done
 
-W_METHOD=hqq
-# W_METHOD=awq
+# W_METHOD=hqq
+W_METHOD=awq
 W_BITS="2 3 4"; W_GROUP_SIZE=128; AXIS=1
 KV_METHOD="kivi think"
 W_METHOD_TEXT=${W_METHOD}
@@ -42,41 +42,35 @@ if [ "${W_METHOD}" == "hqq" ]; then   # pre-quantized banks are HQQ-only (AWQ qu
     QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 fi
 
-SURROGATE=rbf      # arch-input predictor: rbf (needs N_DOE > #active genes ≈ 360) / gp / ard_gp / carts
-POP=200             # NSGA-III pop (≥ das-dennis 3-obj/12-part = 91 ref dirs; 200 as in search.sh)
-N_DOE=500          # DOE measured archs (≥ #active genes for rbf)
-ITERATIONS=200       # search iterations (fit ↔ measure)
+SURROGATE=rbf      # arch-input predictor: rbf (needs N_DOE > #active genes ~360) / gp / ard_gp / carts
+POP=200             # NSGA-III pop (>= das-dennis 3-obj/12-part = 91 ref dirs; 200 as in search.sh)
+N_DOE=500          # DOE measured archs (>= #active genes for rbf)
+ITERATIONS=200       # search iterations (fit <-> measure)
 N_ITER=50          # candidates measured per iteration
 SEED=0
 SAVE_ITER=10       # dump iter_<it>.stats + iter_<it>.png (via --debug) every SAVE_ITER iters (and the last)
 N_PROC=1           # data-parallel eval ranks (search() is multi-process safe). For N_PROC>1 set
-                   # DEVICES=0,1,... (one GPU/rank); needs #calibration batches >= N_PROC.
+SURROGATE_INPUT=genome
+WORKER_RECYCLE=32
+SEED_RESULTS=""
 
-# ── AWQ-native mode (W_METHOD=awq) ────────────────────────────────────────────
-# Per-arch AWQ build+eval ≈ 8.5 min → whole archs are farmed to a persistent
-# per-GPU worker pool (utils/awq_pool.py). accelerate DP would DUPLICATE the
-# build on every rank, so this mode launches plain `python -u` (num_processes=1
-# is enforced); workers pin their own GPUs from DEVICES (absolute ids).
-SURROGATE_INPUT=genome  # genome (legacy) / feat / cv. AWQ archives are SMALL (~500):
-                        # genome-rbf collapses there (OOS rho 0.14 @N=88) → awq mode
-                        # switches to cv (per-iter 5-fold winner, logs [surrogate_cv])
-WORKER_RECYCLE=32       # recycle each worker after this many archs (run_awq inter-build leak)
-SEED_RESULTS=""         # pre-measured result dirs (*specs*.json + *results*.jsonl) appended
-                        # to the DOE archive. Protocol (stride/pp/last_tokens/sink/n_sample/
-                        # dataset) AND W_METHOD of those measurements must match this run.
 if [ "${W_METHOD}" == "awq" ]; then
-    SURROGATE_INPUT=cv
-    SEED_RESULTS="tests/awq_alloc_flip"          # 88 AWQ-measured archs (pilot + round-0)
-    N_DOE=200; ITERATIONS=10; N_ITER=25          # 450 evals ≈ 16h on 4 GPUs @ ~509s/arch
+    SURROGATE_INPUT=plstyp
+    SEED_DATE=2607220730   # curated 88-arch premeasured seed set (fixed date)
+    N_DOE=100
+    ITERATIONS=30
+    N_ITER=20
 fi
 
 ATTN_SINK=8
 N_TOKEN=0
 
 GRID_SEED=True       # True = inject staircase even-supply genomes per box cell each iter
+                     # (band counts + seed freshness are AUTO -- no knobs)
 
-FRONT_EPS_REL=0.3   # adaptive ε band = front_jsd·(1+rel): scale-free, auto-wider in the corner
-DIV_K=200           # structural-diversity blocks/axis (maximin; richest crossover — dominant for hv)
+FRONT_EPS_REL=0.05
+# FRONT_EPS_REL=0
+DIV_K=200           # structural-diversity blocks/axis (maximin; richest crossover -- dominant for hv)
 
 LOSS_FUNC=jsd
 DATASET=wikitext2
@@ -94,7 +88,15 @@ QEFT_TAG=""; [ "${USE_QEFT}" == "True" ] && QEFT_TAG="_qc${QEFT_RANK_TEXT}"
 PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
 CAND_TAG=subset                                                 # down-select = subset (fixed)
 [ "${GRID_SEED}" == "True" ] && CAND_TAG+=-st                   # staircase supply seeds on
-SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}  # e.g. rbfcv
+SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}  # e.g. rbfplstyp
+# premeasured seed dir = built like SAVE from the protocol vars (auto-consistent; a
+# protocol change repoints the path -> a mismatch surfaces as "dir missing", not a
+# silent 0-seed load). Empty in hqq mode (SEED_DATE unset).
+if [ -n "${SEED_DATE}" ]; then
+    SEED_RESULTS="save/${SEED_DATE}_${MODEL_NAME}_awq_premeasured_${KV_METHOD_TEXT}_n${N_SAMPLE}_st${STRIDE}${PP_TAG}${SINK_TAG}_${DATASET}"
+    ls "${SEED_RESULTS}"/*specs*.json >/dev/null 2>&1 || { echo "ERROR: premeasured seed dir missing: ${SEED_RESULTS}"; exit 1; }
+fi
+
 SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}_s${SEED}
 
 echo "SECOND-SEARCH -> ${SAVE}"
@@ -152,16 +154,9 @@ if [ ${PREFILL_PROMPT} == 'True' ]; then
 fi
 
 if [ "${W_METHOD}" == "awq" ]; then
-    # pool mode: plain unbuffered python (pool enforces num_processes=1); workers pin their
-    # own GPUs from --worker_gpus. A full awq run is ~16h — launch DETACHED so it survives
-    # the launching session:
-    #   cd /NAS/SJ/actquant/search && setsid nohup bash scripts/second_search.sh 0,1,2,3 \
-    #       > awq_run.log 2>&1 < /dev/null &
-    # Resume after a kill: add RESUME=<save_dir>/iter_N.stats (archive+seeds restored from it).
     [ -n "${RESUME}" ] && ARGS+=" --resume ${RESUME}"
     python -u second_search.py ${ARGS}
 else
     CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 \
         --main_process_port=${PORT_NUM} second_search.py ${ARGS}
 fi
-
