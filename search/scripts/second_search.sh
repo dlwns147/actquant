@@ -70,7 +70,7 @@ GRID_SEED=True       # True = inject staircase even-supply genomes per box cell 
 
 COMPANION_KV=0       # WAFE: extra geometry-diverse KV archs attached per W-anchor at the subset
                      # stage (span eff_kvbits; the cheap KV sweep a single W build amortizes). 0=off
-COMPANION_METHOD=std_gap   # geometry over eff_kvbits: std_gap (union-gap subset_select) | cov_rad
+COMPANION_METHOD=std_gap   # geometry over eff_kvbits: std_gap (union-gap subset_select) | cov_rad | both
 
 FRONT_EPS_REL=0.05
 # FRONT_EPS_REL=0
