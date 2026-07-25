@@ -563,21 +563,9 @@ class SecondSearch:
             return [], np.zeros((0,))
         pred = np.asarray(predictor.predict(Xc[:, self.active].astype(float))).ravel()
         if len(Xc) > K:
-            idx = self._downselect(Xc, archive, K, pred=pred)
+            idx = self._downselect(Xc, archive, K)
             Xc, pred = Xc[idx], pred[idx]
-        # subset-sampling companion step: attach geometry-diverse extra KV per W-anchor (--companion_kv)
-        comp_g = self._companion_kv(Xc, getattr(self.args, 'companion_kv', 0))
-        if len(comp_g):
-            comp_g = np.array([gg for gg in comp_g
-                               if tuple(gg) not in seen], int).reshape(-1, self.n_var)
-        if len(comp_g):
-            cpred = np.asarray(predictor.predict(comp_g[:, self.active].astype(float))).ravel()
-            allg = np.vstack([Xc, comp_g]); pred = np.concatenate([pred, cpred])
-            self.accelerator.print(f"[companion] +{len(comp_g)} KV archs "
-                                   f"({self.args.companion_method}) over {len(Xc)} anchors")
-        else:
-            allg = Xc
-        return [self.ss.decode(gg) for gg in allg], pred
+        return [self.ss.decode(gg) for gg in Xc], pred
 
     def _nsga(self, predictor):
         """NSGA-III over the surrogate problem with the joint operators (block-product
@@ -594,7 +582,7 @@ class SecondSearch:
                      mutation=mut, eliminate_duplicates=False)
         return minimize(problem, algo, ('n_gen', 20), seed=self.args.seed, verbose=True)
 
-    def _downselect(self, Xc, archive, K, pred=None):
+    def _downselect(self, Xc, archive, K):
         """pick K candidates with the subset selector: union(archive front, picks)
         std-of-gaps GA — hole-filling, keeps edge candidates (an isolated edge candidate
         splits the front's largest gap and is KEPT, where subset-only geometry drops it).
@@ -602,96 +590,13 @@ class SecondSearch:
         edge candidates kept vs moo 13/30 / maximin 16/30 — baseline_search 2607100451/0638);
         the losing variants (maximin/grid/hybrid/moo) and the measured-negative --al_frac
         AL quota were removed 2026-07 (utils/select.py keeps the selectors for the
-        visualize/ studies).
-
-        --anchor_k / --decision_frac (AWQ regime, opt-in) mix an LCO-anchor quota and a
-        decision (acquisition) quota ahead of the geometry fill — see utils/acquisition.py
-        and tests/awq_correction_search/DECISIONS.md. Both 0 ⇒ exactly the geometry pick."""
+        visualize/ studies)."""
         comp = self._comp.batch(Xc, self.comp_obj)       # (N,2) [wbits, eff_kvbits], vectorized
         Fa = np.column_stack([[x[i] for x in archive] for i in (1, 2, 3)])
         fr_nd = NonDominatedSorting().do(Fa, only_non_dominated_front=True)
-        front_comp = Fa[fr_nd][:, 1:]
-        endpoints = np.array([self.comp_obj_min, self.comp_obj_max], float)
-
-        def geometry(k, taken):
-            """geometry pick of k candidates EXCLUDING `taken` (hole-filling subset_select
-            over the surviving candidate rows, then map local→global indices)."""
-            avail = np.setdiff1d(np.arange(len(Xc)), np.asarray(taken, int))
-            if len(avail) <= k:
-                return avail
-            loc = subset_select(comp[avail], front_comp, k, self.args.subset_pop_size,
-                                endpoints=endpoints, seed=self.args.seed)
-            return avail[np.asarray(loc, int)]
-
-        use_acq = (getattr(self.args, 'anchor_k', 0) > 0
-                   or getattr(self.args, 'decision_frac', 0.0) > 0)
-        if not use_acq or pred is None:
-            return subset_select(comp, front_comp, K, self.args.subset_pop_size,
-                                 endpoints=endpoints, seed=self.args.seed)
-        from utils.acquisition import mixed_downselect
-        arch_loss = np.array([x[1] for x in archive], float)
-        return mixed_downselect(
-            comp, np.asarray(pred, float).ravel(), Fa[:, 1:], arch_loss, K,
-            box_min=self.comp_obj_min, box_max=self.comp_obj_max, geometry_fn=geometry,
-            k_anchor=int(getattr(self.args, 'anchor_k', 0)),
-            anchor_grid=int(getattr(self.args, 'anchor_grid', 8)),
-            decision_frac=float(getattr(self.args, 'decision_frac', 0.0)),
-            decision_grid=int(getattr(self.args, 'decision_grid', 8)))
-
-    @staticmethod
-    def _cov_rad_1d(vals, k, lo, hi, res=200):
-        """pick k indices of `vals` minimizing the 1D covering radius over [lo,hi]
-        (greedy farthest-point-from-selected over a fine center grid)."""
-        vals = np.asarray(vals, float)
-        centers = np.linspace(lo, hi, res)
-        chosen, cur = [], np.full(res, np.inf)
-        for _ in range(min(int(k), len(vals))):
-            best = bi = best_cur = None
-            for i in range(len(vals)):
-                if i in chosen:
-                    continue
-                cc = np.minimum(cur, np.abs(centers - vals[i]))
-                s = cc.max()
-                if best is None or s < best:
-                    best, bi, best_cur = s, i, cc
-            chosen.append(bi); cur = best_cur
-        return np.array(chosen, int)
-
-    def _companion_kv(self, cand_genomes, n_kv):
-        """SUBSET-SAMPLING companion step: for each down-selected candidate (a W-anchor), attach up to
-        n_kv EXTRA archs that keep the candidate's W-block but pick n_kv KV-blocks straight from the
-        self.KVg pool by GEOMETRY over eff_kvbits — --companion_method std_gap (union-gap subset_select)
-        / cov_rad (1D covering radius) — so they span the KV comp band. This is the cheap KV sweep a
-        single W build amortizes (WAFE). The blocks come from the 1st-stage KV Pareto pool, so a
-        geometry span already samples the good block at each eff_kv (predicted-loss selection is NOT
-        used here: preferring low loss without an eff_kv grouping collapses coverage onto the single
-        best-eff_kv block — good-samples + coverage need a niche, which is deferred to the NSGA stage).
-        Returns extra genomes (deduped vs candidates + each other; an anchor's own KV is skipped)."""
-        cand_genomes = np.atleast_2d(np.asarray(cand_genomes, int))
-        n_kv = int(n_kv)
-        if n_kv <= 0 or len(self.KVg) == 0 or len(cand_genomes) == 0:
-            return np.empty((0, self.n_var), int)
-        n_pick = min(n_kv, len(self.KVg))
-        lo, hi = self.comp_obj_min[1], self.comp_obj_max[1]
-        if getattr(self.args, 'companion_method', 'std_gap') == 'cov_rad':
-            kv_idx = self._cov_rad_1d(self.kv_comp, n_pick, lo, hi)
-        else:                                                  # 'std_gap' — union-gap subset_select (1D eff_kv)
-            kv_idx = np.asarray(subset_select(
-                self.kv_comp.reshape(-1, 1).astype(float), np.empty((0, 1)), n_pick,
-                self.args.subset_pop_size, endpoints=np.array([[lo], [hi]], float),
-                seed=self.args.seed), int)
-        kv_blocks = [np.asarray(self.KVg[i], int) for i in kv_idx]
-        seen = {tuple(g.tolist()) for g in cand_genomes}       # dedup vs the anchors themselves
-        extra = []
-        for g in cand_genomes:
-            wblock = g[:self.nw]
-            for kb in kv_blocks:
-                cg = np.concatenate([wblock, kb]).astype(int)
-                key = tuple(cg.tolist())
-                if key in seen:                                # skip anchor's own KV + duplicates
-                    continue
-                seen.add(key); extra.append(cg)
-        return np.array(extra, int) if extra else np.empty((0, self.n_var), int)
+        return subset_select(comp, Fa[fr_nd][:, 1:], K, self.args.subset_pop_size,
+                             endpoints=np.array([self.comp_obj_min, self.comp_obj_max], float),
+                             seed=self.args.seed)
 
     def _initialize(self, n_doe=None):
         """DOE seed, mirroring search_space.llama.initialize: enumerate the BOUNDARY corners
@@ -886,30 +791,8 @@ def build_parser():
     # vs moo 13/30 / maximin 16/30, baseline_search 2607100451/0638 post-mortem; the losing
     # selector variants and the measured-negative --al_frac AL quota were removed 2026-07).
     p.add_argument('--subset_pop_size', type=int, default=100, help='down-select subset-GA population size')
-    # subset-sampling companion KV (WAFE): after the down-select picks the K W-anchors, attach up to
-    # --companion_kv extra archs per anchor that keep its W-block but sweep geometry-diverse KV-blocks
-    # (span eff_kvbits) — the cheap KV sweep a single W build amortizes. 0 = off (unchanged behaviour).
-    p.add_argument('--companion_kv', type=int, default=0,
-                   help='extra geometry-diverse KV archs to attach per W-anchor at the subset stage (0=off)')
-    p.add_argument('--companion_method', default='std_gap', choices=['std_gap', 'cov_rad'],
-                   help='geometry for companion KV over eff_kvbits: std_gap (union-gap subset_select) or cov_rad')
     p.add_argument('--cand_grid', type=int, default=0, help='seed grid side over the budget box (0=auto=ceil(sqrt(n_iter)))')
     p.add_argument('--grid_seed', action='store_true', help='inject staircase even-supply genomes per box grid cell into the candidate pool each iter (guarantees high-comp supply)')
-    # decision-aware down-select (AWQ regime, opt-in; utils/acquisition.py). Default 0/0.0
-    # reproduces the geometry-only subset_select pick byte-for-byte. See
-    # tests/awq_correction_search/DECISIONS.md (Phase 2).
-    p.add_argument('--anchor_k', type=int, default=0,
-                   help='LCO guard: guarantee ≥ k AWQ-measured archs per occupied budget cell '
-                        '(anchor quota served first each iter). 0 = off. Facts 5/9: predict-only '
-                        'selection has no anchor and fails (LCO ρ −0.44).')
-    p.add_argument('--anchor_grid', type=int, default=8,
-                   help='g for the g×g budget-box cell grid used by --anchor_k')
-    p.add_argument('--decision_frac', type=float, default=0.0,
-                   help='fraction of each candidate batch spent on the decision (acquisition) '
-                        'quota: candidates whose PREDICTED loss can flip a cell argmin. '
-                        'RANK-based (σ-free) until Phase-0 draw-noise σ is calibrated. 0 = off.')
-    p.add_argument('--decision_grid', type=int, default=8,
-                   help='g for the g×g budget-box cell grid used by --decision_frac')
     # mutation = 1st-stage-knowledge-guided (value-resample + module-transplant); value draws
     # are BAND-CONDITIONAL (P1) and supply seeds are staircase-decoded (P2) — the legacy
     # global-draw / nearest-block arms were removed 2026-07 after losing the 2-seed A/B
