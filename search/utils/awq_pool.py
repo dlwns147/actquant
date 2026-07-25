@@ -15,7 +15,14 @@ Design (mirrors tests/awq_alloc_flip/pilot.py per-arch loop):
     memory leak) is respawned and the task requeued (<=3 tries -> nan);
     workers also self-recycle every `recycle_after` archs as leak defense.
   * map(archs) preserves input order; hard failures return nan (caller drops).
+  * KV-REUSE (WAFE): the AWQ build depends ONLY on the W allocation, so map() groups
+    archs by their W (arch['q']['w']) and dispatches each group as ONE bundle task.
+    A worker builds the weights once per bundle (evaluator.sample) then sweeps the
+    bundle's KV variants via evaluator.apply_kv + eval(model=...) — NO rebuild. This
+    is what makes --companion_kv cheap: N companions sharing a W-anchor cost 1 build,
+    not N. Reduces to per-arch behaviour when every arch has a distinct W.
 """
+import json
 import os
 import multiprocessing as mp
 from queue import Empty
@@ -53,28 +60,45 @@ def _worker_main(gpu_id, wid, task_q, result_q, cfg, recycle_after):
         k_quant_scheme=cfg['k_quant_scheme'], v_quant_scheme=cfg['v_quant_scheme'],
         loss_func=cfg['loss_func'], last_tokens=cfg['last_tokens'])
     result_q.put(('ready', wid, None, None))
-    n_done = 0
+    n_builds = 0
     while True:
         task = task_q.get()
         if task is None:
             break
-        i, arch = task
-        result_q.put(('claim', wid, i, None))
-        t0 = time()
+        # task = (gid, [(i, arch), ...]) — all archs share ONE W-allocation, so we build
+        # the weights ONCE (first arch, via sample) then swap KV for the rest (apply_kv +
+        # eval(model=)) with no rebuild. A build failure aborts the whole bundle.
+        gid, items = task
+        # announce the WHOLE bundle up front so a mid-bundle death requeues every
+        # not-yet-finished arch (not just the one in flight)
+        result_q.put(('bundle', wid, None, [i for i, _ in items]))
+        built = False
         try:
-            m, _ = evaluator.eval(accelerator=accelerator, arch=arch, metric='loss',
-                                  loss_func=cfg['loss_func'], stride=cfg['stride'],
-                                  prefill_prompt=cfg['prefill_prompt'])
-            result_q.put(('ok', wid, i, (float(list(m.values())[0]), round(time() - t0, 1))))
-        except Exception as e:                          # noqa: BLE001 — report, main decides
-            result_q.put(('err', wid, i, repr(e)[:500]))
+            for pos, (i, arch) in enumerate(items):
+                t0 = time()
+                try:
+                    if not built:
+                        evaluator.sample(arch)          # W build + this arch's KV
+                        built = True
+                    else:
+                        evaluator.apply_kv(arch)        # cheap KV swap, weights reused
+                    m, _ = evaluator.eval(accelerator=accelerator, arch=arch, metric='loss',
+                                          model=evaluator.model, loss_func=cfg['loss_func'],
+                                          stride=cfg['stride'], prefill_prompt=cfg['prefill_prompt'])
+                    result_q.put(('ok', wid, i, (float(list(m.values())[0]), round(time() - t0, 1))))
+                except Exception as e:                  # noqa: BLE001 — report, main decides
+                    result_q.put(('err', wid, i, repr(e)[:500]))
+                    if not built:                       # build (first arch) failed -> whole bundle can't run
+                        for (i2, _a2) in items[pos + 1:]:
+                            result_q.put(('err', wid, i2, 'bundle build failed'))
+                        break
         finally:
             if evaluator.model is not None:
                 del evaluator.model
                 evaluator.model = None
             clean_up()
-        n_done += 1
-        if recycle_after and n_done >= recycle_after:
+        n_builds += 1                                   # recycle counts BUILDS (the leak source), not evals
+        if recycle_after and n_builds >= recycle_after:
             result_q.put(('recycle', wid, None, None))
             return
 
@@ -99,51 +123,68 @@ class AWQEvalPool:
         p.start()
         self.procs[wid] = (p, gpu)
 
+    def _put_bundle(self, idxs, archs):
+        """Enqueue archs[idxs] as one bundle task (they must share a W-allocation for the
+        weight build to be reused across them)."""
+        self._gid += 1
+        self.task_q.put((self._gid, [(i, archs[i]) for i in idxs]))
+
     def _fail_or_retry(self, i, archs, tries, out):
-        """Returns 1 if the task terminally failed (pending decreases), else 0."""
+        """Returns 1 if the task terminally failed (pending decreases), else 0. A retry
+        re-enqueues the arch as a SINGLETON bundle (its W group is abandoned — rebuilds)."""
         tries[i] += 1
         if tries[i] >= MAX_TRIES:
             out[i] = float('nan')
             self.log(f"[awq_pool] task {i} failed {tries[i]}x -> nan (dropped)")
             return 1
-        self.task_q.put((i, archs[i]))
+        self._put_bundle([i], archs)
         return 0
 
     def map(self, archs):
-        """Evaluate archs on the pool; returns losses in input order (nan = failed)."""
+        """Evaluate archs on the pool; returns losses in input order (nan = failed).
+        Archs are grouped by W-allocation and each group is one bundle task, so a single
+        AWQ build serves every KV variant sharing that W (companion/WAFE reuse)."""
         n = len(archs)
         out = [None] * n
         tries = [0] * n
+        self._gid = 0
+        # group by W-allocation (arch['q']['w']); each group -> one build, KV-swept
+        groups = {}
         for i, a in enumerate(archs):
-            self.task_q.put((i, a))
+            groups.setdefault(json.dumps(a['q']['w'], sort_keys=True), []).append(i)
+        for idxs in groups.values():
+            self._put_bundle(idxs, archs)
+        self.log(f"[awq_pool] {n} archs -> {len(groups)} W-build groups "
+                 f"({n - len(groups)} rebuilds saved by KV-reuse)")
         pending, t0 = n, time()
         while pending > 0:
             try:
                 kind, wid, i, payload = self.result_q.get(timeout=30)
             except Empty:
-                # liveness sweep: requeue claims of dead workers, respawn on same GPU
+                # liveness sweep: requeue ALL outstanding archs of dead workers' bundles
                 for wid, (p, g) in list(self.procs.items()):
                     if not p.is_alive():
                         del self.procs[wid]
-                        j = self.claims.pop(wid, None)
+                        outstanding = [j for j in self.claims.pop(wid, set()) if out[j] is None]
                         self.log(f"[awq_pool] worker {wid} (gpu {g}) died"
-                                 + (f" on task {j}" if j is not None else "") + " -> respawn")
-                        if j is not None and out[j] is None:
+                                 + (f" on {len(outstanding)} outstanding archs" if outstanding else "")
+                                 + " -> respawn")
+                        for j in outstanding:
                             pending -= self._fail_or_retry(j, archs, tries, out)
                         self._spawn(g)
                 continue
             if kind == 'ready':
                 self.log(f"[awq_pool] worker {wid} ready")
-            elif kind == 'claim':
-                self.claims[wid] = i
+            elif kind == 'bundle':
+                self.claims[wid] = set(payload)   # every arch index this worker now owns
             elif kind == 'ok':
                 y, sec = payload
                 out[i] = y; pending -= 1
-                self.claims.pop(wid, None)
+                self.claims.get(wid, set()).discard(i)
                 self.log(f"[awq_pool] {n - pending}/{n} loss={y:.4f} ({sec:.0f}s, worker {wid}, "
                          f"elapsed {(time() - t0) / 60:.0f}m)")
             elif kind == 'err':
-                self.claims.pop(wid, None)
+                self.claims.get(wid, set()).discard(i)
                 self.log(f"[awq_pool] task {i} error (try {tries[i] + 1}): {payload}")
                 pending -= self._fail_or_retry(i, archs, tries, out)
             elif kind == 'recycle':

@@ -356,6 +356,18 @@ class LlamaEvaluator:
                                             k_pruning_dim=self.k_pruning_dim,
                                             v_pruning_dim=self.v_pruning_dim)
 
+        return self.apply_kv(arch)
+
+    def apply_kv(self, arch):
+        """Re-configure the KV cache of the ALREADY-BUILT self.model IN PLACE (bits, group
+        size, ThinK pruning dim, enable_think) from arch — the cheap KV swap that a single
+        (expensive) weight build amortizes. This is the WAFE / companion reuse hook: build
+        the AWQ weights once for a W-allocation, then sweep many KV archs by calling this +
+        eval(..., model=self.model) with NO weight rebuild. Mirrors the KV block sample()
+        used to inline; safe to call repeatedly on one built model. Weight-independent, so
+        the weights stay valid across calls (kivi/hqq config + fp16 no-op)."""
+        q_arch = arch['q']
+        p_arch = arch.get('p', {})
         kv_methods = self.method['kv'] if isinstance(self.method.get('kv'), list) else [self.method.get('kv')]
         active_kv = 'hqq' if 'hqq' in kv_methods else 'kivi' if ('kivi' in kv_methods or 'think' in kv_methods) else 'fp16'
 

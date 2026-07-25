@@ -657,15 +657,42 @@ class SecondSearch:
             chosen.append(bi); cur = best_cur
         return np.array(chosen, int)
 
+    @staticmethod
+    def _cov_gap_1d(vals, k, lo, hi, res=200):
+        """pick k indices of `vals` minimizing (covering radius + std-of-gaps) JOINTLY over [lo,hi]
+        — the 'both' geometry: cov_rad closes the biggest hole (reaches the band corners) while
+        std-of-gaps evens the interior spacing between the picks. Both terms are in eff_kv units so
+        they sum directly. NOTE: the gap term is over the PICKS only (no virtual [lo,hi] endpoints —
+        those would make a corner pick coincide with an endpoint, spike the gap-std, and perversely
+        push the set AWAY from the corners; cov_rad already rewards reaching them)."""
+        vals = np.asarray(vals, float)
+        centers = np.linspace(lo, hi, res)
+        D = np.abs(centers[:, None] - vals[None, :])              # (res, N) center↔block distance
+        chosen, cur = [], np.full(res, np.inf)
+        for _ in range(min(int(k), len(vals))):
+            cov = np.minimum(cur[:, None], D).max(0)              # covering radius if each block added
+            gap = np.array([(np.std(np.diff(np.sort(vals[chosen + [i]]))) if len(chosen) >= 1 else 0.0)
+                            if i not in chosen else np.inf for i in range(len(vals))])
+            score = cov + gap
+            for c in chosen:
+                score[c] = np.inf
+            i = int(np.argmin(score)); chosen.append(i); cur = np.minimum(cur, D[:, i])
+        return np.array(chosen, int)
+
     def _companion_kv(self, cand_genomes, n_kv):
         """SUBSET-SAMPLING companion step: for each down-selected candidate (a W-anchor), attach up to
         n_kv EXTRA archs that keep the candidate's W-block but pick n_kv KV-blocks straight from the
         self.KVg pool by GEOMETRY over eff_kvbits — --companion_method std_gap (union-gap subset_select)
-        / cov_rad (1D covering radius) — so they span the KV comp band. This is the cheap KV sweep a
-        single W build amortizes (WAFE). The blocks come from the 1st-stage KV Pareto pool, so a
-        geometry span already samples the good block at each eff_kv (predicted-loss selection is NOT
-        used here: preferring low loss without an eff_kv grouping collapses coverage onto the single
-        best-eff_kv block — good-samples + coverage need a niche, which is deferred to the NSGA stage).
+        / cov_rad (1D covering radius) / both (cov_rad + std-of-gaps summed) — so they span the KV comp
+        band. One shared spanning set is used for every anchor. This is the cheap KV sweep a single W
+        build amortizes (WAFE). Blocks come from the 1st-stage KV Pareto pool, so a geometry span
+        already samples the good block at each eff_kv.
+
+        NOTE: scoring in the FULL 2D (wbits, eff_kv) space against the archive∪candidates union (a
+        natural idea — mirror the main _downselect) was implemented and MEASURED WORSE (~3× regret on
+        the 20×20 grid+RBF): the per-anchor sequential union makes anchors DIVIDE the eff_kv axis
+        (each covers a different slice), losing each anchor's own eff_kv span — systematic identical
+        per-anchor coverage reconstructs f_KV better. So companions are scored on eff_kv in isolation.
         Returns extra genomes (deduped vs candidates + each other; an anchor's own KV is skipped)."""
         cand_genomes = np.atleast_2d(np.asarray(cand_genomes, int))
         n_kv = int(n_kv)
@@ -673,8 +700,11 @@ class SecondSearch:
             return np.empty((0, self.n_var), int)
         n_pick = min(n_kv, len(self.KVg))
         lo, hi = self.comp_obj_min[1], self.comp_obj_max[1]
-        if getattr(self.args, 'companion_method', 'std_gap') == 'cov_rad':
+        method = getattr(self.args, 'companion_method', 'std_gap')
+        if method == 'cov_rad':
             kv_idx = self._cov_rad_1d(self.kv_comp, n_pick, lo, hi)
+        elif method == 'both':                                 # cov_rad + std-of-gaps jointly
+            kv_idx = self._cov_gap_1d(self.kv_comp, n_pick, lo, hi)
         else:                                                  # 'std_gap' — union-gap subset_select (1D eff_kv)
             kv_idx = np.asarray(subset_select(
                 self.kv_comp.reshape(-1, 1).astype(float), np.empty((0, 1)), n_pick,
@@ -891,8 +921,9 @@ def build_parser():
     # (span eff_kvbits) — the cheap KV sweep a single W build amortizes. 0 = off (unchanged behaviour).
     p.add_argument('--companion_kv', type=int, default=0,
                    help='extra geometry-diverse KV archs to attach per W-anchor at the subset stage (0=off)')
-    p.add_argument('--companion_method', default='std_gap', choices=['std_gap', 'cov_rad'],
-                   help='geometry for companion KV over eff_kvbits: std_gap (union-gap subset_select) or cov_rad')
+    p.add_argument('--companion_method', default='std_gap', choices=['std_gap', 'cov_rad', 'both'],
+                   help='geometry for companion KV over eff_kvbits: std_gap (union-gap subset_select), '
+                        'cov_rad (1D covering radius), or both (cov_rad + std-of-gaps summed)')
     p.add_argument('--cand_grid', type=int, default=0, help='seed grid side over the budget box (0=auto=ceil(sqrt(n_iter)))')
     p.add_argument('--grid_seed', action='store_true', help='inject staircase even-supply genomes per box grid cell into the candidate pool each iter (guarantees high-comp supply)')
     # decision-aware down-select (AWQ regime, opt-in; utils/acquisition.py). Default 0/0.0
