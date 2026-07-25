@@ -68,6 +68,10 @@ N_TOKEN=0
 GRID_SEED=True       # True = inject staircase even-supply genomes per box cell each iter
                      # (band counts + seed freshness are AUTO -- no knobs)
 
+COMPANION_KV=0       # WAFE: extra geometry-diverse KV archs attached per W-anchor at the subset
+                     # stage (span eff_kvbits; the cheap KV sweep a single W build amortizes). 0=off
+COMPANION_METHOD=std_gap   # geometry over eff_kvbits: std_gap (union-gap subset_select) | cov_rad
+
 FRONT_EPS_REL=0.05
 # FRONT_EPS_REL=0
 DIV_K=200           # structural-diversity blocks/axis (maximin; richest crossover -- dominant for hv)
@@ -88,6 +92,7 @@ QEFT_TAG=""; [ "${USE_QEFT}" == "True" ] && QEFT_TAG="_qc${QEFT_RANK_TEXT}"
 PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
 CAND_TAG=subset                                                 # down-select = subset (fixed)
 [ "${GRID_SEED}" == "True" ] && CAND_TAG+=-st                   # staircase supply seeds on
+[ "${COMPANION_KV}" -gt 0 ] && CAND_TAG+="-ckv${COMPANION_KV}${COMPANION_METHOD:0:3}"  # +companion KV sweep
 SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}  # e.g. rbfplstyp
 if [ -n "${SEED_DATE}" ]; then
     SEED_RESULTS="save/${SEED_DATE}_${MODEL_NAME}_awq_premeasured_${KV_METHOD_TEXT}_n${N_SAMPLE}_st${STRIDE}${PP_TAG}${SINK_TAG}_${DATASET}"
@@ -116,6 +121,7 @@ ARGS="--config ${CONFIG} \
 --save ${SAVE}"
 
 [ "${GRID_SEED}" == "True" ] && ARGS+=" --grid_seed"
+[ "${COMPANION_KV}" -gt 0 ] && ARGS+=" --companion_kv ${COMPANION_KV} --companion_method ${COMPANION_METHOD}"
 
 ARGS+=" --surrogate_input ${SURROGATE_INPUT}"
 [ -n "${QMODEL_PATHS}" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS}"

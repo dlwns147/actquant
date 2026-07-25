@@ -318,26 +318,13 @@ def select_joint(args, ctx):
                        f"[{args.comp_obj_min[i]:.4g}, {args.comp_obj_max[i]:.4g}]")
         msg.append("Widen --comp_obj_min/--comp_obj_max into the achievable range.")
         raise SystemExit("\n".join(msg))
-    # LCO/finite guard: never select an arch without a real measured loss (defensive —
-    # future predicted/virtual candidates must carry a measured anchor to be selectable).
-    feas &= np.isfinite(loss)
     idx = np.where(feas)[0]
     idx = idx[np.argsort(loss[idx], kind='stable')]      # measured-best first
     n_keep = max(1, int(args.n))
     # with --select_measured_best, hand run_final the predicted-best top-k to
     # re-measure; otherwise the stored loss already IS the measurement → take -n.
-    if args.select_measured_best and getattr(args, 'verify_adaptive', False):
-        # adaptive racing: race every in-box CONTENDER within --verify_margin of the
-        # box-best, clamped to [n_keep, verify_topk]. Sizes the race to the tie density.
-        from utils.acquisition import contender_verify_set
-        cset = contender_verify_set(loss[idx], float(args.verify_margin),
-                                    k_min=n_keep, k_max=int(args.verify_topk))
-        n_sel = len(cset)
-        print(f"[post_search] verify_adaptive: {n_sel} contender(s) within "
-              f"{args.verify_margin:g} JSD of best (topk cap {args.verify_topk})")
-    else:
-        n_sel = (max(n_keep, int(args.verify_topk)) if args.select_measured_best
-                 else n_keep)
+    n_sel = (max(n_keep, int(args.verify_topk)) if args.select_measured_best
+             else n_keep)
     sel = idx[:n_sel]
     ps = [archs[j] for j in sel]
     pf = loss[sel].reshape(-1, 1)
@@ -739,18 +726,6 @@ def build_parser():
                    help='(with --select_measured_best) how many predicted-best '
                         'archs to JSD-screen before keeping the measured-best '
                         '-n. Clamped up to >= -n.')
-    # adaptive racing (opt-in): verify every in-box contender within --verify_margin
-    # JSD of the box-best instead of a fixed --verify_topk. See DECISIONS.md Phase 4.
-    p.add_argument('--verify_adaptive', action='store_true',
-                   help='(with --select_measured_best) race the CONTENDER set — every '
-                        'in-box arch whose stored JSD is within --verify_margin of the '
-                        'best — instead of a fixed --verify_topk. Fixed top-k over-verifies '
-                        'clear winners and under-verifies dense ties; adaptive sizes the '
-                        'race to the tie density. Clamped to [-n, --verify_topk].')
-    p.add_argument('--verify_margin', type=float, default=0.002,
-                   help='(with --verify_adaptive) JSD band around the box-best that defines '
-                        'a contender. Set to the Phase-0 draw-noise σ once calibrated; '
-                        'default 0.002 ≈ the alloc-flip tie threshold.')
     # long-ppl key-token options (consumed by the evaluator)
     p.add_argument('--use_key_token', action='store_true')
     p.add_argument('--trunc_len', type=int, default=512)
