@@ -52,14 +52,22 @@ SAVE_ITER=10       # dump iter_<it>.stats + iter_<it>.png (via --debug) every SA
 N_PROC=1           # data-parallel eval ranks (search() is multi-process safe). For N_PROC>1 set
 SURROGATE_INPUT=genome
 WORKER_RECYCLE=32
-SEED_RESULTS=""
+
+# DOE_RESULTS: curated clean DOE dir. Just point at the folder — it is read READ-ONLY (never
+# written back except a one-time create if empty) and iteration-cache files (*_it<N>_*) are
+# ALWAYS ignored, so the DOE stays contamination-proof. Empty = measure a fresh DOE.
+DOE_RESULTS=""
+# DOE_RESULTS=save/awq_second_search/2607240358_Llama-3.1-8B-Instruct_awq_premeasured_kivi_think_n128_st128_pp512_sk8_wikitext2/
 
 if [ "${W_METHOD}" == "awq" ]; then
+    # W_METHOD=hqq
     SURROGATE_INPUT=plstyp
-    SEED_DATE=2607220730   # curated 88-arch premeasured seed set (fixed date)
+    SURROGATE=ard_gp   # plstyp head model = --surrogate now (rbf is the genome-mode default)
     N_DOE=100
     ITERATIONS=30
+    ITERATIONS=15
     N_ITER=20
+    SAVE_ITER=1
 fi
 
 ATTN_SINK=8
@@ -68,9 +76,9 @@ N_TOKEN=0
 GRID_SEED=True       # True = inject staircase even-supply genomes per box cell each iter
                      # (band counts + seed freshness are AUTO -- no knobs)
 
-COMPANION_KV=0       # WAFE: extra geometry-diverse KV archs attached per W-anchor at the subset
-                     # stage (span eff_kvbits; the cheap KV sweep a single W build amortizes). 0=off
-COMPANION_METHOD=std_gap   # geometry over eff_kvbits: std_gap (union-gap subset_select) | cov_rad | both
+# COMPANION_KV=0       # WAFE: extra geometry-diverse KV archs attached per W-anchor at the subset
+COMPANION_KV=10       # WAFE: extra geometry-diverse KV archs attached per W-anchor at the subset
+COMPANION_METHOD=2d   # companion KV placement: 2d (fill joint wbits×eff_kv plane; DEFAULT) | stagger/std_gap/cov_rad (1D-eff_kv non-identical)
 
 FRONT_EPS_REL=0.05
 # FRONT_EPS_REL=0
@@ -94,9 +102,6 @@ CAND_TAG=subset                                                 # down-select = 
 [ "${GRID_SEED}" == "True" ] && CAND_TAG+=-st                   # staircase supply seeds on
 [ "${COMPANION_KV}" -gt 0 ] && CAND_TAG+="-ckv${COMPANION_KV}${COMPANION_METHOD:0:3}"  # +companion KV sweep
 SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}  # e.g. rbfplstyp
-if [ -n "${SEED_DATE}" ]; then
-    SEED_RESULTS="save/${SEED_DATE}_${MODEL_NAME}_awq_premeasured_${KV_METHOD_TEXT}_n${N_SAMPLE}_st${STRIDE}${PP_TAG}${SINK_TAG}_${DATASET}"
-fi
 
 SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}_s${SEED}
 
@@ -130,7 +135,7 @@ if [ "${W_METHOD}" == "awq" ]; then
     GPU_ID=${DEVICES%%,*}                                     # main process; workers own the rest
     EVAL_WORKERS=$(echo ${DEVICES} | awk -F',' '{print NF}')  # one worker per DEVICES entry
     ARGS+=" --eval_workers ${EVAL_WORKERS} --worker_gpus ${DEVICES} --worker_recycle ${WORKER_RECYCLE}"
-    [ -n "${SEED_RESULTS}" ] && ARGS+=" --seed_results ${SEED_RESULTS}"
+    [ -n "${DOE_RESULTS}" ] && ARGS+=" --doe_results ${DOE_RESULTS}"
 fi
 
 ARGS+=" --gpu_id ${GPU_ID} \

@@ -241,22 +241,35 @@ class SecondSearch:
             metric.append(float(list(m.values())[0]))
         return list(range(len(archs))), metric, comp
 
-    def _load_seed_results(self, archive):
-        """Pre-measured archs (e.g. tests/awq_alloc_flip AWQ pilots) appended to the DOE
-        archive: joins *specs*.json (idx->arch) with *results*.jsonl (idx->y_awq) under
-        each --seed_results dir. Free archive mass — but the seed measurements' protocol
-        (dataset/n_sample/stride/prefill/last_tokens/attn_sink AND w_method) must match
-        this run's, else the surrogate trains on mixed scales."""
+    def _load_doe(self, archive):
+        """READ-ONLY pre-measured DOE (+ curated pilots) appended to the archive: joins
+        *specs*.json (idx->arch) with *results*.jsonl (idx->y_awq) under each --doe_results
+        dir. The dir is read as-is (just point at the folder) and NEVER written back to.
+        Protocol (dataset/n_sample/stride/prefill/last_tokens/attn_sink AND w_method) must
+        match this run's, else the surrogate trains on mixed scales."""
         import glob
+        import re
+        # CONTAMINATION GUARD: never load ITERATION-cache files (`..._it<N>_specs/results`).
+        # Those are search-trajectory-specific measurements (a prior run's iterations); loading
+        # them inherits that run's trajectory and skips a fresh DOE (see the 2782-it* contamination
+        # that collapsed diversity). Only DOE + curated pilots feed the archive. The pattern is
+        # anchored to the TAG position so a run-name substring like `it30n20p200` inside a *_doe_*
+        # filename is NOT mistaken for an iteration file. (For full warm-start from a finished run
+        # use --resume <iter_N.stats>, not --doe_results.)
+        iter_cache = re.compile(r'_it\d+_(specs\.json|results\.jsonl)$')
         seen = {tuple(self.ss.encode(x[0]).tolist()) for x in archive}
-        out, n_skip = [], 0
-        for d in self.args.seed_results:
-            os.makedirs(d, exist_ok=True)   # auto-create a missing seed/cache dir (no hard fail)
+        out, n_skip, n_iterskip = [], 0, 0
+        for d in self.args.doe_results:
+            os.makedirs(d, exist_ok=True)   # auto-create a missing doe dir (no hard fail)
             specs = {}
             for p in sorted(glob.glob(os.path.join(d, '*specs*.json'))):
+                if iter_cache.search(os.path.basename(p)):
+                    n_iterskip += 1; continue
                 for s in json.load(open(p)):
                     specs[s['idx']] = s
             for p in sorted(glob.glob(os.path.join(d, '*results*.jsonl'))):
+                if iter_cache.search(os.path.basename(p)):
+                    continue
                 for line in open(p):
                     if not line.strip():
                         continue
@@ -279,32 +292,39 @@ class SecondSearch:
                         n_skip += 1; continue
                     seen.add(key)
                     out.append([s['arch'], float(y), *c])
+        if n_iterskip:
+            self.accelerator.print(f"[doe] IGNORED {n_iterskip} iteration-cache file(s) "
+                                   f"(*_it<N>_*: trajectory-specific, not DOE — use --resume for those)")
         if n_skip:
-            self.accelerator.print(f"[seed_results] skipped {n_skip} (dup / out-of-box / non-encodable / nan)")
+            self.accelerator.print(f"[doe] skipped {n_skip} (dup / out-of-box / non-encodable / nan)")
         return out
 
-    def _cache_seed(self, tag, archs, metrics):
-        """Persist freshly-measured (arch -> loss) pairs into the FIRST --seed_results dir as
-        a run-tagged specs/results pair, so a future run of the SAME protocol warm-starts from
-        them (AWQ ~509s/arch — measurements are worth caching). Format matches
-        _load_seed_results (idx-keyed specs list + {idx, y_awq} jsonl); string idx = run+tag+i
-        can't collide across runs; dedup-on-READ by encoded arch makes cross-run duplicates
-        harmless. No-op when --seed_results is unset."""
-        if not getattr(self.args, 'seed_results', None):
+    def _cache_doe(self, archs, metrics):
+        """CREATE-ONCE write of the freshly-measured DOE into the FIRST --doe_results dir, so a
+        future run of the SAME protocol warm-starts from it (AWQ ~509s/arch — worth caching).
+        If the dir ALREADY holds a DOE file it is treated as an immutable curated cache and is
+        NOT touched (no cross-run trajectory accumulation -> contamination-proof by construction).
+        Only DOE is ever written (iterations live only in iter_*.stats). No-op without
+        --doe_results. Format matches _load_doe (idx-keyed specs list + {idx, y_awq} jsonl)."""
+        import glob
+        if not getattr(self.args, 'doe_results', None):
             return
-        d = self.args.seed_results[0]
+        d = self.args.doe_results[0]
         os.makedirs(d, exist_ok=True)
+        if glob.glob(os.path.join(d, '*_doe_specs.json')):     # already populated -> immutable
+            return
         run = os.path.basename(self.save_path.rstrip('/'))
-        rows = [(f"{run}_{tag}_{i}", a, float(m)) for i, (a, m) in enumerate(zip(archs, metrics))
+        rows = [(f"{run}_doe_{i}", a, float(m)) for i, (a, m) in enumerate(zip(archs, metrics))
                 if np.isfinite(m)]
         if not rows:
             return
-        with open(os.path.join(d, f"{run}_{tag}_specs.json"), 'w') as f:
+        with open(os.path.join(d, f"{run}_doe_specs.json"), 'w') as f:
             json.dump([{'idx': idx, 'arch': a} for idx, a, _ in rows], f)
-        with open(os.path.join(d, f"{run}_{tag}_results.jsonl"), 'w') as f:
+        with open(os.path.join(d, f"{run}_doe_results.jsonl"), 'w') as f:
             for idx, _, y in rows:
                 f.write(json.dumps({'idx': idx, 'y_awq': y}) + "\n")
-        self.accelerator.print(f"[seed_cache] +{len(rows)} measured archs -> {d}/{run}_{tag}_*")
+        self.accelerator.print(f"[doe] created cache +{len(rows)} DOE archs -> {d}/{run}_doe_* "
+                               f"(immutable hereafter)")
 
     # ───────────────── incremental encode cache (append-only archive) ─────────────────
     def _encode_archive(self, archive):
@@ -400,11 +420,17 @@ class SecondSearch:
         """pls+typ family — measured best WITHIN-CELL input on the 538-arch AWQ archive
         (tests/awq_alloc_flip/embedding_input_check.py): B_low(w2.8) OOS ρ .51 vs feat
         .29, C_kv18 .77 vs .34, cell-mean .63 vs .46, global tied (.996). Kitchen-sink
-        pls+feat+typ was WORSE (.55 — feature dilution at this N): keep the family lean."""
-        inner = get_predictor('ard_gp', self._pls_features(Xf), targets, device=self._pred_device)
+        pls+feat+typ was WORSE (.55 — feature dilution at this N): keep the family lean.
+
+        HEAD MODEL = the base predictor chosen by --surrogate (ard_gp recommended): verified
+        companion-robust — on the companion_kv=10 archive both ard_gp and rbf hold held-out-W OOS
+        rho ~0.995 and companions HELP within-cell ranking (ard_gp 0.965 full vs 0.880 @1 KV/W);
+        ard_gp > rbf within-cell (0.965 vs 0.939). See tests/second_search_predictor_audit.py."""
+        inner_name = getattr(self.args, 'surrogate', 'ard_gp')
+        inner = get_predictor(inner_name, self._pls_features(Xf), targets, device=self._pred_device)
         featf = self._pls_features
         class _PlsPred:
-            name = 'plstyp_ard_gp'
+            name = f'plstyp_{inner_name}'
             def predict(self, X):
                 return np.asarray(inner.predict(featf(np.asarray(X, float)))).ravel()
         return _PlsPred()
@@ -565,8 +591,12 @@ class SecondSearch:
         if len(Xc) > K:
             idx = self._downselect(Xc, archive, K, pred=pred)
             Xc, pred = Xc[idx], pred[idx]
-        # subset-sampling companion step: attach geometry-diverse extra KV per W-anchor (--companion_kv)
-        comp_g = self._companion_kv(Xc, getattr(self.args, 'companion_kv', 0))
+        # subset-sampling companion step: attach extra KV per W-anchor (--companion_kv). The 2d
+        # method (default) fills the 2D (wbits,eff_kv) plane relative to the archive FRONT.
+        Fa = np.column_stack([[x[i] for x in archive] for i in (1, 2, 3)])
+        fr = NonDominatedSorting().do(Fa, only_non_dominated_front=True)
+        comp_g = self._companion_kv(Xc, getattr(self.args, 'companion_kv', 0),
+                                    front_comp=Fa[fr][:, 1:], predictor=predictor)
         if len(comp_g):
             comp_g = np.array([gg for gg in comp_g
                                if tuple(gg) not in seen], int).reshape(-1, self.n_var)
@@ -626,6 +656,12 @@ class SecondSearch:
         use_acq = (getattr(self.args, 'anchor_k', 0) > 0
                    or getattr(self.args, 'decision_frac', 0.0) > 0)
         if not use_acq or pred is None:
+            if getattr(self.args, 'companion_kv', 0) > 0:
+                # KV (eff_kv) coverage is supplied by the front-referenced 2D companion step, so the
+                # anchors only need to span the WBITS axis — front-referenced 1D std-gap over wbits
+                # (each anchor is a build; spread the builds evenly over wbits, like the DOE).
+                return subset_select(comp[:, :1], front_comp[:, :1], K, self.args.subset_pop_size,
+                                     endpoints=endpoints[:, :1], seed=self.args.seed)
             return subset_select(comp, front_comp, K, self.args.subset_pop_size,
                                  endpoints=endpoints, seed=self.args.seed)
         from utils.acquisition import mixed_downselect
@@ -679,44 +715,141 @@ class SecondSearch:
             i = int(np.argmin(score)); chosen.append(i); cur = np.minimum(cur, D[:, i])
         return np.array(chosen, int)
 
-    def _companion_kv(self, cand_genomes, n_kv):
-        """SUBSET-SAMPLING companion step: for each down-selected candidate (a W-anchor), attach up to
-        n_kv EXTRA archs that keep the candidate's W-block but pick n_kv KV-blocks straight from the
-        self.KVg pool by GEOMETRY over eff_kvbits — --companion_method std_gap (union-gap subset_select)
-        / cov_rad (1D covering radius) / both (cov_rad + std-of-gaps summed) — so they span the KV comp
-        band. One shared spanning set is used for every anchor. This is the cheap KV sweep a single W
-        build amortizes (WAFE). Blocks come from the 1st-stage KV Pareto pool, so a geometry span
-        already samples the good block at each eff_kv.
+    def _companion_kv(self, cand_genomes, n_kv, front_comp=None, predictor=None):
+        """SUBSET-SAMPLING companion step: for each down-selected candidate (a W-anchor), attach up
+        to n_kv EXTRA archs that keep the candidate's W-block but sweep n_kv KV-blocks from the
+        self.KVg pool over eff_kvbits — the cheap KV sweep a single W build amortizes (WAFE).
 
-        NOTE: scoring in the FULL 2D (wbits, eff_kv) space against the archive∪candidates union (a
-        natural idea — mirror the main _downselect) was implemented and MEASURED WORSE (~3× regret on
-        the 20×20 grid+RBF): the per-anchor sequential union makes anchors DIVIDE the eff_kv axis
-        (each covers a different slice), losing each anchor's own eff_kv span — systematic identical
-        per-anchor coverage reconstructs f_KV better. So companions are scored on eff_kv in isolation.
-        Returns extra genomes (deduped vs candidates + each other; an anchor's own KV is skipped)."""
+        --companion_method 2d (DEFAULT): when an archive FRONT is passed (front_comp, the search
+        stage) pick companions from ALL (anchor W × KVg) candidates by a FRONT-referenced 2D
+        subset_select over (wbits,eff_kv) — the same union-gap selector as the W-anchor down-select,
+        so KV fills the plane relative to the archive front; at the DOE (front_comp=None) it falls
+        back to the per-anchor 2D covering (each anchor fills the biggest joint-plane hole). 1D
+        variants (always geometry, front-blind): stagger (rotation/Latin over eff_kv bins), std_gap /
+        cov_rad (sequential-exclusion union-gap / covering-radius over the pool minus prior picks).
+
+        NOTE: an earlier 2D-union variant MEASURED ~3× worse regret on a grid+RBF probe
+        (scratchpad/companion_kv_2dunion.py) — 2d is the default per request; a clean head-to-head
+        (offline on the round4 ground-truth grid: regret + surrogate OOS per method) should confirm
+        or overturn that before trusting it. Returns extra genomes (deduped vs candidates)."""
         cand_genomes = np.atleast_2d(np.asarray(cand_genomes, int))
         n_kv = int(n_kv)
         if n_kv <= 0 or len(self.KVg) == 0 or len(cand_genomes) == 0:
             return np.empty((0, self.n_var), int)
         n_pick = min(n_kv, len(self.KVg))
         lo, hi = self.comp_obj_min[1], self.comp_obj_max[1]
-        method = getattr(self.args, 'companion_method', 'std_gap')
-        if method == 'cov_rad':
-            kv_idx = self._cov_rad_1d(self.kv_comp, n_pick, lo, hi)
-        elif method == 'both':                                 # cov_rad + std-of-gaps jointly
-            kv_idx = self._cov_gap_1d(self.kv_comp, n_pick, lo, hi)
-        else:                                                  # 'std_gap' — union-gap subset_select (1D eff_kv)
-            kv_idx = np.asarray(subset_select(
-                self.kv_comp.reshape(-1, 1).astype(float), np.empty((0, 1)), n_pick,
-                self.args.subset_pop_size, endpoints=np.array([[lo], [hi]], float),
-                seed=self.args.seed), int)
-        kv_blocks = [np.asarray(self.KVg[i], int) for i in kv_idx]
+        method = getattr(self.args, 'companion_method', '2d')
+
+        # ── 2d (DEFAULT): when an archive FRONT is available (the search stage) pick companions
+        #    from ALL (anchor × KVg) candidates by a FRONT-referenced 2D subset_select over
+        #    (wbits, eff_kv) — the SAME union-gap selector as the W-anchor down-select, but 2D, so
+        #    KV fills the plane relative to the archive front. Every candidate's W is a built anchor
+        #    ⇒ the pool reuses each build. Budget = n_kv/anchor. At the DOE (no front) this branch is
+        #    skipped and 2d falls through to the per-anchor covering-radius geometry below.
+        if method == '2d' and front_comp is not None and len(front_comp):
+            KVg = np.asarray(self.KVg, int)
+            cands = np.array([np.concatenate([g[:self.nw], kvb])
+                              for g in cand_genomes for kvb in KVg]).astype(int)
+            comp2d = np.asarray(self._comp.batch(cands, self.comp_obj), float)   # (M,2) wbits,eff_kv
+            endpoints = np.array([self.comp_obj_min, self.comp_obj_max], float)
+            budget = min(n_pick * len(cand_genomes), len(cands))
+            # reference = archive FRONT ∪ this round's NSGA anchors (companions fill what neither
+            # covers; subset_select adds its own growing picks to the union-gap internally).
+            anchor_comp = np.asarray(self._comp.batch(cand_genomes, self.comp_obj), float)
+            ref = np.vstack([np.asarray(front_comp, float), anchor_comp])
+            if predictor is not None:
+                # PREDICTED-PARETO (DEFAULT when a predictor is available): keep the predicted
+                # Pareto front over (loss,wbits,eff_kv) =
+                # performance-optimal candidates, then 2D subset over THAT front (ref = archive
+                # front ∪ anchors) so KV picks are both low-loss AND evenly cover the plane.
+                mu = np.asarray(predictor.predict(cands[:, self.active].astype(float))).ravel()
+                fr = NonDominatedSorting().do(np.column_stack([mu, comp2d]),
+                                              only_non_dominated_front=True)
+                loc_fr = np.asarray(subset_select(comp2d[fr], ref, min(budget, len(fr)),
+                                                  self.args.subset_pop_size, endpoints=endpoints,
+                                                  seed=self.args.seed), int)
+                loc = fr[loc_fr]
+            else:
+                loc = np.asarray(subset_select(comp2d, ref, budget, self.args.subset_pop_size,
+                                               endpoints=endpoints, seed=self.args.seed), int)
+            seen = {tuple(g.tolist()) for g in cand_genomes}
+            extra = []
+            per_w = {}                                         # cap companions PER W-anchor at n_pick
+            for j in loc:
+                cg = cands[j]; key = tuple(cg.tolist())
+                if key in seen:                                # skip anchors themselves + dups
+                    continue
+                w = tuple(cg[:self.nw].tolist())
+                if per_w.get(w, 0) >= n_pick:                  # this W already has k → use only k
+                    continue
+                per_w[w] = per_w.get(w, 0) + 1
+                seen.add(key); extra.append(cg)
+            return np.array(extra, int) if extra else np.empty((0, self.n_var), int)
+
+        # ── per-anchor KV index set — ALL methods are NON-IDENTICAL (each anchor gets a DIFFERENT
+        #    eff_kv set so B anchors sweep a dense union; the old identical shared-ladder is gone). ──
+        kvc = np.asarray(self.kv_comp, float)
+        if method == '2d':
+            # 2D COVERING (DEFAULT): each anchor (fixed wbits) greedily picks the n_pick KV whose
+            # (wbits, eff_kv) point most reduces the covering radius over ALL points placed so far,
+            # so the companions evenly fill the JOINT (wbits, eff_kv) plane the search selects over
+            # (lowest 2D covering radius of any method; tests/companion_method_coverage.py).
+            # Sequential across anchors; distances normalized by the budget-box extents.
+            sw = max(self.comp_obj_max[0] - self.comp_obj_min[0], 1e-9)
+            sk = max(hi - lo, 1e-9)
+            anchor_w = np.asarray(self._comp.batch(cand_genomes, self.comp_obj), float)[:, 0]
+            st = {'w': [], 'k': []}                             # (wbits, eff_kv) placed so far
+            def anchor_idx(i):
+                wv = float(anchor_w[i]); chosen = []
+                for _ in range(n_pick):
+                    if st['w']:
+                        a = ((wv - np.asarray(st['w'])) / sw) ** 2                 # (P,)
+                        b = ((kvc[:, None] - np.asarray(st['k'])[None, :]) / sk) ** 2  # (M,P)
+                        dmin = np.sqrt(a[None, :] + b).min(1)                      # (M,) NN dist
+                    else:
+                        dmin = np.full(len(kvc), np.inf)
+                    for c in chosen:
+                        dmin[c] = -1.0                          # no repeat within this anchor
+                    j = int(np.argmax(dmin)); chosen.append(j)  # fill the biggest 2D hole
+                    st['w'].append(wv); st['k'].append(float(kvc[j]))
+                return chosen
+        elif method == 'stagger':
+            # systematic rotation / Latin over eff_kv: sort the KV pool by eff_kv, split into
+            # n_pick contiguous eff_kv bins; anchor i takes the (i mod |bin|)-th member of EACH bin
+            # → every anchor spans the full range (one point per bin) but anchors are OFFSET, so B
+            # anchors sweep up to n_pick*B distinct eff_kv (1D-even; measured-good for the flexible
+            # predictor, memory 2026-07-24, but 2D covers the joint plane more evenly).
+            bins = [b for b in np.array_split(np.argsort(kvc), n_pick) if len(b)]
+            def anchor_idx(i):
+                return [b[i % len(b)] for b in bins]
+        else:
+            # std_gap / cov_rad, NON-IDENTICAL via SEQUENTIAL EXCLUSION: anchor i runs the 1D
+            # geometry (union-gap subset_select / covering-radius) over the pool MINUS what prior
+            # anchors already took (reset when <n_pick remain). Each anchor still spans the full
+            # eff_kv range (endpoints anchored); the union grows with each anchor.
+            state = {'used': set()}
+            def anchor_idx(i):
+                avail = np.array([j for j in range(len(kvc)) if j not in state['used']], int)
+                if len(avail) < n_pick:                        # pool exhausted -> reset (reuse)
+                    state['used'].clear(); avail = np.arange(len(kvc))
+                sub = kvc[avail]
+                if method == 'cov_rad':
+                    loc = self._cov_rad_1d(sub, n_pick, lo, hi)
+                else:                                          # 'std_gap'
+                    loc = np.asarray(subset_select(
+                        sub.reshape(-1, 1).astype(float), np.empty((0, 1)), n_pick,
+                        self.args.subset_pop_size, endpoints=np.array([[lo], [hi]], float),
+                        seed=self.args.seed), int)
+                picks = avail[np.asarray(loc, int)]
+                state['used'].update(picks.tolist())
+                return picks
+
         seen = {tuple(g.tolist()) for g in cand_genomes}       # dedup vs the anchors themselves
         extra = []
-        for g in cand_genomes:
+        for i, g in enumerate(cand_genomes):
             wblock = g[:self.nw]
-            for kb in kv_blocks:
-                cg = np.concatenate([wblock, kb]).astype(int)
+            for j in anchor_idx(i):
+                cg = np.concatenate([wblock, np.asarray(self.KVg[j], int)]).astype(int)
                 key = tuple(cg.tolist())
                 if key in seen:                                # skip anchor's own KV + duplicates
                     continue
@@ -733,7 +866,18 @@ class SecondSearch:
         ks = sorted({int(np.argmin(self.kv_comp)), int(np.argmax(self.kv_comp))}) # KV block extremes
         corners = [np.concatenate([self.Wg[wi], self.KVg[ki]]) for wi in ws for ki in ks]
         n_doe = self.n_doe if n_doe is None else n_doe
-        rand = FrontierProductSampling(self.Wg, self.KVg)._do(None, max(n_doe - len(corners), 0))
+        n_fill = max(n_doe - len(corners), 0)
+        if n_fill and self.args.companion_kv > 0:
+            # With companion, each W-anchor is a (1+companion_kv)-point investment, so an empty
+            # wbits region loses that many points → spread the DOE W EVENLY over the wbits range
+            # (simple: linspace targets → nearest block). KV stays random — the companion sprays
+            # eff_kv per anchor. Not gated on companion => byte-identical DOE when companion is off.
+            wc = np.asarray(self.w_comp, float)
+            wi = [int(np.argmin(np.abs(wc - t))) for t in np.linspace(wc.min(), wc.max(), n_fill)]
+            ki = np.random.randint(0, len(self.KVg), n_fill)
+            rand = np.array([np.concatenate([self.Wg[wi[i]], self.KVg[ki[i]]]) for i in range(n_fill)])
+        else:
+            rand = FrontierProductSampling(self.Wg, self.KVg)._do(None, n_fill)
         doe_g = np.concatenate([np.array(corners), rand], axis=0) if len(rand) else np.array(corners)
         return [self.ss.decode(g) for g in doe_g], len(corners), len(rand)
 
@@ -758,16 +902,31 @@ class SecondSearch:
             # shortfall (N_DOE - cached). If the cache (folder already exists) already has
             # >= N_DOE archs, skip DOE measurement entirely and use them as-is.
             if main:
-                seeded = self._load_seed_results([]) if self.args.seed_results else []
+                seeded = self._load_doe([]) if self.args.doe_results else []
                 n_need = max(0, self.n_doe - len(seeded))
                 archs, n_corner, n_rand = self._initialize(n_need) if n_need > 0 else ([], 0, 0)
                 if seeded and archs:                       # don't re-measure already-cached archs
                     _seen = {tuple(self.ss.encode(x[0]).tolist()) for x in seeded}
                     archs = [a for a in archs if tuple(self.ss.encode(a).tolist()) not in _seen]
                 if seeded:
-                    acc.print(f"[seed_results] {len(seeded)} cached (dir exists) → DOE measures "
+                    acc.print(f"[doe] {len(seeded)} cached (dir exists) → DOE measures "
                               f"{'0 (>= N_DOE, skip)' if n_need == 0 else str(len(archs)) + ' more'} "
                               f"(target N_DOE={self.n_doe})")
+                # DOE companion: attach COMPANION_KV geometry-diverse KV per freshly-measured DOE
+                # W-anchor (predictor-free geometry — no surrogate yet). Builds are UNCHANGED: the
+                # companions keep each DOE arch's exact W-block, so awq_pool reuses that W build and
+                # only swaps KV (~1s). The extra measured (W,KV,loss) points are cached into the DOE.
+                if archs and self.args.companion_kv > 0:
+                    G = np.array([self.ss.encode(a) for a in archs])          # DOE archs = W-anchors
+                    comp_g = self._companion_kv(G, self.args.companion_kv)    # existing geometry
+                    keys = {tuple(g.tolist()) for g in G}
+                    if seeded:
+                        keys |= {tuple(self.ss.encode(x[0]).tolist()) for x in seeded}
+                    comp_g = [g for g in comp_g if tuple(g.tolist()) not in keys]
+                    if comp_g:
+                        archs = archs + [self.ss.decode(g) for g in comp_g]
+                        acc.print(f"[doe companion] +{len(comp_g)} KV over {len(G)} DOE W-anchors "
+                                  f"({self.args.companion_method}); builds unchanged (pool reuses W)")
             else:
                 archs, n_corner, n_rand = [], 0, 0
             archs = acc.gather_for_metrics(archs, use_gather_object=True)   # → all ranks
@@ -776,7 +935,7 @@ class SecondSearch:
             if main:
                 measured = [[archs[i], m, *c] for i, m, c in zip(kept, metric, comp)]
                 if kept:
-                    self._cache_seed('doe', [archs[i] for i in kept], metric)   # persist new measurements
+                    self._cache_doe([archs[i] for i in kept], metric)   # create-once DOE cache
                 archive = seeded + measured
                 losses = [x[1] for x in archive]
                 acc.print(f"[DOE] {len(archive)} archs = {len(seeded)} cached + {len(measured)} measured"
@@ -815,7 +974,8 @@ class SecondSearch:
                     np.array([x[1] for x in archive] + c_metric))
                 for i, m, c in zip(kept, c_metric, c_comp):
                     archive.append([cands[i], m, *c])
-                self._cache_seed(f'it{it}', [cands[i] for i in kept], c_metric)
+                # iterations are NEVER cached to the DOE dir (trajectory-specific -> would
+                # contaminate the reusable DOE; they live only in this run's iter_*.stats).
                 F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
                 hv = calc_hv(ref_pt, F); cov = front_coverage(archive, self.comp_obj)
                 iter_time = time() - iter_start
@@ -891,6 +1051,9 @@ def build_parser():
                    help="plstyp: append the 2d BandTable typicality features (OFF by default — "
                         "ablation-neutral on the AWQ archive, corner Δ within noise; kept as a "
                         "research toggle)")
+    # (--plstyp_inner merged into --surrogate: for surrogate_input=plstyp the plstyp head model IS
+    #  the --surrogate predictor. ard_gp recommended — verified companion-robust on within-cell KV
+    #  ranking, tests/second_search_predictor_audit.py; rbf is a robust alternative.)
     p.add_argument('--predictor_device', default='auto', help="surrogate compute device: 'auto' (=cuda when visible; the RBF saddle solve is ridge-stabilised) / 'cuda' / 'cuda:N' / 'cpu'")
     p.add_argument('--iterations', type=int, default=8); p.add_argument('--n_doe', type=int, default=512)
     p.add_argument('--n_iter', type=int, default=60); p.add_argument('--pop', type=int, default=92)
@@ -921,9 +1084,18 @@ def build_parser():
     # (span eff_kvbits) — the cheap KV sweep a single W build amortizes. 0 = off (unchanged behaviour).
     p.add_argument('--companion_kv', type=int, default=0,
                    help='extra geometry-diverse KV archs to attach per W-anchor at the subset stage (0=off)')
-    p.add_argument('--companion_method', default='std_gap', choices=['std_gap', 'cov_rad', 'both'],
-                   help='geometry for companion KV over eff_kvbits: std_gap (union-gap subset_select), '
-                        'cov_rad (1D covering radius), or both (cov_rad + std-of-gaps summed)')
+    p.add_argument('--companion_method', default='2d',
+                   choices=['2d', 'stagger', 'std_gap', 'cov_rad'],
+                   help="companion-KV placement. DEFAULT 2d: when an archive FRONT exists (search "
+                        "stage) pick companions from all (anchor W x KVg) candidates by a FRONT-"
+                        "referenced 2D subset_select over (wbits,eff_kv) — same selector as the "
+                        "W-anchor step but 2D; at the DOE (no front yet) it is the per-anchor greedy "
+                        "picks KV that fill the JOINT (wbits,eff_kv) plane the search selects over "
+                        "(lowest 2D covering radius). Others are 1D-eff_kv, all NON-IDENTICAL "
+                        "(each anchor a DIFFERENT eff_kv set): stagger (rotation/Latin over eff_kv "
+                        "bins), std_gap / cov_rad (sequential-exclusion union-gap / covering-radius). "
+                        "NB memory has a measured 3x-worse-regret result for a 2D-union variant on a "
+                        "grid+RBF probe — kept as the default per request; verify with a head-to-head.")
     p.add_argument('--cand_grid', type=int, default=0, help='seed grid side over the budget box (0=auto=ceil(sqrt(n_iter)))')
     p.add_argument('--grid_seed', action='store_true', help='inject staircase even-supply genomes per box grid cell into the candidate pool each iter (guarantees high-comp supply)')
     # decision-aware down-select (AWQ regime, opt-in; utils/acquisition.py). Default 0/0.0
@@ -969,12 +1141,15 @@ def build_parser():
                    help='keep each AWQ eval worker printing its run_awq/tqdm build output inline '
                         '(default: workers redirect stdout/stderr to <save>/awq_logs/worker*.log '
                         'so the terminal shows only the main [awq_pool] X/N aggregate progress)')
-    p.add_argument('--seed_results', nargs='*', default=[],
-                   help='dirs of pre-measured results (*specs*.json + *results*.jsonl, e.g. '
-                        'save/awq_alloc_flip = the curated 88-arch pilot+round-0 seed set) '
-                        'appended to the DOE archive; measurement protocol AND w_method must '
-                        'match this run. NOTE: every *specs*.json in the dir is globbed and must '
-                        "carry an 'idx' key — keep probe/other-format files out of the seed dir")
+    p.add_argument('--doe_results', nargs='*', default=[],
+                   help='dir(s) of pre-measured DOE (+ curated pilots): *specs*.json + '
+                        '*results*.jsonl, e.g. save/awq_second_search/<protocol> = the curated '
+                        'clean DOE, or save/awq_alloc_flip = the 88-arch pilot set. Just point at '
+                        'the folder — it is read AS-IS (READ-ONLY: never written back except a '
+                        'one-time create if the dir has no DOE yet) and ITERATION-cache files '
+                        '(*_it<N>_*) are ALWAYS ignored, so the DOE stays contamination-proof. '
+                        'Protocol AND w_method must match this run. (Full warm-start from a '
+                        'finished run = --resume <iter_N.stats>, not this.)')
     # hqq-mode model/quant args (mirror search.py / evaluator.py)
     p.add_argument('--gpu_id', default='0'); p.add_argument('--model_path', default='/SSD/huggingface/meta-llama')
     p.add_argument('--dtype', default='bfloat16'); p.add_argument('--w_method', nargs='+', default=['hqq'])
