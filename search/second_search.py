@@ -748,42 +748,38 @@ class SecondSearch:
         #    skipped and 2d falls through to the per-anchor covering-radius geometry below.
         if method == '2d' and front_comp is not None and len(front_comp):
             KVg = np.asarray(self.KVg, int)
+            endpoints = np.array([self.comp_obj_min, self.comp_obj_max], float)
+            front = np.asarray(front_comp, float)
+            # GLOBAL: pool ALL (anchor × KVg) candidates; keep the predicted Pareto front over
+            # (loss,wbits,eff_kv) [when a predictor is available]; ONE 2D subset picks the FULL
+            # budget (n_kv × n_anchors) to cover the (wbits,eff_kv) plane relative to (archive front
+            # ∪ anchors). NO per-W cap — the per-W spread is coverage-driven and that is FINE: the
+            # build cost is per DISTINCT W (each anchor built once, companions reuse that build), so
+            # how many KV swaps land on a given build does NOT change cost; only the TOTAL count and
+            # the plane coverage matter. (At the DOE, front_comp=None → this whole branch is skipped
+            # and 2d falls to the per-anchor covering geometry below.)
             cands = np.array([np.concatenate([g[:self.nw], kvb])
                               for g in cand_genomes for kvb in KVg]).astype(int)
             comp2d = np.asarray(self._comp.batch(cands, self.comp_obj), float)   # (M,2) wbits,eff_kv
-            endpoints = np.array([self.comp_obj_min, self.comp_obj_max], float)
+            ref = np.vstack([front, np.asarray(self._comp.batch(cand_genomes, self.comp_obj), float)])
             budget = min(n_pick * len(cand_genomes), len(cands))
-            # reference = archive FRONT ∪ this round's NSGA anchors (companions fill what neither
-            # covers; subset_select adds its own growing picks to the union-gap internally).
-            anchor_comp = np.asarray(self._comp.batch(cand_genomes, self.comp_obj), float)
-            ref = np.vstack([np.asarray(front_comp, float), anchor_comp])
             if predictor is not None:
-                # PREDICTED-PARETO (DEFAULT when a predictor is available): keep the predicted
-                # Pareto front over (loss,wbits,eff_kv) =
-                # performance-optimal candidates, then 2D subset over THAT front (ref = archive
-                # front ∪ anchors) so KV picks are both low-loss AND evenly cover the plane.
                 mu = np.asarray(predictor.predict(cands[:, self.active].astype(float))).ravel()
                 fr = NonDominatedSorting().do(np.column_stack([mu, comp2d]),
                                               only_non_dominated_front=True)
-                loc_fr = np.asarray(subset_select(comp2d[fr], ref, min(budget, len(fr)),
+                loc = fr[np.asarray(subset_select(comp2d[fr], ref, min(budget, len(fr)),
                                                   self.args.subset_pop_size, endpoints=endpoints,
-                                                  seed=self.args.seed), int)
-                loc = fr[loc_fr]
+                                                  seed=self.args.seed), int)]
             else:
                 loc = np.asarray(subset_select(comp2d, ref, budget, self.args.subset_pop_size,
                                                endpoints=endpoints, seed=self.args.seed), int)
             seen = {tuple(g.tolist()) for g in cand_genomes}
             extra = []
-            per_w = {}                                         # cap companions PER W-anchor at n_pick
             for j in loc:
-                cg = cands[j]; key = tuple(cg.tolist())
-                if key in seen:                                # skip anchors themselves + dups
+                key = tuple(cands[j].tolist())
+                if key in seen:                                # skip anchors' own KV + dups
                     continue
-                w = tuple(cg[:self.nw].tolist())
-                if per_w.get(w, 0) >= n_pick:                  # this W already has k → use only k
-                    continue
-                per_w[w] = per_w.get(w, 0) + 1
-                seen.add(key); extra.append(cg)
+                seen.add(key); extra.append(cands[j])
             return np.array(extra, int) if extra else np.empty((0, self.n_var), int)
 
         # ── per-anchor KV index set — ALL methods are NON-IDENTICAL (each anchor gets a DIFFERENT

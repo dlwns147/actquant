@@ -64,7 +64,7 @@ if [ "${W_METHOD}" == "awq" ]; then
     SURROGATE_INPUT=plstyp
     SURROGATE=ard_gp   # plstyp head model = --surrogate now (rbf is the genome-mode default)
     N_DOE=100
-    ITERATIONS=30
+    # ITERATIONS=30
     ITERATIONS=15
     N_ITER=20
     SAVE_ITER=1
@@ -82,7 +82,7 @@ COMPANION_METHOD=2d   # companion KV placement: 2d (fill joint wbits×eff_kv pla
 
 FRONT_EPS_REL=0.05
 # FRONT_EPS_REL=0
-DIV_K=200           # structural-diversity blocks/axis (maximin; richest crossover -- dominant for hv)
+DIV_K=0           # structural-diversity blocks/axis (maximin; richest crossover -- dominant for hv)
 
 LOSS_FUNC=jsd
 DATASET=wikitext2
