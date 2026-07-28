@@ -53,16 +53,15 @@ N_PROC=1           # data-parallel eval ranks (search() is multi-process safe). 
 SURROGATE_INPUT=genome
 WORKER_RECYCLE=32
 
-# DOE_RESULTS: curated clean DOE dir. Just point at the folder — it is read READ-ONLY (never
-# written back except a one-time create if empty) and iteration-cache files (*_it<N>_*) are
-# ALWAYS ignored, so the DOE stays contamination-proof. Empty = measure a fresh DOE.
+# DOE_RESULTS: curated clean DOE dir (read READ-ONLY except a one-time create if empty;
+# iteration-cache files *_it<N>_* are always ignored). Empty = measure a fresh DOE.
 DOE_RESULTS=""
 # DOE_RESULTS=save/awq_second_search/2607240358_Llama-3.1-8B-Instruct_awq_premeasured_kivi_think_n128_st128_pp512_sk8_wikitext2/
 
 if [ "${W_METHOD}" == "awq" ]; then
     # W_METHOD=hqq
     SURROGATE_INPUT=plstyp
-    SURROGATE=ard_gp   # plstyp head model = --surrogate now (rbf is the genome-mode default)
+    SURROGATE=ard_gp
     N_DOE=100
     # ITERATIONS=30
     ITERATIONS=15
@@ -73,12 +72,11 @@ fi
 ATTN_SINK=8
 N_TOKEN=0
 
-GRID_SEED=True       # True = inject staircase even-supply genomes per box cell each iter
-                     # (band counts + seed freshness are AUTO -- no knobs)
+GRID_SEED=True
 
 # COMPANION_KV=0       # WAFE: extra geometry-diverse KV archs attached per W-anchor at the subset
 COMPANION_KV=10       # WAFE: extra geometry-diverse KV archs attached per W-anchor at the subset
-COMPANION_METHOD=2d   # companion KV placement: 2d (fill joint wbits×eff_kv plane; DEFAULT) | stagger/std_gap/cov_rad (1D-eff_kv non-identical)
+COMPANION_METHOD=2d   # KV placement: 2d (DEFAULT) = predicted-Pareto filter (loss,wbits,eff_kv)
 
 FRONT_EPS_REL=0.05
 # FRONT_EPS_REL=0

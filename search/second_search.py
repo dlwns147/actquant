@@ -4,8 +4,8 @@ Structure mirrors search.py (Search): DOE → _fit_predictor → _next → _eval
 iter_<it>.stats loop; archive = [arch, metric, *comp_obj]. Uses the SAME building
 blocks as search.py — LlamaSearchSpace (encode/decode/encode_predictor) and
 LlamaEvaluator (eval). Joint-specific operators + auxiliary helpers (supply seeding,
-coverage/HV stats, per-iter viz) live in utils/second_stage.py; generic candidate
-subset selectors (even_select / moo_subset_select) in utils/select.py.
+coverage/HV stats, per-iter viz, the 2nd-stage-local subset_select_moo / pareto_first_front)
+live in utils/second_stage.py; the shared subset_select in utils/select.py.
 
   * genome = ss.encode(arch); a (W-block, KV-block) assembled from the 1st-stage
     per-axis Pareto fronts (--w_expr / --eff_kv_expr).
@@ -30,7 +30,7 @@ from predictor.factory import get_predictor
 from utils.func import set_seed, get_correlation, get_net_info
 from utils.select import subset_select
 from utils.second_stage import (
-    encoding_xu, nw_split, load_block_pools, load_band_blocks,
+    encoding_xu, nw_split, load_block_pools, load_band_blocks, subset_select_moo, pareto_first_front,
     gene_weights, freeze_mask, block_segments, derive_options, derive_qeft,
     FrontierProductSampling, AxisBlockCrossover, KnowledgeMutation, JointAuxProblem, JointComp,
     ArchFeatures, BandTable, grid_side, stair_seed, calc_hv, front_coverage, save_viz)
@@ -177,10 +177,8 @@ class SecondSearch:
                        last_tokens=args.last_tokens, stride=args.stride,
                        prefill_prompt=args.prefill_prompt,
                        # QUIET WORKERS (default): each worker redirects its OS-level stdout/stderr
-                       # (fd 1/2 — catches run_awq/tqdm/C-extension spew) to a per-worker log file
-                       # under <save>/awq_logs/, so the terminal shows only the main-process
-                       # [awq_pool] X/N aggregate progress (results flow over the queue, unaffected).
-                       # --awq_verbose_workers keeps the old inline spew (None = no redirect).
+                       # to <save>/awq_logs/ so the terminal shows only main-process [awq_pool]
+                       # progress; --awq_verbose_workers keeps the inline spew (None = no redirect).
                        worker_log_dir=None if args.awq_verbose_workers
                                       else os.path.join(self.save_path, 'awq_logs'))
             gpus = [g.strip() for g in args.worker_gpus.split(',') if g.strip()]
@@ -249,13 +247,10 @@ class SecondSearch:
         match this run's, else the surrogate trains on mixed scales."""
         import glob
         import re
-        # CONTAMINATION GUARD: never load ITERATION-cache files (`..._it<N>_specs/results`).
-        # Those are search-trajectory-specific measurements (a prior run's iterations); loading
-        # them inherits that run's trajectory and skips a fresh DOE (see the 2782-it* contamination
-        # that collapsed diversity). Only DOE + curated pilots feed the archive. The pattern is
-        # anchored to the TAG position so a run-name substring like `it30n20p200` inside a *_doe_*
-        # filename is NOT mistaken for an iteration file. (For full warm-start from a finished run
-        # use --resume <iter_N.stats>, not --doe_results.)
+        # CONTAMINATION GUARD: never load ITERATION-cache files (`..._it<N>_specs/results`) — those
+        # are trajectory-specific (a prior run's iterations) and would skip a fresh DOE. Only DOE +
+        # curated pilots feed the archive. Pattern anchored to the TAG so a `it30n20p200` run-name
+        # substring isn't mistaken for one. (Full warm-start = --resume iter_N.stats.)
         iter_cache = re.compile(r'_it\d+_(specs\.json|results\.jsonl)$')
         seen = {tuple(self.ss.encode(x[0]).tolist()) for x in archive}
         out, n_skip, n_iterskip = [], 0, 0
@@ -358,10 +353,8 @@ class SecondSearch:
         return pred, active
 
     def _fit_feat(self, Xf, targets):
-        """low-dim arch-summary predictor: ArchFeatures mean13+comp (15d) → ard_gp.
-        Sample-efficient at AWQ-archive sizes (band ρ .947 from N≈30) and measurement-
-        free for mutants — see ArchFeatures docstring for the input-choice evidence.
-        Returned pred.predict takes the FULL genome matrix (caller sets active=all)."""
+        """low-dim arch-summary predictor: ArchFeatures mean13+comp (15d) → ard_gp;
+        sample-efficient at AWQ-archive sizes. pred.predict takes the FULL genome (active=all)."""
         inner = get_predictor('ard_gp', self._feats(Xf), targets, device=self._pred_device)
         feats = self._feats
         class _FeatPred:
@@ -371,20 +364,11 @@ class SecondSearch:
         return _FeatPred()
 
     def _pls_features(self, Xf):
-        """'plstyp' input: HQQ-SUPERVISED low-rank embedding (PLS, 8 comps/axis, fit ONCE
-        on the FULL 1st-stage per-axis archives' (block, per-axis JSD) pairs — N≈10k
-        supports the per-layer input) + comp (EXACT wbits/eff_kvbits: a denoised copy of
-        the PLS budget direction, |corr(PLS1, comp)|≈0.997; small consistent corner gain
-        +0.002–0.035). Transfer-learning frame: cheap HQQ supervision learns the
-        representation, the expensive AWQ archive fits the head — recovers within-cell
-        allocation ranking that mean13 washes out.
-
-        BandTable-P1 typicality (mean own-band log-prob, 2d) is OPTIONAL, OFF by default
-        (--plstyp_typ to add): a disjoint-split ablation on the 538-arch AWQ archive found
-        it NEUTRAL (corner Δ −0.012…+0.006, within the n≈15 noise) — a hand-crafted score
-        that neither earns its place nor clearly hurts; dropped for leanness. (An earlier
-        ablation showing it 'harmful' was a train/test-overlap artifact — see
-        tests/awq_alloc_flip/embedding_input_check.py.)"""
+        """'plstyp' input: HQQ-SUPERVISED PLS embedding (8 comps/axis, fit ONCE on the FULL
+        1st-stage per-axis (block, JSD) pairs) + comp (exact wbits/eff_kvbits). Transfer frame:
+        cheap HQQ supervision learns the representation, the AWQ archive fits the head —
+        recovers within-cell ranking that mean13 washes out. Optional BandTable-P1 typicality
+        (--plstyp_typ) is OFF by default (ablation-neutral; tests/awq_alloc_flip/)."""
         X = np.clip(np.round(np.asarray(Xf, float)), 0, self.xu).astype(int)
         use_typ = getattr(self, 'band_table', None) is not None and getattr(self.args, 'plstyp_typ', False)
         if getattr(self, '_pls', None) is None:
@@ -417,15 +401,10 @@ class SecondSearch:
         return np.column_stack(cols)
 
     def _fit_plstyp(self, Xf, targets):
-        """pls+typ family — measured best WITHIN-CELL input on the 538-arch AWQ archive
-        (tests/awq_alloc_flip/embedding_input_check.py): B_low(w2.8) OOS ρ .51 vs feat
-        .29, C_kv18 .77 vs .34, cell-mean .63 vs .46, global tied (.996). Kitchen-sink
-        pls+feat+typ was WORSE (.55 — feature dilution at this N): keep the family lean.
-
-        HEAD MODEL = the base predictor chosen by --surrogate (ard_gp recommended): verified
-        companion-robust — on the companion_kv=10 archive both ard_gp and rbf hold held-out-W OOS
-        rho ~0.995 and companions HELP within-cell ranking (ard_gp 0.965 full vs 0.880 @1 KV/W);
-        ard_gp > rbf within-cell (0.965 vs 0.939). See tests/second_search_predictor_audit.py."""
+        """pls+typ family — measured best WITHIN-CELL input at AWQ-archive sizes
+        (tests/awq_alloc_flip/embedding_input_check.py). HEAD MODEL = the base predictor from
+        --surrogate (ard_gp recommended: companion-robust, ard_gp > rbf within-cell 0.965 vs
+        0.939; tests/second_search_predictor_audit.py)."""
         inner_name = getattr(self.args, 'surrogate', 'ard_gp')
         inner = get_predictor(inner_name, self._pls_features(Xf), targets, device=self._pred_device)
         featf = self._pls_features
@@ -437,15 +416,8 @@ class SecondSearch:
 
     def _fit_selfpls(self, Xf, targets):
         """SELF-bootstrapped PLS input: PLS(16) fit on the CURRENT archive's own
-        (genome → measured loss) pairs + comp → ard_gp head. Needs NO 1st-stage
-        archive and its supervision IS the target backend (no HQQ-prior ceiling).
-        Measured (tests/awq_alloc_flip/selfpls_check.py, 538-arch AWQ archive,
-        fold-internal PLS — no leakage): cell-mean OOS ρ .64 = TIES archive-plstyp
-        (.63) and beats feat15 (.46); learning curve crosses feat at N≈200
-        (N=100 .34 / N=200 .51 / N=430 .60). Cross-model transfer of a foreign
-        embedding never beats this or mean-features in any regime
-        (crossmodel_transfer_check.py) — self-supervision + generic cold-start
-        features are the archive-free answer."""
+        (genome → measured loss) pairs + comp → ard_gp head. Needs NO 1st-stage archive; ties
+        archive-plstyp within-cell above N≈200, beats feat15 (tests/awq_alloc_flip/selfpls_check.py)."""
         from sklearn.cross_decomposition import PLSRegression
         p = PLSRegression(min(16, max(2, len(targets) // 12))).fit(Xf, targets)
         comp = self._comp
@@ -461,15 +433,11 @@ class SecondSearch:
         return _SelfPred()
 
     def _hist_features(self, Xf):
-        """(module, option) OCCUPANCY-HISTOGRAM input (+comp): the PRINCIPLED
-        (non-hand-crafted) representation — under the measured additivity
-        (v5 Sobol ~99%, MCKP additive R² .979) the per-row option-fraction vector
-        is the sufficient statistic of the additive part (y ≈ Σ count·d), and it
-        preserves the bit-MIX that per-module MEANS destroy (30%@2b+70%@4b vs
-        100%@3b: same mean, different histograms → within-cell signal). NOTE the
-        head must be NONLINEAR: hist+ridge (= pure additive fit) FAILS within-cell
-        (cell-mean .14-.29 — same-cell archs have near-equal additive predictions;
-        within-cell ranking lives in the residual interactions the GP captures)."""
+        """(module, option) OCCUPANCY-HISTOGRAM input (+comp): the non-hand-crafted
+        representation — under the measured additivity the per-row option-fraction vector is
+        the sufficient statistic of the additive part and preserves the bit-MIX that per-module
+        MEANS destroy. Head must be NONLINEAR (hist+ridge fails within-cell; the GP captures the
+        residual interactions). tests/awq_alloc_flip/hist_input_check.py."""
         X = np.clip(np.round(np.asarray(Xf, float)), 0, self.xu).astype(int)
         nrow = self.ss.n_linear + 4
         Xr = X.reshape(len(X), nrow, self.ss.n_block)
@@ -481,11 +449,8 @@ class SecondSearch:
         return np.column_stack(cols + [self._comp.batch(X, ['wbits', 'eff_kvbits'])])
 
     def _fit_hist(self, Xf, targets):
-        """hist+GP — measured (tests/awq_alloc_flip/hist_input_check.py, fold-subsample
-        learning curve on the 538-arch AWQ archive, cell-mean OOS ρ):
-          N=100: hist .42 > selfpls .34 > feat .32 | N=200: hist .57 > selfpls .51 >
-          feat .32 | N=430: selfpls .60 ≈ hist .54 > feat .46; global ≥.986 from N=50.
-        One fixed representation from DOE onward — no family switching."""
+        """hist+GP — one fixed representation from DOE onward (no family switching);
+        competitive within-cell across the learning curve (tests/awq_alloc_flip/hist_input_check.py)."""
         inner = get_predictor('ard_gp', self._hist_features(Xf), targets, device=self._pred_device)
         featf = self._hist_features
         class _HistPred:
@@ -525,15 +490,10 @@ class SecondSearch:
             res = auto if self._pred_device in ('auto', None) else self._pred_device
             self.accelerator.print(f"[predictor] {self.predictor} on {res} (requested '{self._pred_device}')")
             self._pred_dev_logged = True
-        # input mode: 'genome' = legacy per-cell encoding (needs large N — right for the
-        # 10k+ HQQ archive); 'feat' = 15d ArchFeatures (right for small AWQ archives);
-        # 'self' = FIXED archive-free schedule (RECOMMENDED for awq runs): feat15 below
-        # --selfpls_n0 (cold start — generic mean-features win there in BOTH tests),
-        # self-bootstrapped PLS(16)+comp above it (ties archive-plstyp within-cell with
-        # NO 1st-stage archive). Deterministic — replaces the per-iter cv bake-off,
-        # whose winner criterion (GLOBAL OOS rho) is saturated ~0.99 across families
-        # and thus effectively noise w.r.t. the within-cell quality that matters;
-        # 'cv' / 'plstyp' are kept for research.
+        # input mode: 'genome' = per-cell encoding (large-N HQQ regime) · 'feat' = 15d
+        # ArchFeatures (small AWQ archives) · 'plstyp' = HQQ-supervised PLS (AWQ default) ·
+        # 'self' = archive-free feat15→selfPLS schedule at --selfpls_n0 · 'hist' = occupancy
+        # histogram · 'cv' = per-iter 5-fold bake-off (research).
         mode = getattr(self.args, 'surrogate_input', 'genome')
         if mode == 'hist':
             self.active = np.arange(self.n_var)
@@ -625,18 +585,10 @@ class SecondSearch:
         return minimize(problem, algo, ('n_gen', 20), seed=self.args.seed, verbose=True)
 
     def _downselect(self, Xc, archive, K, pred=None):
-        """pick K candidates with the subset selector: union(archive front, picks)
-        std-of-gaps GA — hole-filling, keeps edge candidates (an isolated edge candidate
-        splits the front's largest gap and is KEPT, where subset-only geometry drops it).
-        The only selector that survived the right-end replay post-mortem (29/30 injected
-        edge candidates kept vs moo 13/30 / maximin 16/30 — baseline_search 2607100451/0638);
-        the losing variants (maximin/grid/hybrid/moo) and the measured-negative --al_frac
-        AL quota were removed 2026-07 (utils/select.py keeps the selectors for the
-        visualize/ studies).
-
-        --anchor_k / --decision_frac (AWQ regime, opt-in) mix an LCO-anchor quota and a
-        decision (acquisition) quota ahead of the geometry fill — see utils/acquisition.py
-        and tests/awq_correction_search/DECISIONS.md. Both 0 ⇒ exactly the geometry pick."""
+        """pick K candidates over union(archive front, picks). companion_kv>0: anchors span the
+        WBITS axis only (companions cover eff_kv). companion off: 3-obj max-min (w-std, kv-std,
+        2D-cov). --anchor_k / --decision_frac (opt-in) prepend an LCO/decision acquisition quota
+        (utils/acquisition.py); both 0 ⇒ exactly the geometry pick."""
         comp = self._comp.batch(Xc, self.comp_obj)       # (N,2) [wbits, eff_kvbits], vectorized
         Fa = np.column_stack([[x[i] for x in archive] for i in (1, 2, 3)])
         fr_nd = NonDominatedSorting().do(Fa, only_non_dominated_front=True)
@@ -656,14 +608,11 @@ class SecondSearch:
         use_acq = (getattr(self.args, 'anchor_k', 0) > 0
                    or getattr(self.args, 'decision_frac', 0.0) > 0)
         if not use_acq or pred is None:
-            if getattr(self.args, 'companion_kv', 0) > 0:
-                # KV (eff_kv) coverage is supplied by the front-referenced 2D companion step, so the
-                # anchors only need to span the WBITS axis — front-referenced 1D std-gap over wbits
-                # (each anchor is a build; spread the builds evenly over wbits, like the DOE).
+            if getattr(self.args, 'companion_kv', 0) > 0:    # anchors span wbits; companions do eff_kv
                 return subset_select(comp[:, :1], front_comp[:, :1], K, self.args.subset_pop_size,
                                      endpoints=endpoints[:, :1], seed=self.args.seed)
-            return subset_select(comp, front_comp, K, self.args.subset_pop_size,
-                                 endpoints=endpoints, seed=self.args.seed)
+            return subset_select_moo(comp, front_comp, K, self.args.subset_pop_size,   # 3-obj max-min
+                                     endpoints=endpoints, seed=self.args.seed)
         from utils.acquisition import mixed_downselect
         arch_loss = np.array([x[1] for x in archive], float)
         return mixed_downselect(
@@ -693,45 +642,14 @@ class SecondSearch:
             chosen.append(bi); cur = best_cur
         return np.array(chosen, int)
 
-    @staticmethod
-    def _cov_gap_1d(vals, k, lo, hi, res=200):
-        """pick k indices of `vals` minimizing (covering radius + std-of-gaps) JOINTLY over [lo,hi]
-        — the 'both' geometry: cov_rad closes the biggest hole (reaches the band corners) while
-        std-of-gaps evens the interior spacing between the picks. Both terms are in eff_kv units so
-        they sum directly. NOTE: the gap term is over the PICKS only (no virtual [lo,hi] endpoints —
-        those would make a corner pick coincide with an endpoint, spike the gap-std, and perversely
-        push the set AWAY from the corners; cov_rad already rewards reaching them)."""
-        vals = np.asarray(vals, float)
-        centers = np.linspace(lo, hi, res)
-        D = np.abs(centers[:, None] - vals[None, :])              # (res, N) center↔block distance
-        chosen, cur = [], np.full(res, np.inf)
-        for _ in range(min(int(k), len(vals))):
-            cov = np.minimum(cur[:, None], D).max(0)              # covering radius if each block added
-            gap = np.array([(np.std(np.diff(np.sort(vals[chosen + [i]]))) if len(chosen) >= 1 else 0.0)
-                            if i not in chosen else np.inf for i in range(len(vals))])
-            score = cov + gap
-            for c in chosen:
-                score[c] = np.inf
-            i = int(np.argmin(score)); chosen.append(i); cur = np.minimum(cur, D[:, i])
-        return np.array(chosen, int)
-
     def _companion_kv(self, cand_genomes, n_kv, front_comp=None, predictor=None):
-        """SUBSET-SAMPLING companion step: for each down-selected candidate (a W-anchor), attach up
-        to n_kv EXTRA archs that keep the candidate's W-block but sweep n_kv KV-blocks from the
-        self.KVg pool over eff_kvbits — the cheap KV sweep a single W build amortizes (WAFE).
-
-        --companion_method 2d (DEFAULT): when an archive FRONT is passed (front_comp, the search
-        stage) pick companions from ALL (anchor W × KVg) candidates by a FRONT-referenced 2D
-        subset_select over (wbits,eff_kv) — the same union-gap selector as the W-anchor down-select,
-        so KV fills the plane relative to the archive front; at the DOE (front_comp=None) it falls
-        back to the per-anchor 2D covering (each anchor fills the biggest joint-plane hole). 1D
-        variants (always geometry, front-blind): stagger (rotation/Latin over eff_kv bins), std_gap /
-        cov_rad (sequential-exclusion union-gap / covering-radius over the pool minus prior picks).
-
-        NOTE: an earlier 2D-union variant MEASURED ~3× worse regret on a grid+RBF probe
-        (scratchpad/companion_kv_2dunion.py) — 2d is the default per request; a clean head-to-head
-        (offline on the round4 ground-truth grid: regret + surrogate OOS per method) should confirm
-        or overturn that before trusting it. Returns extra genomes (deduped vs candidates)."""
+        """Attach up to n_kv extra KV per down-selected W-anchor — the cheap KV sweep one W build
+        amortises (WAFE). method 2d (DEFAULT, search stage): pool ALL (anchor × KVg) candidates,
+        keep the predicted Pareto front (loss,wbits,eff_kv), then subset_select_moo picks the full
+        budget (n_kv × n_anchors) covering (wbits,eff_kv) relative to (archive front ∪ anchors) — no
+        per-W cap (build cost is per distinct W; the per-W spread is coverage-driven). At the DOE
+        (front_comp=None) 2d falls to the per-anchor covering geometry below; stagger/std_gap/cov_rad
+        are 1D-eff_kv geometry variants. Returns extra genomes (deduped vs candidates)."""
         cand_genomes = np.atleast_2d(np.asarray(cand_genomes, int))
         n_kv = int(n_kv)
         if n_kv <= 0 or len(self.KVg) == 0 or len(cand_genomes) == 0:
@@ -740,39 +658,27 @@ class SecondSearch:
         lo, hi = self.comp_obj_min[1], self.comp_obj_max[1]
         method = getattr(self.args, 'companion_method', '2d')
 
-        # ── 2d (DEFAULT): when an archive FRONT is available (the search stage) pick companions
-        #    from ALL (anchor × KVg) candidates by a FRONT-referenced 2D subset_select over
-        #    (wbits, eff_kv) — the SAME union-gap selector as the W-anchor down-select, but 2D, so
-        #    KV fills the plane relative to the archive front. Every candidate's W is a built anchor
-        #    ⇒ the pool reuses each build. Budget = n_kv/anchor. At the DOE (no front) this branch is
-        #    skipped and 2d falls through to the per-anchor covering-radius geometry below.
         if method == '2d' and front_comp is not None and len(front_comp):
             KVg = np.asarray(self.KVg, int)
             endpoints = np.array([self.comp_obj_min, self.comp_obj_max], float)
             front = np.asarray(front_comp, float)
-            # GLOBAL: pool ALL (anchor × KVg) candidates; keep the predicted Pareto front over
-            # (loss,wbits,eff_kv) [when a predictor is available]; ONE 2D subset picks the FULL
-            # budget (n_kv × n_anchors) to cover the (wbits,eff_kv) plane relative to (archive front
-            # ∪ anchors). NO per-W cap — the per-W spread is coverage-driven and that is FINE: the
-            # build cost is per DISTINCT W (each anchor built once, companions reuse that build), so
-            # how many KV swaps land on a given build does NOT change cost; only the TOTAL count and
-            # the plane coverage matter. (At the DOE, front_comp=None → this whole branch is skipped
-            # and 2d falls to the per-anchor covering geometry below.)
             cands = np.array([np.concatenate([g[:self.nw], kvb])
                               for g in cand_genomes for kvb in KVg]).astype(int)
             comp2d = np.asarray(self._comp.batch(cands, self.comp_obj), float)   # (M,2) wbits,eff_kv
             ref = np.vstack([front, np.asarray(self._comp.batch(cand_genomes, self.comp_obj), float)])
             budget = min(n_pick * len(cand_genomes), len(cands))
-            if predictor is not None:
+            # companion scores on (kv-std-gap, 2D-cov-rad) only — wbits is anchor-fixed (std_axes=[1]).
+            if predictor is not None:                          # keep the predicted Pareto front first
                 mu = np.asarray(predictor.predict(cands[:, self.active].astype(float))).ravel()
-                fr = NonDominatedSorting().do(np.column_stack([mu, comp2d]),
-                                              only_non_dominated_front=True)
-                loc = fr[np.asarray(subset_select(comp2d[fr], ref, min(budget, len(fr)),
-                                                  self.args.subset_pop_size, endpoints=endpoints,
-                                                  seed=self.args.seed), int)]
+                # fast exact first front over (loss, wbits, eff_kv); group by wbits (anchor-fixed).
+                fr = pareto_first_front(np.column_stack([mu, comp2d]), group_axis=1)
+                loc = fr[np.asarray(subset_select_moo(comp2d[fr], ref, min(budget, len(fr)),
+                                                      self.args.subset_pop_size, endpoints=endpoints,
+                                                      seed=self.args.seed, std_axes=[1]), int)]
             else:
-                loc = np.asarray(subset_select(comp2d, ref, budget, self.args.subset_pop_size,
-                                               endpoints=endpoints, seed=self.args.seed), int)
+                loc = np.asarray(subset_select_moo(comp2d, ref, budget, self.args.subset_pop_size,
+                                                   endpoints=endpoints, seed=self.args.seed,
+                                                   std_axes=[1]), int)
             seen = {tuple(g.tolist()) for g in cand_genomes}
             extra = []
             for j in loc:
@@ -782,15 +688,11 @@ class SecondSearch:
                 seen.add(key); extra.append(cands[j])
             return np.array(extra, int) if extra else np.empty((0, self.n_var), int)
 
-        # ── per-anchor KV index set — ALL methods are NON-IDENTICAL (each anchor gets a DIFFERENT
-        #    eff_kv set so B anchors sweep a dense union; the old identical shared-ladder is gone). ──
+        # per-anchor geometry (DOE fallback / 1D variants): each anchor gets a DIFFERENT eff_kv set.
         kvc = np.asarray(self.kv_comp, float)
         if method == '2d':
-            # 2D COVERING (DEFAULT): each anchor (fixed wbits) greedily picks the n_pick KV whose
-            # (wbits, eff_kv) point most reduces the covering radius over ALL points placed so far,
-            # so the companions evenly fill the JOINT (wbits, eff_kv) plane the search selects over
-            # (lowest 2D covering radius of any method; tests/companion_method_coverage.py).
-            # Sequential across anchors; distances normalized by the budget-box extents.
+            # each anchor (fixed wbits) greedily picks the n_pick KV that most reduce the 2D covering
+            # radius over all points placed so far (sequential across anchors, box-normalized dist).
             sw = max(self.comp_obj_max[0] - self.comp_obj_min[0], 1e-9)
             sk = max(hi - lo, 1e-9)
             anchor_w = np.asarray(self._comp.batch(cand_genomes, self.comp_obj), float)[:, 0]
@@ -810,19 +712,14 @@ class SecondSearch:
                     st['w'].append(wv); st['k'].append(float(kvc[j]))
                 return chosen
         elif method == 'stagger':
-            # systematic rotation / Latin over eff_kv: sort the KV pool by eff_kv, split into
-            # n_pick contiguous eff_kv bins; anchor i takes the (i mod |bin|)-th member of EACH bin
-            # → every anchor spans the full range (one point per bin) but anchors are OFFSET, so B
-            # anchors sweep up to n_pick*B distinct eff_kv (1D-even; measured-good for the flexible
-            # predictor, memory 2026-07-24, but 2D covers the joint plane more evenly).
+            # sort KV by eff_kv, split into n_pick bins; anchor i takes the (i mod |bin|)-th of EACH
+            # bin → every anchor spans the range, offset from others (up to n_pick*B distinct eff_kv).
             bins = [b for b in np.array_split(np.argsort(kvc), n_pick) if len(b)]
             def anchor_idx(i):
                 return [b[i % len(b)] for b in bins]
         else:
-            # std_gap / cov_rad, NON-IDENTICAL via SEQUENTIAL EXCLUSION: anchor i runs the 1D
-            # geometry (union-gap subset_select / covering-radius) over the pool MINUS what prior
-            # anchors already took (reset when <n_pick remain). Each anchor still spans the full
-            # eff_kv range (endpoints anchored); the union grows with each anchor.
+            # std_gap / cov_rad: anchor i runs the 1D geometry over the pool MINUS prior anchors'
+            # picks (reset when <n_pick remain); the union grows with each anchor.
             state = {'used': set()}
             def anchor_idx(i):
                 avail = np.array([j for j in range(len(kvc)) if j not in state['used']], int)
@@ -878,13 +775,10 @@ class SecondSearch:
         return [self.ss.decode(g) for g in doe_g], len(corners), len(rand)
 
     # ───── main loop — MULTI-PROCESS SAFE (mirrors search.py's accelerator structure) ─────
-    # With `accelerate launch --num_processes N>1`, candidate GENERATION (DOE/_fit_predictor/
-    # _next), printing and iter_<it>.stats dumps run on the MAIN rank only; the arch/candidate
-    # lists are broadcast with gather_for_metrics so every rank EVALUATES the same set (the
-    # evaluator shards the calibration batches across ranks and gathers → ~N× eval speedup).
-    # Without these guards every rank reruns the whole loop → duplicated output / redundant
-    # search / iter_<it>.stats file-races. Reduces to the single-process loop at N=1
-    # (is_main always True, gather/barrier no-ops). NOTE: needs #calibration batches >= N.
+    # With `accelerate launch --num_processes N>1`, candidate GENERATION / printing / stats
+    # dumps run on the MAIN rank only; arch lists are broadcast with gather_for_metrics so
+    # every rank EVALUATES the same set (batches sharded + gathered → ~N× eval). Reduces to the
+    # single-process loop at N=1. NOTE: needs #calibration batches >= N.
     def search(self):
         acc = self.accelerator; main = acc.is_main_process
         t0 = time(); start_it = 1
@@ -908,10 +802,9 @@ class SecondSearch:
                     acc.print(f"[doe] {len(seeded)} cached (dir exists) → DOE measures "
                               f"{'0 (>= N_DOE, skip)' if n_need == 0 else str(len(archs)) + ' more'} "
                               f"(target N_DOE={self.n_doe})")
-                # DOE companion: attach COMPANION_KV geometry-diverse KV per freshly-measured DOE
-                # W-anchor (predictor-free geometry — no surrogate yet). Builds are UNCHANGED: the
-                # companions keep each DOE arch's exact W-block, so awq_pool reuses that W build and
-                # only swaps KV (~1s). The extra measured (W,KV,loss) points are cached into the DOE.
+                # DOE companion: attach COMPANION_KV geometry-diverse KV per DOE W-anchor
+                # (predictor-free — no surrogate yet). Companions keep the anchor's W-block, so
+                # awq_pool reuses that build and only swaps KV (~1s); measured points feed the DOE.
                 if archs and self.args.companion_kv > 0:
                     G = np.array([self.ss.encode(a) for a in archs])          # DOE archs = W-anchors
                     comp_g = self._companion_kv(G, self.args.companion_kv)    # existing geometry
@@ -1037,19 +930,15 @@ def build_parser():
                         "N≈200, tests/awq_alloc_flip/selfpls_check.py)")
     p.add_argument('--surrogate_input', default='genome',
                    choices=['genome', 'feat', 'plstyp', 'self', 'hist', 'cv'],
-                   help="predictor input: 'genome' = per-cell encoding (needs large N — the 10k+ "
-                        "HQQ-archive regime); 'feat' = 15d ArchFeatures per-module means + comp "
-                        "(sample-efficient — ties measured per-axis-JSD input within-band, works "
-                        "from N~30; use for small AWQ archives); 'plstyp' = HQQ-supervised PLS "
-                        "embedding + comp (best within-cell at small N — the AWQ default); "
-                        "'cv' = 5-fold out-of-sample compare per iter, use the winner (logged)")
+                   help="predictor input: genome = per-cell encoding (large-N HQQ regime); "
+                        "feat = 15d ArchFeatures (small AWQ archives); plstyp = HQQ-supervised "
+                        "PLS embedding + comp (AWQ default, best within-cell at small N); "
+                        "self/hist = archive-free variants; cv = per-iter 5-fold bake-off")
     p.add_argument('--plstyp_typ', action='store_true',
                    help="plstyp: append the 2d BandTable typicality features (OFF by default — "
                         "ablation-neutral on the AWQ archive, corner Δ within noise; kept as a "
                         "research toggle)")
-    # (--plstyp_inner merged into --surrogate: for surrogate_input=plstyp the plstyp head model IS
-    #  the --surrogate predictor. ard_gp recommended — verified companion-robust on within-cell KV
-    #  ranking, tests/second_search_predictor_audit.py; rbf is a robust alternative.)
+    # (for surrogate_input=plstyp the plstyp head model IS the --surrogate predictor; ard_gp recommended.)
     p.add_argument('--predictor_device', default='auto', help="surrogate compute device: 'auto' (=cuda when visible; the RBF saddle solve is ridge-stabilised) / 'cuda' / 'cuda:N' / 'cpu'")
     p.add_argument('--iterations', type=int, default=8); p.add_argument('--n_doe', type=int, default=512)
     p.add_argument('--n_iter', type=int, default=60); p.add_argument('--pop', type=int, default=92)
@@ -1070,28 +959,20 @@ def build_parser():
     p.add_argument('--front_eps_rel', type=float, default=0.0, help='relative ε band = front_jsd·(1+rel); scale-free, auto-wider in the high-loss corner')
     p.add_argument('--div_k', type=int, default=0, help='keep div_k structurally-diverse blocks per axis (maximin; 0=off)')
     p.add_argument('--agree_frac', type=float, default=0.95, help='L2 freeze: cells where ≥ this fraction of 1st-stage blocks agree are frozen at consensus (mutation skips them); >1.0 disables. 0.95 is loss-free per tests/joint_reabsorption.py')
-    # per-iteration candidate down-select = subset selector (union(archive front, picks)
-    # std-of-gaps GA — hole-filling, keeps edge candidates: 29/30 injected right-end kept
-    # vs moo 13/30 / maximin 16/30, baseline_search 2607100451/0638 post-mortem; the losing
-    # selector variants and the measured-negative --al_frac AL quota were removed 2026-07).
+    # per-iter down-select = subset selector over union(archive front, picks): std-of-gaps GA,
+    # hole-filling, keeps edge candidates (baseline_search 2607100451/0638 post-mortem).
     p.add_argument('--subset_pop_size', type=int, default=100, help='down-select subset-GA population size')
-    # subset-sampling companion KV (WAFE): after the down-select picks the K W-anchors, attach up to
-    # --companion_kv extra archs per anchor that keep its W-block but sweep geometry-diverse KV-blocks
-    # (span eff_kvbits) — the cheap KV sweep a single W build amortizes. 0 = off (unchanged behaviour).
+    # companion KV (WAFE): after the down-select picks K W-anchors, attach up to --companion_kv
+    # extra archs per anchor keeping its W-block but sweeping eff_kv — the cheap KV sweep one W
+    # build amortizes. 0 = off (unchanged behaviour).
     p.add_argument('--companion_kv', type=int, default=0,
                    help='extra geometry-diverse KV archs to attach per W-anchor at the subset stage (0=off)')
     p.add_argument('--companion_method', default='2d',
                    choices=['2d', 'stagger', 'std_gap', 'cov_rad'],
-                   help="companion-KV placement. DEFAULT 2d: when an archive FRONT exists (search "
-                        "stage) pick companions from all (anchor W x KVg) candidates by a FRONT-"
-                        "referenced 2D subset_select over (wbits,eff_kv) — same selector as the "
-                        "W-anchor step but 2D; at the DOE (no front yet) it is the per-anchor greedy "
-                        "picks KV that fill the JOINT (wbits,eff_kv) plane the search selects over "
-                        "(lowest 2D covering radius). Others are 1D-eff_kv, all NON-IDENTICAL "
-                        "(each anchor a DIFFERENT eff_kv set): stagger (rotation/Latin over eff_kv "
-                        "bins), std_gap / cov_rad (sequential-exclusion union-gap / covering-radius). "
-                        "NB memory has a measured 3x-worse-regret result for a 2D-union variant on a "
-                        "grid+RBF probe — kept as the default per request; verify with a head-to-head.")
+                   help="companion-KV placement. DEFAULT 2d: search stage = predicted-Pareto "
+                        "filter (loss,wbits,eff_kv) → front-referenced 2D subset over (wbits,eff_kv); "
+                        "DOE (no front) = per-anchor greedy lowest-2D-covering-radius. stagger / "
+                        "std_gap / cov_rad = 1D-eff_kv geometry variants (each anchor a different set).")
     p.add_argument('--cand_grid', type=int, default=0, help='seed grid side over the budget box (0=auto=ceil(sqrt(n_iter)))')
     p.add_argument('--grid_seed', action='store_true', help='inject staircase even-supply genomes per box grid cell into the candidate pool each iter (guarantees high-comp supply)')
     # decision-aware down-select (AWQ regime, opt-in; utils/acquisition.py). Default 0/0.0
@@ -1110,10 +991,8 @@ def build_parser():
     p.add_argument('--decision_grid', type=int, default=8,
                    help='g for the g×g budget-box cell grid used by --decision_frac')
     # mutation = 1st-stage-knowledge-guided (value-resample + module-transplant); value draws
-    # are BAND-CONDITIONAL (P1) and supply seeds are staircase-decoded (P2) — the legacy
-    # global-draw / nearest-block arms were removed 2026-07 after losing the 2-seed A/B
-    # pilot (HV .2523/.2620 vs .2481/.2580; per-cell best-loss 14-6/14-8; corner better).
-    # Band counts and seed freshness are AUTO (BandTable._auto_bands / stair_seed seen-retry).
+    # are band-conditional (P1) and supply seeds staircase-decoded (P2). Band counts + seed
+    # freshness are AUTO (BandTable change-point edges / stair_seed seen-retry).
     p.add_argument('--mut_p_val', type=float, default=0.5, help='prob a mutated cell takes a 1st-stage value (else ±1)')
     p.add_argument('--mut_p_mod', type=float, default=0.15, help='prob/indiv of a 1st-stage module-transplant')
     # search-space options are AUTO-DERIVED from the 1st-stage archives (derive_options).
@@ -1138,14 +1017,10 @@ def build_parser():
                         '(default: workers redirect stdout/stderr to <save>/awq_logs/worker*.log '
                         'so the terminal shows only the main [awq_pool] X/N aggregate progress)')
     p.add_argument('--doe_results', nargs='*', default=[],
-                   help='dir(s) of pre-measured DOE (+ curated pilots): *specs*.json + '
-                        '*results*.jsonl, e.g. save/awq_second_search/<protocol> = the curated '
-                        'clean DOE, or save/awq_alloc_flip = the 88-arch pilot set. Just point at '
-                        'the folder — it is read AS-IS (READ-ONLY: never written back except a '
-                        'one-time create if the dir has no DOE yet) and ITERATION-cache files '
-                        '(*_it<N>_*) are ALWAYS ignored, so the DOE stays contamination-proof. '
-                        'Protocol AND w_method must match this run. (Full warm-start from a '
-                        'finished run = --resume <iter_N.stats>, not this.)')
+                   help='dir(s) of pre-measured DOE (*specs*.json + *results*.jsonl). Read AS-IS '
+                        '(READ-ONLY except a one-time create if empty); iteration-cache files '
+                        '(*_it<N>_*) are always ignored (contamination-proof). Protocol AND '
+                        'w_method must match this run. (Full warm-start = --resume iter_N.stats.)')
     # hqq-mode model/quant args (mirror search.py / evaluator.py)
     p.add_argument('--gpu_id', default='0'); p.add_argument('--model_path', default='/SSD/huggingface/meta-llama')
     p.add_argument('--dtype', default='bfloat16'); p.add_argument('--w_method', nargs='+', default=['hqq'])

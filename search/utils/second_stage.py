@@ -1,21 +1,14 @@
-"""utils/second_stage.py — the 2nd-stage JOINT (W × eff_kvbits) NAS toolbox behind
-second_search.py (renamed from joint_search.py). Built on the SAME LlamaSearchSpace
-encoding as search.py:
+"""utils/second_stage.py — helpers for the 2nd-stage JOINT (W × eff_kvbits) NAS in
+second_search.py. Same LlamaSearchSpace encoding as search.py:
+  genome = ss.encode(arch): flat int (n_linear+4)*n_block = [w..., k, v, k_dim, v_dim].
+  W-block = [0:nw] (nw = n_linear*n_block); KV-block = [nw:].
+Building blocks come from the 1st-stage per-axis Pareto fronts; crossover unit = a whole
+axis block (additive W⊥KV); mutation is 1st-stage-lever-weighted (ε-floor, direction-free).
 
-  genome = ss.encode(arch): flat int (n_linear+4)*n_block = [w..., k..., v..., k_dim..., v_dim...].
-  W-block = [0:nw] (nw = n_linear*n_block); KV-block = [nw:] (k,v,k_dim,v_dim rows).
-
-Building blocks come from the 1st-stage per-axis Pareto fronts. CROSSOVER unit = whole
-axis block (additive W⊥KV). MUTATION = importance-weighted by 1st-stage lever strength
-(ε-floor → coverage; direction free → non-monotone stays reachable; NO monotone repair).
-PREDICTOR input = ss.encode_predictor (frozen/pass_module cols dropped), like search.py.
-
-Contents: encoding/split helpers · 1st-stage block pools (ε-band → diversity) ·
-JointComp (vectorized comp_obj) · GA operators (sampling/crossover/mutation) ·
-JointAuxProblem · grid supply-seeding + archive stats/coverage/HV + per-iter viz
-(the auxiliary halves of second_search.py live here). Generic candidate-subset
-selectors (even_select / moo_subset_select) live in utils.select alongside
-maximin_extras / coverage_subset_nsga2_extras.
+Contents: encoding/split · 1st-stage block pools (ε-band → diversity) · JointComp
+(vectorized comp_obj) · GA operators · JointAuxProblem · supply seeding + coverage/HV
+stats + per-iter viz + the 2nd-stage-local subset selectors (pareto_first_front /
+subset_select_moo). Generic selectors (subset_select / even_select) live in utils.select.
 """
 import os, json, glob
 import numpy as np
@@ -64,12 +57,9 @@ def _front(jsd, comp):
 
 
 def select_eps_band(jsd, comp, eps, eps_rel=0.0):
-    """archs within the Pareto-front envelope at their comp, by an ABSOLUTE jsd margin
-    `eps` and/or a RELATIVE one `eps_rel` (fraction of the front jsd):
-        keep  jsd ≤ front(comp) · (1 + eps_rel) + eps
-    eps=eps_rel=0 → the front. Relative is scale-free AND auto-adaptive: the band is
-    WIDE where the front jsd is high (aggressive low-bit corner, where joint-optimality
-    leaves the per-axis front) and NARROW in the saturated region — exactly where we want."""
+    """archs within the front envelope: keep jsd ≤ front(comp)·(1+eps_rel) + eps.
+    eps=eps_rel=0 → the front. Relative is scale-free + auto-adaptive (wider in the
+    high-loss low-bit corner, narrow in the saturated region)."""
     f = _front(jsd, comp)
     o = np.argsort(comp[f]); fc, fj = comp[f][o], jsd[f][o]
     best = np.interp(comp, fc, fj)                 # achievable front jsd at each arch's comp
@@ -85,10 +75,8 @@ def diversity_prune(blocks, k, seed=0):
 
 
 def _select_blocks(j, c, encode_fn, eps, eps_rel, div_k, seed):
-    """ε-band → encode → structural-diversity prune. Returns blocks (+ per-block comp for
-    budget-box filtering). Per-comp-bin/window thinning was removed 2026-07 — measured
-    HARMFUL (band→div hv .265 > window .237 > hardbin .20); the ablation helpers live on
-    in tests/pool_analysis.py."""
+    """ε-band → encode → structural-diversity prune. Returns (front, band idx, blocks,
+    per-block comp for budget-box filtering)."""
     f = _front(j, c)
     idx = select_eps_band(j, c, eps, eps_rel)
     blocks = np.stack([encode_fn(i) for i in idx])
@@ -165,14 +153,11 @@ def load_block_pools(w_expr, kv_expr, ss, w_eps=0.0, kv_eps=0.0, eps_rel=0.0,
 
 
 class JointComp:
-    """Vectorized comp_obj over a BATCH of encoded genomes — skips decode() + dict build +
-    get_net_info() (the per-individual cost that dominates NSGA _next wall-clock). Faithful to
-    utils.func.compute_bits / get_net_info for every key EXCEPT 'memory' (token-partition sweep,
-    not a per-cell linear form) which falls back to per-row get_net_info.
-
-    Genome layout (ss.encode): reshape (n_linear+4, n_block) = [w-modules…, k, v, k_dim, v_dim];
-    each cell is an OPTION INDEX. wbits = numel-weighted mean of per-cell bits (+scale overhead);
-    {kvbits,eff_kvbits,kvdim,…} = simple means over the k/v (+prune) cells via option LUTs."""
+    """Vectorized comp_obj over a BATCH of encoded genomes — skips the per-individual
+    decode()+get_net_info() that dominates NSGA _next. Faithful to utils.func.get_net_info
+    for every key EXCEPT 'memory' (per-row fallback). Genome reshapes to (n_linear+4, n_block),
+    each cell an OPTION INDEX; wbits = numel-weighted mean bits (+scale), the rest simple
+    means over the k/v (+prune) cells via option LUTs."""
     SIMPLE = {'wbits', 'kvbits', 'kbits', 'vbits', 'eff_kvbits', 'eff_kbits', 'eff_vbits',
               'kvdim', 'kdim', 'vdim'}
 
@@ -253,22 +238,13 @@ def gene_weights(Wg, KVg, eps=0.05):
 
 
 class BandTable:
-    """P1/P2 band-conditional knowledge table from the 1st-stage ε-band blocks.
-
-    Per axis (W conditioned on its own wbits, KV on its own eff_kvbits): quantile band
-    edges + per-band per-cell option DISTRIBUTIONS (Laplace-smoothed over each cell's
-    valid options only) + per-band per-cell MODAL option (the 'staircase').
-
-    Measured basis (tests/p1p2_band_table.py on the 2606302046/47 archives, eps_rel 0.3):
-      - P1: band-conditional value draws put +0.43 (W) / +0.59 (KV) bits/cell more
-        probability on the values the joint front actually uses than the global column
-        draw, and remove its mode-collapse cells (KV 3.1% of front cells at p<1e-3 → 0%).
-        Conditioning beyond the band is NOT supported: layer-Markov adds nothing (cells
-        are conditionally independent given the band) and 2-D (t_w,t_kv) conditioning
-        is worse than own-axis 1-D at this data size.
-      - P2: staircase decode comp(stair(t)) tracks t within 0.037 (W) / 0.123 (KV),
-        monotone — but the extreme right corner is NOT reachable (top-band modal ≠
-        corner arch), so stair_seed must be paired with explicit corner genomes.
+    """P1/P2 band-conditional knowledge table from the 1st-stage ε-band blocks. Per axis
+    (W by its wbits, KV by its eff_kvbits): quantile/change-point band edges + per-band
+    per-cell option DISTRIBUTIONS (Laplace-smoothed over valid options) + per-band per-cell
+    MODAL option (the 'staircase'). P1 = band-conditional value draws (mutation); P2 =
+    staircase supply seeds. Own-axis 1-D conditioning only (layer-Markov / 2-D worse at this
+    data size); the extreme corner is NOT staircase-reachable, so pair stair_seed with
+    explicit corners. Measured basis: tests/p1p2_band_table.py.
     """
     def __init__(self, Wb, w_comp, KVb, kv_comp, xu, nw, n_bands=None, alpha=0.5):
         self.nw = nw
@@ -286,13 +262,10 @@ class BandTable:
 
     @staticmethod
     def _changepoint_edges(G, cc, n_fine=64):
-        """AUTO band edges at the comps where the staircase MEANINGFULLY changes: 64 fine
-        quantile bins; a boundary is kept only where adjacent bins' modal genomes differ by
-        MORE than the noise floor (median split-half modal Hamming within a bin) — flat
-        stretches merge, dense-switching regions keep resolution. Measured vs uniform bands
-        (0630 archives, joint-front eval): bits/cell W −0.935 / KV −1.273 vs uniform-20
-        −0.958/−1.340, stair decode err KV 0.068 vs 0.123 — better on both axes (band
-        widths end up 0.02–0.16, ~47/49 bands)."""
+        """AUTO band edges where the staircase MEANINGFULLY changes: 64 fine quantile bins,
+        keep a boundary only where adjacent bins' modal genomes differ by more than the
+        within-bin split-half noise floor (flat stretches merge, dense-switching regions keep
+        resolution). Measured better than uniform bands on both axes (tests/p1p2_band_table.py)."""
         rng = np.random.default_rng(0)                     # fixed: deterministic across ranks
         q = np.quantile(cc, np.linspace(0, 1, n_fine + 1)); q[0] -= 1e-9; q[-1] += 1e-9
         modals, noise = [], []
@@ -410,20 +383,13 @@ def block_segments(ss):
 
 
 class KnowledgeMutation(Mutation):
-    """1st-stage-KNOWLEDGE-guided mutation:
-      WHERE: cells chosen ∝ 1st-stage lever weight (ε-floor → all reachable).
-      HOW per cell: with prob p_val → set to a value DRAWN FROM that cell's 1st-stage
-        value distribution — a meaningful, 1st-stage-plausible value; else ±1 local step
-        (direction-free).
-      + module-transplant (prob p_mod/indiv): copy a whole module/segment from a random
-        1st-stage block → a coherent 1st-stage sub-pattern (not an incoherent cell jitter).
-
-    band_table + comp (P1, --mut_cond band): the value draw uses the BAND-CONDITIONAL
-    distribution p(cell = o | the individual's OWN-axis comp band) instead of the pool's
-    global column distribution. Measured (tests/p1p2_band_table.py): +0.43 (W) / +0.59
-    (KV) bits/cell on the values the joint front actually uses, and the global draw's
-    mode-collapse cells (KV 3.1% of front cells at p<1e-3) drop to 0%. band_table=None
-    → legacy global draw (--mut_cond global)."""
+    """1st-stage-knowledge-guided mutation:
+      WHERE: cells ∝ 1st-stage lever weight (ε-floor → all reachable).
+      HOW: prob p_val → draw the cell from its 1st-stage value distribution; else ±1 local.
+      + prob p_mod/indiv module-transplant of a whole 1st-stage segment (coherent sub-pattern).
+    band_table + comp (P1): value draws use the individual's OWN-axis comp band distribution
+    instead of the pool-global column (+0.4–0.6 bits/cell on front values, removes mode
+    collapse; tests/p1p2_band_table.py). band_table=None → legacy global draw."""
     def __init__(self, w, xu, Wg, KVg, nw, segments, base=0.06, p_val=0.5, p_mod=0.15,
                  band_table=None, comp=None, comp_obj=('wbits', 'eff_kvbits')):
         super().__init__()
@@ -482,6 +448,103 @@ class JointAuxProblem(Problem):
         out['G'] = G
 
 
+def pareto_first_front(F, group_axis=None):
+    """Indices of the FIRST Pareto front (minimise ALL columns) — exact, but ~2500× faster than
+    pymoo NDS on the companion pool (78k×3) by exploiting that one axis has few unique values
+    (`group_axis`, e.g. wbits is anchor-fixed): per group-value keep only the front on the OTHER
+    axes (a global-front point must be non-dominated within its group), then one exact chunked
+    O(k²) pass on the tiny union. group_axis=None → the fewest-unique axis."""
+    F = np.asarray(F, float); n, m = F.shape
+    if n <= 1:
+        return np.arange(n)
+    if group_axis is None:
+        group_axis = int(np.argmin([len(np.unique(F[:, j])) for j in range(m)]))
+    oth = [j for j in range(m) if j != group_axis]
+
+    def front2d(P, idx):                                   # 2D front (minimise both), return orig idx
+        o = np.lexsort((P[:, 1], P[:, 0])); f1 = P[o, 1]
+        return idx[o[f1 <= np.minimum.accumulate(np.r_[np.inf, f1[:-1]])]]
+
+    cand = []
+    for v in np.unique(F[:, group_axis]):
+        ix = np.where(F[:, group_axis] == v)[0]
+        cand.append(front2d(F[np.ix_(ix, oth)], ix) if len(oth) == 2 else ix)
+    cand = np.concatenate(cand)
+    C = F[cand]; k = len(C)
+    # exact m-D front on the reduced union: chunk rows, and AND/OR per DIMENSION (2D (blk,k) bools,
+    # never the (blk,k,m) tensor) → memory O(step·k), front-size-independent, ~25× the 3D-tensor way.
+    dominated = np.zeros(k, bool); step = max(1, 4_000_000 // max(k, 1))
+    for s in range(0, k, step):
+        blk = C[s:s + step]
+        le = np.ones((len(blk), k), bool); lt = np.zeros((len(blk), k), bool)
+        for d in range(m):
+            bd = blk[:, d][:, None]
+            le &= C[:, d][None, :] <= bd
+            lt |= C[:, d][None, :] < bd
+        dominated[s:s + len(blk)] = (le & lt).any(1)
+    return cand[~dominated]
+
+
+def subset_select_moo(comp, nd_F, K, pop_size=100, endpoints=None, n_gen=60, seed=None, grid=28,
+                      std_axes=None):
+    """2nd-stage-LOCAL multi-objective subset selector (NSGA-II). Minimise, over (nd_F ∪ picks):
+    a normalised std(gaps)/range per axis in `std_axes` (even spacing) + one 2D covering radius
+    (joint worst hole). std_axes default = all axes → downselect 3-obj (w-std, kv-std, 2D-cov);
+    companion passes [eff_kv] → 2-obj (wbits is anchor-fixed, so its std would be constant). Final
+    pick = max-min (minimax) compromise on the front. Grid→point distances are PRECOMPUTED once
+    (Dgc, Dgf), so a subset's cov radius is a slice+min, not a per-subset cdist."""
+    from pymoo.algorithms.moo.nsga2 import NSGA2
+    from pymoo.optimize import minimize
+    from scipy.spatial.distance import cdist
+    from utils.ga import MySampling, BinaryCrossover, MyMutation
+    comp = np.asarray(comp, float); nd_F = np.asarray(nd_F, float)
+    d = comp.shape[1]
+    saxes = list(range(d)) if std_axes is None else list(std_axes)
+    m = len(saxes) + 1
+    lo = endpoints[0].astype(float); hi = endpoints[1].astype(float)
+    rng = np.where(hi > lo, hi - lo, 1.0)
+    axes = [np.linspace(lo[j], hi[j], grid) for j in range(d)]
+    Gn = (np.stack(np.meshgrid(*axes, indexing='ij'), -1).reshape(-1, d)) / rng   # normalised grid
+    Dgc = cdist(Gn, comp / rng)                                        # (n_grid, n_cand) PRECOMPUTED
+    Dgf = cdist(Gn, nd_F / rng).min(1) if len(nd_F) else np.full(len(Gn), np.inf)
+
+    class _Moo(Problem):
+        def __init__(self):
+            super().__init__(n_var=len(comp), n_obj=m, n_constr=1, xl=0, xu=1, type_var=bool)
+            self.n_max = K
+        def _evaluate(self, x, out, *a, **k):
+            F = np.full((x.shape[0], m), np.nan); g = np.full((x.shape[0], 1), np.nan)
+            ndf = nd_F
+            for i, _x in enumerate(x):
+                objs = []
+                for j in saxes:                                        # per-axis normalised std-gap
+                    l, h = lo[j], hi[j]
+                    if h > l:
+                        col = comp[_x, j]
+                        col = np.concatenate((ndf[:, j], col)) if len(ndf) else col
+                        tol = 1e-6 * (h - l); ex = []
+                        if not np.any(np.abs(col - l) <= tol): ex.append(l)
+                        if not np.any(np.abs(col - h) <= tol): ex.append(h)
+                        if ex: col = np.concatenate((col, np.asarray(ex, float)))
+                        objs.append(np.std(np.diff(np.sort(col))) / (h - l))
+                    else:
+                        objs.append(0.0)
+                sub = Dgc[:, _x]                                        # (n_grid, |picks|) — slice only
+                near = sub.min(1) if sub.shape[1] else np.full(len(Gn), np.inf)
+                objs.append(float(np.minimum(Dgf, near).max()))        # 2D covering radius (norm)
+                F[i] = objs; g[i, 0] = (K - np.sum(_x)) ** 2
+            out['F'] = F; out['G'] = g
+
+    res = minimize(_Moo(),
+                   NSGA2(pop_size=pop_size, sampling=MySampling(), crossover=BinaryCrossover(),
+                         mutation=MyMutation(), eliminate_duplicates=True),
+                   ('n_gen', n_gen), verbose=False, seed=None if seed is None else int(seed))
+    Fr = np.atleast_2d(res.F); X = np.atleast_2d(res.X)
+    norm = (Fr - Fr.min(0)) / (Fr.max(0) - Fr.min(0) + 1e-12)           # max-min (minimax) compromise
+    best = int(np.argmin(norm.max(1)))
+    return np.where(np.asarray(X[best]).ravel())[0]
+
+
 def load_band_blocks(w_expr, kv_expr, ss, w_eps=0.0, kv_eps=0.0, eps_rel=0.0):
     """FULL ε-band block pools (NO div_k diversity pruning) for SEEDING. div_k pruning was
     tuned for crossover richness; grid_seed nearest-comp matching wants the DENSEST pool —
@@ -499,8 +562,6 @@ def load_band_blocks(w_expr, kv_expr, ss, w_eps=0.0, kv_eps=0.0, eps_rel=0.0):
 
 
 # ─────────────── per-iteration supply seeding + archive stats + viz ───────────────
-# (the auxiliary halves of second_search.py; the generic subset SELECTORS —
-#  even_select / moo_subset_select — live in utils.select)
 
 def grid_side(K, override=0):
     """grid side g for the budget box; auto = ceil(sqrt(K)) unless override>0."""
@@ -508,12 +569,10 @@ def grid_side(K, override=0):
 
 
 def grid_seed(Wg, KVg, w_comp, kv_comp, comp_min, comp_max, g):
-    """even SUPPLY: assemble one genome per (axis0-cell × axis1-cell) from the
-    NEAREST-comp 1st-stage blocks so the down-select has material in EVERY box cell —
-    including the high-comp corner NSGA's non-dominated sorting drops when loss is flat
-    there (the kvbits/kvdim right-end collapse). Per-iter analog of the DOE corner
-    seeding; W⊥KV additive ⇒ nearest-wbits W-block × nearest-eff_kv KV-block lands
-    near the cell centre."""
+    """even SUPPLY: one genome per (axis0-cell × axis1-cell) from the NEAREST-comp 1st-stage
+    blocks, so the down-select has material in EVERY box cell (incl. the high-comp corner
+    NSGA drops where loss is flat). W⊥KV additive ⇒ nearest-wbits × nearest-eff_kv lands near
+    the cell centre. (Used by visualize/ probes; the live loop uses stair_seed.)"""
     wc = np.linspace(comp_min[0], comp_max[0], g)
     kc = np.linspace(comp_min[1], comp_max[1], g)
     wi = [int(np.argmin(np.abs(w_comp - t))) for t in wc]
@@ -522,22 +581,12 @@ def grid_seed(Wg, KVg, w_comp, kv_comp, comp_min, comp_max, g):
 
 
 def stair_seed(bt, comp_min, comp_max, g, seen=None, corners=None, retries=4):
-    """P2 supply seeding (--grid_seed): ONE FRESH genome per (t_w × t_kv) grid point over
-    the budget box, + explicit corner genomes.
-
-    Freshness is SELF-REGULATING (no knob): the deterministic staircase genome is used
-    while unmeasured; once it is in `seen` (the archive — a static BandTable emits the
-    same modal genome every iter, so after its first measurement it would be dedup'd to
-    zero supply), the point falls back to stochastic in-band samples (each cell drawn
-    from its band distribution) retried up to `retries` times for a fresh one — supply
-    per budget cell stays alive for the whole run.
-
-    Synthesises the per-cell band consensus instead of copying the nearest WHOLE
-    1st-stage block — supply quality no longer degrades where the 1st-stage pool is
-    sparse (the right-end-collapse region); comp(stair(t)) tracks t within 0.037 (W) /
-    0.123 (KV) — tests/p1p2_band_table.py. `corners` is REQUIRED for full box coverage:
-    the top-band modal genome is NOT the extreme corner (measured reach W 4.11/4.25,
-    KV 3.73/4.25) — pass the pool-extreme combos (as in SecondSearch._initialize)."""
+    """P2 supply seeding (--grid_seed): ONE FRESH genome per (t_w × t_kv) grid point over the
+    budget box + explicit corner genomes. Freshness is SELF-REGULATING (no knob): the
+    deterministic staircase genome is used while unmeasured; once in `seen` it falls back to
+    stochastic in-band samples (retried up to `retries`× for a fresh one) so supply per cell
+    stays alive. Synthesises the per-cell band consensus (robust where the 1st-stage pool is
+    sparse). `corners` REQUIRED — the top-band modal genome is not the extreme corner."""
     seen = seen if seen is not None else set()
     out = []
     for a in np.linspace(comp_min[0], comp_max[0], g):
@@ -613,9 +662,8 @@ def save_viz(save_path, it, archive, c_metric, c_pred, c_comp, cov,
                    lw=0.6, zorder=6, label='cand · measured')
         ax.scatter(comp_c[:, i], c_pred, s=46, marker='x', c='#ff7f0e', lw=1.5,
                    zorder=5, label='cand · predicted')
-        # x spans the ACTUAL sampled range of this comp axis (archive incl. this iter's cands),
-        # NOT the comp_obj budget box — so the panel isn't mostly empty when the budget bound
-        # (e.g. wbits max 5) is far looser than what the search actually reaches (~4.1).
+        # x spans the ACTUAL sampled range (not the budget box) so the panel isn't mostly empty
+        # when the budget bound (e.g. wbits max 5) is far looser than what the search reaches.
         dmin, dmax = float(comp.min()), float(comp.max())
         pad = 0.03 * (dmax - dmin) if dmax > dmin else 0.1
         ax.set_xlim(dmin - pad, dmax + pad)
@@ -647,19 +695,11 @@ def save_viz(save_path, it, archive, c_metric, c_pred, c_comp, cov,
 
 
 class ArchFeatures:
-    """Vectorized genome → low-dim arch-summary features: per-module mean W bits (7)
-    + mean k/v bits + mean log2 k/v gs + mean k/v prune (13, the 'mean13' input of
-    tests/hqq_awq_input_choice.py) + comp (wbits, eff_kvbits) = 15 dims.
-
-    Evidence for this input at small N (the AWQ-archive regime):
-      * within-band it TIES the measured per-axis-JSD input for predicting AWQ joint
-        loss (Sp .970 vs .971 @N=200) and works from N≈30 (band ρ .947);
-      * unlike measured per-axis JSD it is FREE for mutated genomes (novel-W ≈ 87% of
-        NSGA offspring have no 1st-stage JSD entry; predicting JSD instead = the
-        2-level input, measured WORSE than direct arch: .953 < .970);
-      * the RAW per-layer genome input is the one that needs big N (per-layer GP
-        collapses to Sp .44 @N=200) — dimensionality, not 'arch', was the problem.
-    """
+    """Vectorized genome → 15d arch-summary: per-module mean W bits (7) + mean k/v bits +
+    mean log2 k/v gs + mean k/v prune (the 'mean13') + comp (wbits, eff_kvbits). At small N
+    (the AWQ regime) it TIES the measured per-axis-JSD input (Sp .970 vs .971 @N=200, works
+    from N≈30) and is FREE for mutated genomes; the raw per-layer input is the one that needs
+    big N. Evidence: tests/hqq_awq_input_choice.py."""
     def __init__(self, ss, comp):
         self.nl, self.nb, self.comp = ss.n_linear, ss.n_block, comp
         self.w_lut = []
