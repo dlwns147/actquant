@@ -863,6 +863,7 @@ class SecondSearch:
                     np.array([x[1] for x in archive] + c_metric))
                 for i, m, c in zip(kept, c_metric, c_comp):
                     archive.append([cands[i], m, *c])
+                n_added = len(kept)     # this iter's measured set = anchors + companions (>> n_iter)
                 # iterations are NEVER cached to the DOE dir (trajectory-specific -> would
                 # contaminate the reusable DOE; they live only in this run's iter_*.stats).
                 F = np.column_stack([[x[i] for x in archive] for i in range(1, len(self.comp_obj) + 2)])
@@ -882,7 +883,7 @@ class SecondSearch:
                 if it % self.save_iter == 0 or it == self.iterations:
                     os.makedirs(self.save_path, exist_ok=True)
                     with open(os.path.join(self.save_path, f"iter_{it}.stats"), 'w') as f:
-                        json.dump({'archive': archive, 'candidates': archive[-self.n_iter:], 'hv': hv,
+                        json.dump({'archive': archive, 'candidates': archive[-n_added:], 'hv': hv,
                                    'surrogate': {'model': self.predictor, 'rmse': rmse, 'rho': rho, 'tau': tau},
                                    'coverage': cov, 'iteration': it}, f)
                     if self.debug:
