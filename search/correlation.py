@@ -114,10 +114,14 @@ GROUPS = {
         loss_func='jsd', use_key_token=False, last_tokens=512,
         trunc_len=512, sliding_window=128, alpha=2, beta=-2,
     ),
-    'A_lt128': dict(  # wikitext2 — single-pass JSD on last 128 tokens
-        # quant_kv_output=True is implicit because the single-pass path
+    'A_lt128': dict(  # wikitext2 — last-128-token JSD (dense_logits masked to
+        # the last 128 positions). Serves both wt2_jsd_lt128 (single-pass) and
+        # wt2_jsd_pp128_s32 (answer-phase prefill+stride) — the FP-teacher
+        # dense_logits depend only on last_tokens, not the forward strategy.
+        # quant_kv_output=True is implicit for the single-pass path
         # (stride=0, prefill_prompt=False) sets use_cache=False, which in
-        # turn flips configure_model_cache to quant_kv_output=True.
+        # turn flips configure_model_cache to quant_kv_output=True; the
+        # answer-phase metric re-configures the cache per-call (use_cache=True).
         datasets=['wikitext2'], n_sample=128, seqlen=2048, min_seqlen=0,
         loss_func='jsd', use_key_token=False, last_tokens=128,
         trunc_len=512, sliding_window=128, alpha=2, beta=-2,
@@ -129,7 +133,8 @@ GROUPS = {
         loss_func='jsd', use_key_token=False, last_tokens=512,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
-    'B_lt128': dict(  # gov_report — single-pass JSD on last 128 tokens
+    'B_lt128': dict(  # gov_report — last-128-token JSD (shared by the
+        # single-pass gov_jsd_lt128 and answer-phase gov_jsd_pp128_s32).
         datasets=['gov_report'], n_sample=8, seqlen=8196, min_seqlen=8192,
         loss_func='jsd', use_key_token=False, last_tokens=128,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
@@ -165,12 +170,22 @@ METRIC_TASKS = [
         # dense_logits is unused for PPL so Group A's last_tokens=None is fine.
         dict(metric='ppl',  loss_func='cross_entropy',
              stride=128, prefill_prompt=True, last_tokens=512)),
+    ('c4_ppl_pp128_s32',  'A', 'c4',
+        # Same answer-phase PPL with a shorter last_tokens=128 window and
+        # finer stride=32 (4× the chunks of s128).
+        dict(metric='ppl',  loss_func='cross_entropy',
+             stride=32, prefill_prompt=True, last_tokens=128)),
     ('wt2_ppl',           'A', 'wikitext2',
         dict(metric='ppl',  loss_func='cross_entropy',
              stride=0, prefill_prompt=False, last_tokens=None)),
     ('wt2_ppl_pp512_s128', 'A', 'wikitext2',
         dict(metric='ppl',  loss_func='cross_entropy',
              stride=128, prefill_prompt=True, last_tokens=512)),
+    ('wt2_ppl_pp128_s32', 'A', 'wikitext2',
+        # last_tokens=128 answer window, finer stride=32 (PPL → no dense_logits,
+        # so Group A's last_tokens=None is fine).
+        dict(metric='ppl',  loss_func='cross_entropy',
+             stride=32, prefill_prompt=True, last_tokens=128)),
     ('wt2_jsd',           'A', 'wikitext2',
         dict(metric='loss', loss_func='jsd',
              stride=0, prefill_prompt=False, last_tokens=None)),
@@ -185,6 +200,13 @@ METRIC_TASKS = [
         # answer-token coverage (4× the chunks of s128 → ~4× eval time).
         dict(metric='loss', loss_func='jsd',
              stride=32, prefill_prompt=True, last_tokens=512)),
+    ('wt2_jsd_pp128_s32', 'A_lt128', 'wikitext2',
+        # Answer-phase JSD on the last 128 tokens (prefill_prompt + stride=32).
+        # Group A_lt128 (last_tokens=128) supplies the matching pre-masked
+        # dense_logits — it is arch- and forward-strategy-independent, so it is
+        # shared with wt2_jsd_lt128 (no extra FP-teacher pass).
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
     ('wt2_jsd_lt128',     'A_lt128', 'wikitext2',
         # single-pass JSD on last 128 tokens. last_tokens is set at evaluator
         # init (Group A_lt128) and matches the eval_loss mask.
@@ -207,6 +229,10 @@ METRIC_TASKS = [
         # Same as needle_nll_pp512_s128 with finer stride=32 over answer span.
         dict(kind='needle_nll',
              stride=32, prefill_prompt=True, last_tokens=512)),
+    ('needle_nll_pp128_s32', 'A', None,
+        # Shorter last_tokens=128 answer window, finer stride=32.
+        dict(kind='needle_nll',
+             stride=32, prefill_prompt=True, last_tokens=128)),
     ('needle_jsd_pp512_s128', 'A', None,
         # JSD variant: FP teacher dense_logits cached per-process + on disk
         # (needle prompts are seed-deterministic). Higher SNR than CE since
@@ -216,6 +242,12 @@ METRIC_TASKS = [
     ('needle_jsd_pp512_s32', 'A', None,
         dict(kind='needle_jsd',
              stride=32, prefill_prompt=True, last_tokens=512)),
+    ('needle_jsd_pp128_s32', 'A', None,
+        # Shorter last_tokens=128 answer window, finer stride=32. The FP-teacher
+        # dense_logits are cached separately (keyed by _lt128), so this does not
+        # collide with the lt512 needle_jsd cache.
+        dict(kind='needle_jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
     ('gsm8k_jsd',         'D', 'gsm8k',
         # Standard path. The padded-input KIVI bug is now fixed at the
         # source (quant/kivi_utils/new_pack.py:fake_quant handles 2D
@@ -242,6 +274,12 @@ METRIC_TASKS = [
         # Same Group B_pp, finer stride=32 over the 512-token answer span.
         dict(metric='loss', loss_func='jsd',
              stride=32, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp128_s32', 'B_lt128', 'gov_report',
+        # Answer-phase JSD on the last 128 tokens (prefill_prompt + stride=32);
+        # Group B_lt128 (last_tokens=128) supplies the matching pre-masked
+        # dense_logits (shared with gov_jsd_lt128).
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
     ('gov_jsd_lt128',     'B_lt128', 'gov_report',
         # single-pass JSD on last 128 tokens. Group B_lt128's dense_logits
         # is also trimmed to last 128 so the mask matches.

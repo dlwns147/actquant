@@ -630,8 +630,8 @@ def save_viz(save_path, it, archive, c_metric, c_pred, c_comp, cov,
       - one panel PER comp_obj (wbits, eff_kvbits): loss vs that comp axis — archive (blue)
         + best-loss envelope + this iter's candidates (evaluated green / predicted orange),
         x fixed to the budget box so iters compare;
-      - a final JOINT panel: axis0 × axis1 scatter coloured by loss with this iter's
-        candidates ringed (the W×KV tradeoff the per-axis panels can't show)."""
+      - a final JOINT panel: axis0 × axis1 scatter coloured by loss, this iter's candidates
+        ringed, and the current Pareto front (non-dominated in loss×wbits×eff_kv) starred."""
     try:
         import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
     except Exception as e:
@@ -672,14 +672,27 @@ def save_viz(save_path, it, archive, c_metric, c_pred, c_comp, cov,
     axes[0].set_ylabel('loss')
     axes[0].legend(loc='upper right', fontsize=8.5, ncol=1)
     if joint:                                         # joint W × eff_kvbits loss landscape
+        from matplotlib.colors import Normalize
         ax = axes[n_obj]
         wx = np.array([x[2] for x in archive]); ky = np.array([x[3] for x in archive])
-        # every arch as a point coloured by its loss (linear) — the actual sampled landscape;
+        # current Pareto frontier = the archive's non-dominated set in (loss, wbits, eff_kv),
+        # ALL minimised (cheaper + lower-loss dominates) = the efficient joint configs (this IS
+        # the front the run reports for HV/coverage). Rendered as a crisp foreground LAYER:
+        # dominated archs faded to a ghost cloud, front archs starred (black edge), both loss-
+        # coloured on a shared norm. On a dense archive the front is a large fraction, so the
+        # split-layer (not big stars) is what keeps it legible.
+        F = np.column_stack([perf, wx, ky])
+        nd = NonDominatedSorting().do(F, only_non_dominated_front=True)
+        dom = np.setdiff1d(np.arange(len(archive)), nd)
+        norm = Normalize(vmin=float(perf.min()), vmax=float(np.quantile(perf, 0.98)))
+        ax.scatter(wx[dom], ky[dom], c=perf[dom], cmap='viridis', norm=norm, s=10, alpha=0.22,
+                   edgecolors='none', rasterized=True, zorder=1, label=f'dominated (n={len(dom)})')
+        sc = ax.scatter(wx[nd], ky[nd], c=perf[nd], cmap='viridis', norm=norm, marker='*',
+                        s=48, edgecolors='black', linewidths=0.4, rasterized=True, zorder=4,
+                        label=f'Pareto front (n={len(nd)})')
         # this iter's measured candidates ringed so you can see where the search just probed.
-        sc = ax.scatter(wx, ky, c=perf, s=16, cmap='viridis', alpha=0.7,
-                        edgecolors='none', rasterized=True, zorder=1)
         ax.scatter(comp_c[:, 0], comp_c[:, 1], s=46, marker='o', facecolors='none',
-                   edgecolors='#d62728', lw=1.4, zorder=4, label='cand · this iter')
+                   edgecolors='#d62728', lw=1.4, zorder=6, label='cand · this iter')
         ax.set_xlabel(comp_obj[0]); ax.set_ylabel(comp_obj[1])
         # limits = actual sampled ranges (both axes), not the comp_obj budget box
         wr, kr = wx.max() - wx.min(), ky.max() - ky.min()
