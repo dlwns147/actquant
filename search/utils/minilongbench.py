@@ -109,8 +109,12 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
     for json_obj in tqdm(data, desc=dataset):
         prompt = _prepare_prompt(tokenizer, json_obj, max_length,
                                  prompt_format, dataset, model_name)
-        input = tokenizer(prompt, truncation=False,
-                          return_tensors="pt").to(device)
+        # avoid double-BOS: the chat-templated prompt already carries the model's
+        # BOS, so don't let the tokenizer prepend a second one (Llama-3/Gemma).
+        _bos = getattr(tokenizer, "bos_token", None)
+        _add_special = not (_bos and prompt.startswith(_bos))
+        input = tokenizer(prompt, truncation=False, return_tensors="pt",
+                          add_special_tokens=_add_special).to(device)
         context_length = input.input_ids.shape[-1]
         if dataset == "samsum":
             # samsum stops on newline (upstream LongBench idiom, tuned for the
