@@ -165,8 +165,11 @@ def run_benchmarks(args, model, model_id):
             print("-----------------------------------")
             print(f"#Tokens of Prompt:", input_ids.shape[1], end=" ")
             print("Passkey target:", example["target"])
+            # budget = TOKEN length of the target (+ margin), not CHAR length
+            _tgt_toks = len(enc(str(example["target"]),
+                                add_special_tokens=False).input_ids)
             tokens = model.generate(input_ids,
-                                    max_new_tokens=len(example["target"]))
+                                    max_new_tokens=_tgt_toks + 4)
             answer = prompt_postfix + enc.decode(
                 tokens[0].tolist()[input_ids.shape[1]:],
                 skip_special_tokens=True)
@@ -246,7 +249,8 @@ def run_benchmarks(args, model, model_id):
                    tasks=args.ruler_task, yaml_path=args.ruler_yaml_path,
                    batch_size=args.ruler_batch_size, length=args.ruler_length,
                    nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks,
-                   result_path=args.ruler_result_path, seed=args.seed)
+                   result_path=args.ruler_result_path, seed=args.seed,
+                   use_chat_template=args.ruler_chat_template)
         print(f'RULER Time: {time() - t0:.2f}s')
 
     if args.longeval:
@@ -789,6 +793,12 @@ def build_parser():
     p.add_argument('--ruler_gen_toks', type=int, default=None)
     p.add_argument('--ruler_batch_size', type=int, default=1)
     p.add_argument('--ruler_result_path', type=str, default='')
+    p.add_argument('--ruler_chat_template', action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help='Apply the model chat template to RULER prompts (default on; '
+                        'Instruct models self-terminate so eos-only stop is correct + '
+                        'fast). Use --no-ruler_chat_template for base models / raw '
+                        'prompting. Auto-falls back to raw if no chat template.')
     p.add_argument('--longeval', action='store_true')
     p.add_argument('--longeval_test_dir', type=str, default='')
     p.add_argument('--longeval_num_lines', type=int, nargs='+',

@@ -54,9 +54,14 @@ def string_match_all(preds: list[str], refs: list[list[str]]) -> float:
 
 
 def string_match_part(preds: list[str], refs: list[list[str]]) -> float:
-    score = max(
+    # Official RULER semantics: per (pred, ref-list) score 1.0 if ANY reference
+    # alias is a substring of pred (max over aliases), averaged over preds.
+    # The previous form had max/sum swapped (max over preds, mean over aliases),
+    # which under-scored multi-alias answers (e.g. SQuAD) — it computed the
+    # fraction of aliases matched rather than "any alias matched".
+    score = sum(
         [
-            sum([1.0 if r.lower() in pred.lower() else 0.0 for r in ref]) / len(ref)
+            max([1.0 if r.lower() in pred.lower() else 0.0 for r in ref])
             for pred, ref in zip(preds, refs)
         ]
     ) / len(preds)

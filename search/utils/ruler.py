@@ -29,17 +29,18 @@ def prepare_generation_kwargs(task_config_map, task_name: str, yaml_path:str, ge
     return generation_kwargs, max_gen_toks
 
 
-def eval_ruler(model, 
-               tokenizer, 
+def eval_ruler(model,
+               tokenizer,
                model_id,
                yaml_path='',
                tasks=[],
                length=[],
                batch_size=1,
-               nsample=50, 
-               seed=0, 
+               nsample=50,
+               seed=0,
                gen_toks=128,
-               result_path=''):
+               result_path='',
+               use_chat_template=True):
     
     task_function = {
         # NIAH tasks
@@ -77,22 +78,15 @@ def eval_ruler(model,
         "ruler_qa_hotpot": os.path.join(yaml_path, 'qa_hotpot.yaml'),
     }
     
-    task_until = {
-        "niah_single_1": ['.'],
-        "niah_single_2": ['.'],
-        "niah_single_3": ['.'],
-        "niah_multikey_1": ['.'],
-        "niah_multikey_2": ['.'],
-        "niah_multikey_3": ['.'],
-        "niah_multivalue": ['.'],
-        "niah_multiquery": ['.'],
-        "ruler_vt": ['.', '\n\n'],
-        "ruler_cwe": [],
-        "ruler_fwe": [],
-        "ruler_qa_squad": ['.'],
-        "ruler_qa_hotpot": ['.'],
-    }
-    
+    # NOTE: no per-task early-stop STRING. The old task_until={'niah...':['.']}
+    # truncated answers at the first '.', which killed chat-formatted list answers
+    # ("1." -> stop) and contradicted the yaml `until: []`. Token-level analysis
+    # showed the model's own turn-end token (eos, e.g. <|eot_id|>/<|im_end|>/
+    # <end_of_turn>) is the only reliable answer terminator. With use_chat_template
+    # the Instruct model emits it right after the answer -> generation self-limits
+    # (correct AND ~2.5-4.5x fewer tokens than raw, which never emits eos and runs
+    # to max_gen_toks). So we stop on eos only; max_gen_toks stays as a safety cap.
+
     task_function = {task: task_function[task] for task in tasks}
 
     # yaml_path doubles as the JSON data cache (hotpot/squad dev sets).
@@ -103,6 +97,24 @@ def eval_ruler(model,
     # Reproducibility: set seed before dataset creation and generation
     set_seed(seed)
 
+    # Batched generation needs LEFT padding (generated tokens are sliced off with
+    # the shared prompt length below); this tokenizer instance is dedicated to the
+    # RULER call so mutating pad side/token is safe.
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = 'left'
+
+    # Chat template: for Instruct models, wrap `input` as a user turn and continue
+    # the assistant turn with the RULER answer prefix (gen_prefix). The model then
+    # emits its turn-end token right after the answer -> eos-only stop self-limits
+    # generation (correct + fast). Falls back to raw prompting when the tokenizer
+    # has no chat template (base models) or when explicitly disabled.
+    use_chat = bool(use_chat_template and getattr(tokenizer, 'chat_template', None))
+    if use_chat_template and not use_chat:
+        print("[eval_ruler] tokenizer has no chat_template -> raw prompting")
+    print(f"[eval_ruler] prompting={'chat' if use_chat else 'raw'}, "
+          f"stop=eos-only, max_gen_toks=safety-cap")
+
     # 태스크별 generation 설정 저장
     task_generation_configs = {task: prepare_generation_kwargs(task_config_map, task, yaml_path, gen_toks) for task in task_function.keys()}
 
@@ -110,37 +122,65 @@ def eval_ruler(model,
     for task in tqdm(task_function.keys(), desc=f'Creating datasets'):
         # print(f'Preparing {task} dataset')
         dataset = task_function[task](model=model_id, max_seq_lengths=length, num_samples=nsample)['test']
-        
-        dataset.shuffle(seed)
-        dataset = dataset.select(range(nsample))
-        # shuffle=False: dataset already shuffled with seed above; preserves reproducibility
-        dataset = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-        # dataset = dataset.batch(batch_size)
-        
+
+        # NOTE: with multiple lengths in `length`, the builder yields nsample
+        # samples PER length (chained), so select(range(nsample)) keeps a shuffled
+        # nsample MIXED across lengths (not per-length). Fine for the single-length
+        # usage; for a proper per-length breakdown keep all samples instead.
+        dataset = dataset.shuffle(seed).select(range(nsample))
+        # collate_fn=lambda b: b keeps the batch as a LIST OF SAMPLE DICTS. The
+        # default DataLoader collate transposes list-valued fields — for RULER's
+        # multi-answer 'outputs' (cwe/fwe/vt/niah_multivalue/niah_multiquery/
+        # qa_squad) it turns ['a','b','c','d'] into [('a',),('b',),('c',),('d',)]
+        # so downstream doc['outputs'][0] kept only the FIRST reference answer,
+        # scoring a partial hit as a full match. Passthrough collate preserves the
+        # full answer list.
+        dataset = DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                             collate_fn=lambda b: b)
+
         datasets[task] = dataset
 
     tot_scores = dict()
     start_time = time()
     device = model.device
 
+    # Per-task scorer: qa_squad/qa_hotpot use string_match_PART (score 1.0 if ANY
+    # reference alias substring-matches), matching their yaml (qa_squad.yaml sets
+    # process_results_part; qa_hotpot includes it). All other tasks use
+    # string_match_ALL (fraction of references found). eval_ruler previously
+    # hardcoded process_results (ALL) for EVERY task, under-scoring SQuAD's
+    # multi-alias answers (a model matching one alias got fraction<1 instead of 1).
+    PART_TASKS = {"ruler_qa_squad", "ruler_qa_hotpot"}
+
     for task in task_function.keys():
         kwargs, max_gen_toks = task_generation_configs[task]
+        scorer = (common_utils.process_results_part if task in PART_TASKS
+                  else common_utils.process_results)
         task_scores = []
         
         for docs in tqdm(datasets[task], desc=f"Evaluating {task}"):
-            for i in range(len(docs['input'])):
-                docs['input'][i] = docs['input'][i] + ' ' + docs['gen_prefix'][i]
-
-            # tokenized_sample = tokenizer(docs["input"], return_tensors="pt", padding=True)
-            tokenized_sample = tokenizer(docs["input"], return_tensors="pt")
-            print(f'tokenized_sample: {tokenized_sample.input_ids.shape}')
+            # docs is a list of sample dicts (see collate_fn above).
+            if use_chat:
+                # user turn = context+question; assistant turn is STARTED (via
+                # add_generation_prompt) and continued with the answer prefix so
+                # the model resumes from `gen_prefix` (RULER priming). The template
+                # already carries the model's special/BOS tokens -> no extra BOS.
+                inputs = [tokenizer.apply_chat_template(
+                              [{"role": "user", "content": d['input']}],
+                              tokenize=False, add_generation_prompt=True) + d['gen_prefix']
+                          for d in docs]
+                tokenized_sample = tokenizer(inputs, return_tensors="pt",
+                                             padding=True, add_special_tokens=False)
+            else:
+                # raw prompting: input + ' ' + answer-prefix (BOS added by tokenizer)
+                inputs = [d['input'] + ' ' + d['gen_prefix'] for d in docs]
+                tokenized_sample = tokenizer(inputs, return_tensors="pt", padding=True)
             context_enc = tokenized_sample.input_ids.to(device)
             attn_masks = tokenized_sample.attention_mask.to(device)
 
-            # stopping_criteria = stop_sequences_criteria(
-            #     tokenizer, until, context_enc.shape[1], context_enc.shape[0])
-            
-            stopping_criteria = stop_sequences_criteria(tokenizer, [tokenizer.eos_token] + task_until[task], context_enc.shape[1], context_enc.shape[0])
+            # eos-only stop; generate() also honors generation_config.eos_token_id
+            # (the full turn-end id list), so termination is model-driven.
+            stopping_criteria = stop_sequences_criteria(tokenizer, [tokenizer.eos_token], context_enc.shape[1], context_enc.shape[0])
 
             kwargs["max_length"] = context_enc.shape[1] + max_gen_toks
 
@@ -148,25 +188,18 @@ def eval_ruler(model,
                 output = model.generate(
                     input_ids=context_enc,
                     attention_mask=attn_masks,
-                    # pad_token_id=tokenizer.pad_token_id,
                     stopping_criteria=stopping_criteria,
                     use_cache=True,
                     **kwargs
                 )
 
-            # output이 올바른 device에 있는지 확인하고 필요시 이동
-            # device_map="auto"를 사용할 때는 output이 모델의 마지막 레이어 device에 있을 수 있음
-            # if output.device != context_enc.device:
-            #     output = output.to(context_enc.device)
-            
             output = output[:, context_enc.shape[1]:]
             output = tokenizer.batch_decode(output, skip_special_tokens=True)
 
-            for i in range(len(docs['input'])):
-                doc = {key: docs[key][i] for key in docs.keys()}
-                score = common_utils.process_results(doc, [output[i]])[str(doc["max_length"])]
+            for i, doc in enumerate(docs):
+                score = scorer(doc, [output[i]])[str(doc["max_length"])]
                 task_scores.append(score)
-        
+
         if len(task_scores) > 0:
             avg_score = sum(task_scores) / len(task_scores)
             tot_scores[task] = avg_score

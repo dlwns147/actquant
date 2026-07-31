@@ -42,38 +42,38 @@ def test_lines_one_sample(model, tokenizer, test_case, model_name_or_path, use_c
     correct_line = test_case["correct_line"]
     expected_number = test_case["expected_number"]
 
-    # Use conversation template for chat models
-    if "longchat" in model_name_or_path.lower():
-        conv = get_conversation_template("vicuna")
+    # Wrap the prompt with the model's OWN chat template for Instruct models.
+    # (The old fastchat `get_conversation_template` import is commented out and
+    # fastchat isn't installed, so the previous code raised NameError on every
+    # sample.) Falls back to raw prompting when there is no chat template.
+    if getattr(tokenizer, "chat_template", None):
+        prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False, add_generation_prompt=True)
+        input = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
     else:
-        conv = get_conversation_template(model_name_or_path)
-
-    if "mosaicml/mpt-30b-chat" in model_name_or_path:
-        prompt += f'Answer in the format <{test_case["random_idx"][0]}> <REGISTER_CONTENT>.'
-    
-    conv.append_message(conv.roles[0], prompt)
-    conv.append_message(conv.roles[1], None)
-    prompt = conv.get_prompt()
-
-    input = tokenizer(prompt, return_tensors="pt")
+        input = tokenizer(prompt, return_tensors="pt")
     prompt_length = input.input_ids.shape[-1]
-    
+
     device = getattr(model, "device", "cpu")
-    
-    # Generate with stopping criteria
+
+    # Stop on '###' / eos only — NOT '.', which truncates conversational answers
+    # ("The value is 12345.") before the number, same failure mode as the RULER
+    # '.' early-stop. The model's turn-end token (via chat template) terminates
+    # naturally; max_new_tokens caps the worst case.
     try:
-        stopping_criteria = transformers.StopStringCriteria(tokenizer, [".", "###"])
+        stopping_criteria = transformers.StopStringCriteria(tokenizer, ["###"])
         output = model.generate(
-            input.input_ids.to(device), 
-            max_new_tokens=100, 
+            input.input_ids.to(device),
+            max_new_tokens=100,
             use_cache=use_cache,
             stopping_criteria=[stopping_criteria]
         )[0]
     except:
         # Fallback if StopStringCriteria is not available
         output = model.generate(
-            input.input_ids.to(device), 
-            max_new_tokens=100, 
+            input.input_ids.to(device),
+            max_new_tokens=100,
             use_cache=use_cache
         )[0]
     

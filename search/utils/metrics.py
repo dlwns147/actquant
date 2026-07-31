@@ -56,6 +56,8 @@ def count_score(prediction, ground_truth, **kwargs):
 def retrieval_score(prediction, ground_truth, **kwargs):
     pattern = r'Paragraph (\d+)'
     matches = re.findall(pattern, ground_truth)
+    if not matches:                      # malformed GT (no "Paragraph N") -> score 0
+        return 0.0
     ground_truth_id = matches[0]
     numbers = re.findall(r"\d+", prediction)
     right_num = 0
@@ -68,6 +70,8 @@ def retrieval_score(prediction, ground_truth, **kwargs):
 def retrieval_zh_score(prediction, ground_truth, **kwargs):
     pattern = r'段落(\d+)'
     matches = re.findall(pattern, ground_truth)
+    if not matches:                      # malformed GT (no "段落N") -> score 0
+        return 0.0
     ground_truth_id = matches[0]
     numbers = re.findall(r"\d+", prediction)
     right_num = 0
@@ -92,23 +96,20 @@ def classification_score(prediction, ground_truth, **kwargs):
     for class_name in all_classes:
         if class_name in prediction:
             em_match_list.append(class_name)
-    for match_term in em_match_list:
-        if match_term in ground_truth and match_term != ground_truth:
-            em_match_list.remove(match_term)
-    if em_match_list != 0:
-        if ground_truth in em_match_list:
-            score = (1.0 / len(em_match_list))
-        else:
-            score = 0.0
+    # Drop labels that are proper substrings of the ground truth (dedup artifacts).
+    # Use a comprehension, NOT `for t in em_match_list: em_match_list.remove(t)`:
+    # removing during iteration shifts indices and SKIPS a following consecutive
+    # removal target, leaving a spurious label in -> inflates len -> deflates the
+    # 1/len score. (Deliberate correctness fix; diverges from published LongBench
+    # only in the rare case of 2+ consecutive substring-labels of the GT.)
+    em_match_list = [t for t in em_match_list
+                     if not (t in ground_truth and t != ground_truth)]
+    # (The earlier `if em_match_list != 0:` guard was always True — list != int —
+    # so the difflib fuzzy-fallback else-branch was dead code; removed.)
+    if ground_truth in em_match_list:
+        score = (1.0 / len(em_match_list))
     else:
-        best_match = None
-        highest_similarity = 0
-        for string in all_classes:
-            similarity = difflib.SequenceMatcher(None, string, prediction).ratio()
-            if similarity > highest_similarity:
-                highest_similarity = similarity
-                best_match = string
-        score = float(best_match == ground_truth)
+        score = 0.0
     return score
     
 def rouge_score(prediction, ground_truth, **kwargs):

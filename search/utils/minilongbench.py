@@ -56,16 +56,22 @@ dataset2metric = {
 
 
 def build_chat(tokenizer, prompt, model_name):
-    if "instruct" in model_name.lower():
-        messages = [{"role": "user", "content": prompt}]
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False,
-                                               add_generation_prompt=True)
-    elif "longchat" in model_name.lower():
+    name = model_name.lower()
+    # Instruct/chat models -> apply the model's chat template. Covers "*-Instruct"
+    # (Llama/Qwen), Gemma "*-it", and "*-chat". The old check was only
+    # `"instruct" in name`, which MISSED Gemma ("gemma-3-12b-it") -> Gemma silently
+    # ran raw prompting. Gated by chat_template presence so base models stay raw.
+    if "longchat" in name:
         from fastchat.model import get_conversation_template
         conv = get_conversation_template("vicuna")
         conv.append_message(conv.roles[0], prompt)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
+    elif (any(k in name for k in ("instruct", "-it", "chat"))
+          and getattr(tokenizer, "chat_template", None)):
+        messages = [{"role": "user", "content": prompt}]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False,
+                                               add_generation_prompt=True)
     return prompt
 
 
@@ -107,6 +113,11 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
                           return_tensors="pt").to(device)
         context_length = input.input_ids.shape[-1]
         if dataset == "samsum":
+            # samsum stops on newline (upstream LongBench idiom, tuned for the
+            # Llama-2 SentencePiece "\n" token). Guard the encode result: on some
+            # tokenizers "\n" encodes to an empty list -> [-1] would IndexError.
+            _nl = tokenizer.encode("\n", add_special_tokens=False)
+            _eos = [tokenizer.eos_token_id] + ([_nl[-1]] if _nl else [])
             output = model.generate(
                 **input,
                 max_new_tokens=max_gen,
@@ -114,9 +125,7 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
                 do_sample=False,
                 temperature=1.0,
                 min_length=context_length + 1,
-                eos_token_id=[tokenizer.eos_token_id,
-                              tokenizer.encode("\n",
-                                               add_special_tokens=False)[-1]],
+                eos_token_id=_eos,
             )[0]
         else:
             output = model.generate(
@@ -210,6 +219,8 @@ def scorer(dataset, predictions, answers, all_classes):
             score = max(score, dataset2metric[dataset](
                 prediction, ground_truth, all_classes=all_classes))
         total_score += score
+    if not predictions:                  # empty dataset -> avoid div-by-zero
+        return 0.0
     return round(100 * total_score / len(predictions), 2)
 
 

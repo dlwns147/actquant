@@ -115,9 +115,16 @@ def generate_input_output(num_noises, num_chains, num_hops, is_icl=False):
         )
 
     value = chains[0][0].split("=")[-1].strip()
-    input_text = template.format(context=context, query=value, num_v=num_hops + 1)
+    # Derive count + answer from the ACTUAL (possibly noise-truncated) chain, not
+    # the nominal num_hops+1. When the noise budget is too small the chain above is
+    # truncated (chains[i][:len(sentences)-1]) but vars[0]/num_v were not, so the
+    # answer listed variables never assigned in the context and the prefix claimed
+    # the wrong count. len(chains[0]) == num_hops+1 in the normal (untruncated)
+    # case, so this is a no-op there.
+    num_v = len(chains[0])
+    input_text = template.format(context=context, query=value, num_v=num_v)
 
-    return input_text, vars[0]
+    return input_text, vars[0][:num_v]
 
 
 def randomize_icl(icl_example: str) -> str:
@@ -158,11 +165,9 @@ def sys_vartrack_w_noise_random(
         input_text, answer = generate_input_output(
             num_noises, num_chains, num_hops, is_icl=add_fewshot & (icl_example is None)
         )
-        # Calculate the number of tokens in the example
-        total_tokens = len(tokenizer(input_text + f" {answer}").input_ids)
-        print(
-            f"Max length {max_seq_length} | Current length {total_tokens + tokens_to_generate + example_tokens} | Noises: {num_noises}"
-        )
+        # Calculate the number of tokens in the example. answer is a LIST of
+        # variable names -> join it (f"{answer}" stringifies the list repr).
+        total_tokens = len(tokenizer(input_text + " " + " ".join(answer)).input_ids)
         if total_tokens + tokens_to_generate + example_tokens > max_seq_length:
             num_noises -= incremental
             break
