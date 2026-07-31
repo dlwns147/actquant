@@ -155,12 +155,17 @@ def sys_word_pair_random(
 
         gen_prefix_index = input_text.rfind(CONFIG["answer_prefix"])
         input_text = input_text[:gen_prefix_index]
+        # Prepend the 1-shot demo (example WITH its answer) INTO `input`, matching
+        # official RULER CWE (1-shot) and this repo's VT (which splices its ICL into
+        # `input`). Previously `input_example` was stored in a separate key that
+        # eval_ruler never reads -> CWE ran zero-shot (depressed scores). The
+        # num_words budget above already reserves example+input+answer, so it fits.
+        input_1shot = input_example.strip() + "\n\n" + input_text.strip()
         formatted_output = {
             "index": index,
-            "input": input_text.strip(),
-            "input_example": input_example,
+            "input": input_1shot,
             "outputs": answer,
-            "length": length,
+            "length": len(tokenizer(input_1shot).input_ids) + tokens_to_generate,
             "max_length": max_seq_length,
             "gen_prefix": CONFIG["answer_prefix"].strip(),
         }

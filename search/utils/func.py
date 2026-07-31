@@ -1079,7 +1079,11 @@ def configure_model_cache(args, model, *, use_cache):
     if 'kivi' in args.kv_method or 'think' in args.kv_method:
         model.config.kivi_config.residual_length = res_len
     elif 'hqq' in args.kv_method:
-        model.generation_config.cache_config = res_len
+        # cache_config is the HQQ QuantizedCacheConfig DICT (replace.py builds it,
+        # evaluator.apply_kv subscripts it). Only update residual_length — NOT
+        # rebind the whole dict to an int, which crashed generate() (int has no
+        # 'backend' / is not subscriptable).
+        model.generation_config.cache_config['residual_length'] = res_len
     model.config.quant_kv_output = not use_cache
     model.config.use_cache = use_cache
 

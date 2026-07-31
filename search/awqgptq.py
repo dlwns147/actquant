@@ -156,18 +156,18 @@ def main(args):
 
     if args.datasets:
         if args.stride is not None:
-            if 'kivi' in args.kv_method:
+            if 'kivi' in args.kv_method or 'think' in args.kv_method:
                 model.config.kivi_config.residual_length = args.residual_length
             elif 'hqq' in args.kv_method:
-                model.generation_config.cache_config = args.residual_length
+                model.generation_config.cache_config['residual_length'] = args.residual_length
             model.config.quant_kv_output = False
             model.config.use_cache = True
             
         else:
-            if 'kivi' in args.kv_method:
+            if 'kivi' in args.kv_method or 'think' in args.kv_method:
                 model.config.kivi_config.residual_length = 0
             elif 'hqq' in args.kv_method:
-                model.generation_config.cache_config = 0
+                model.generation_config.cache_config['residual_length'] = 0
             model.config.quant_kv_output = True
             model.config.use_cache = False
 
@@ -182,10 +182,10 @@ def main(args):
     if args.pass_key_file:
         clean_up()
         # model.config.residual_length = args.residual_length
-        if 'kivi' in args.kv_method:
+        if 'kivi' in args.kv_method or 'think' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
         elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config = args.residual_length
+            model.generation_config.cache_config['residual_length'] = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
         
@@ -203,7 +203,10 @@ def main(args):
             print( f"#Tokens of Prompt:", input_ids.shape[1], end=" " )
             print( "Passkey target:", example["target"] )
 
-            tokens = model.generate(input_ids, max_new_tokens=len(example["target"]))
+            # budget = TOKEN length of the target (+ margin), not CHAR length —
+            # len(str) is characters and only coincidentally covers the tokens.
+            _tgt_toks = len(enc(str(example["target"]), add_special_tokens=False).input_ids)
+            tokens = model.generate(input_ids, max_new_tokens=_tgt_toks + 4)
             answer = prompt_postfix + enc.decode(tokens[0].tolist()[input_ids.shape[1]:], skip_special_tokens=True)
             answer = answer.replace("\n", "\\n")
             # answer= f"{method_name}:\n     [ {answer} ]"
@@ -219,10 +222,10 @@ def main(args):
     if args.zeroshot:
         clean_up()
         # model.config.residual_length = args.residual_length
-        if 'kivi' in args.kv_method:
+        if 'kivi' in args.kv_method or 'think' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
         elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config = args.residual_length
+            model.generation_config.cache_config['residual_length'] = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
         
@@ -255,15 +258,15 @@ def main(args):
     if args.longbench:
         clean_up()
         # model.config.residual_length = args.residual_length
-        if 'kivi' in args.kv_method:
+        if 'kivi' in args.kv_method or 'think' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
         elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config = args.residual_length
+            model.generation_config.cache_config['residual_length'] = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
         
         longbench_start = time()
-        preds = pred_longbench(model, tokenizer=get_tokenizer(model_id), save_path=args.longbench_result_path, longbench_config=args.longbench_config, e=args.longbench_e)
+        preds = pred_longbench(model, tokenizer=get_tokenizer(model_id), save_path=args.longbench_result_path, longbench_config=args.longbench_config, e=args.longbench_e, model_name=args.model_name)
         # Score this run's predictions in memory (still writes result.json);
         # avoids re-reading the dir, which could mix in stale .jsonl files.
         eval_longbench_preds(preds, args.longbench_e, save_path=args.longbench_result_path)
@@ -282,10 +285,10 @@ def main(args):
     if args.ruler:
         clean_up()
         set_seed(args.seed, deterministic=True)
-        if 'kivi' in args.kv_method:
+        if 'kivi' in args.kv_method or 'think' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
         elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config = args.residual_length
+            model.generation_config.cache_config['residual_length'] = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
         # tokenizer=get_tokenizer(model_id)
@@ -299,10 +302,10 @@ def main(args):
 
     if args.minilongbench:
         clean_up()
-        if 'kivi' in args.kv_method:
+        if 'kivi' in args.kv_method or 'think' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
         elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config = args.residual_length
+            model.generation_config.cache_config['residual_length'] = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
 
@@ -332,10 +335,10 @@ def main(args):
 
     if args.longeval:
         clean_up()
-        if 'kivi' in args.kv_method:
+        if 'kivi' in args.kv_method or 'think' in args.kv_method:
             model.config.kivi_config.residual_length = args.residual_length
         elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config = args.residual_length
+            model.generation_config.cache_config['residual_length'] = args.residual_length
         model.config.quant_kv_output = False
         model.config.use_cache = True
         

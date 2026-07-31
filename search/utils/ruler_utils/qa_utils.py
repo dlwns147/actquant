@@ -210,8 +210,10 @@ def generate_samples(
     total_tokens = 0  # Track the total tokens generated for this example
     while total_tokens + tokens_to_generate < max_seq_length:
         input_text, answer = generate_input_output(0, num_docs, qas=qas, docs=docs)
-        # Calculate the number of tokens in the example
-        total_tokens = len(tokenizer(input_text + f" {answer}").input_ids)
+        # Calculate the number of tokens in the example. answer is a LIST of
+        # aliases -> join it (f"{answer}" would stringify the Python list repr,
+        # over-counting brackets/quotes tokens).
+        total_tokens = len(tokenizer(input_text + " " + " ".join(answer)).input_ids)
         # print(
         #     f"Max length {max_seq_length} | Current length {total_tokens + tokens_to_generate} | Docs: {num_docs}"
         # )
