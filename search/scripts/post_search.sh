@@ -109,9 +109,15 @@ N=1
 SELECT_MEASURED_BEST=False   # second_expr: loss already measured → no re-screen
 VERIFY_TOPK=5
 
-DATASETS="wikitext2"
-METRIC="loss"
+DATASETS="wikitext2 c4"
+LOGIT_DATASET="wikitext2"
+# METRIC는 공백구분 리스트로 여러 지표를 최종 arch에서 잰다(첫 항목=선택/verify 기준).
+# 'loss'는 --loss_func + LOGIT_DATASET subset(=wikitext2)만, 'ppl'은 test split(전 DATASETS).
+# → loss(jsd): wikitext2만, ppl: wikitext2+c4  (c4 teacher logits 미저장)
+METRIC="loss ppl"
 LOSS_FUNC="jsd"
+# METRIC="ppl"
+# LOSS_FUNC="cross_entropy"
 
 N_SAMPLE=128
 SEQLEN=2048
@@ -245,6 +251,7 @@ fi
 [ "${SELECT_MEASURED_BEST:-False}" = "True" ] && ARGS+=" --select_measured_best --verify_topk ${VERIFY_TOPK:-5}"
 
 ARGS+=" --datasets ${DATASETS} --seqlen ${SEQLEN} --min_seqlen ${MIN_SEQLEN} --n_sample ${N_SAMPLE} --data_batch_size ${DATA_BATCH_SIZE}"
+[ -n "${LOGIT_DATASET}" ] && ARGS+=" --logit_dataset ${LOGIT_DATASET}"
 # ARGS+=" --zeroshot --tasks ${TASKS} --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE}"
 # ARGS+=" --longbench --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG} --longbench_e "
 # ARGS+=" --minilongbench --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG}"

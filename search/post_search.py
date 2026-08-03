@@ -86,17 +86,29 @@ def _make_surrogate(args, X, y, M_valid):
 
 
 # ───────────────────────── results.csv reader ─────────────────────────
-def load_sample_csv(path, n_comp, n_axes, n_datasets=None):
-    """Parse a sample_surrogate results.csv → (X, y, y_combined, n_valid).
+def load_sample_csv(path, n_comp, n_axes, n_measured=None, y_row=0):
+    """Parse a sample_surrogate results.csv → dict(X, y, y_combined, measured, n_valid).
 
-    X (N, n_axes) per-axis search metric, y (N,) measured metric on the first
-    dataset. NaN-metric columns (in-progress runs) are dropped, matching
-    analysis/v5/_common.extract_xy.
+    CSV layout (sample_surrogate writes it):
+        n_comp complexity rows
+        n_measured MEASURED rows = M metrics * D datasets, metric-major
+                   (metric_0 over all datasets, then metric_1, ...)
+        1 combined-predicted row (pf column 0, args scales)
+        n_axes per-axis search-metric rows (order == expr_keys)
 
-    n_datasets is auto-detected from the CSV row count
-    (total rows = n_comp + n_datasets + 1 + n_axes) so post_search.py can use
-    a different --datasets set than the one used at sampling time. Pass an
-    explicit value only to override.
+    Returns:
+        X (N, n_axes)  per-axis search metric (surrogate inputs)
+        y (N,)         the surrogate objective = MEASURED row at index `y_row`
+                       (default 0 = first --metric on first --datasets)
+        measured (n_measured, N)  ALL measured rows (every metric*dataset), so
+                       ppl/loss/… are all available, not just the objective
+        y_combined (N,)  the combined-predicted row
+        n_valid        number of non-NaN archs (NaN columns = in-progress archs,
+                       dropped via the y-row mask)
+
+    n_measured (= M*D) is auto-detected from the row count so post_search can run
+    with a different --datasets/--metric set than sampling time; pass it (and
+    y_row) explicitly only to override.
     """
     with open(path) as f:
         rows = [r for r in csv.reader(f) if r]
@@ -109,26 +121,32 @@ def load_sample_csv(path, n_comp, n_axes, n_datasets=None):
             except ValueError:
                 pass
     n_rows = M.shape[0]
-    if n_datasets is None:
-        n_datasets = n_rows - n_comp - 1 - n_axes
-        if n_datasets < 1:
+    if n_measured is None:
+        n_measured = n_rows - n_comp - 1 - n_axes
+        if n_measured < 1:
             raise SystemExit(
                 f"[load_sample_csv] CSV at {path} has {n_rows} rows but the "
-                f"layout requires n_comp({n_comp}) + n_datasets(>=1) + 1 "
+                f"layout requires n_comp({n_comp}) + n_measured(>=1) + 1 "
                 f"combined + n_axes({n_axes}) = at least "
                 f"{n_comp + 2 + n_axes} rows. Either the CSV is truncated or "
                 f"n_comp/n_axes don't match how it was generated.")
-        print(f"[load_sample_csv] auto-detected n_datasets={n_datasets} "
-              f"from CSV rows={n_rows} (n_comp={n_comp}, n_axes={n_axes})")
-    y_row = n_comp                    # first --datasets metric
-    comb_row = n_comp + n_datasets    # pf column 0 (combined predicted)
+        print(f"[load_sample_csv] auto-detected n_measured={n_measured} "
+              f"(M metrics * D datasets rows) from CSV rows={n_rows} "
+              f"(n_comp={n_comp}, n_axes={n_axes})")
+    if not 0 <= y_row < n_measured:
+        raise SystemExit(f"[load_sample_csv] y_row={y_row} out of range "
+                         f"[0,{n_measured}) measured rows")
+    m0 = n_comp                       # first measured row
+    comb_row = n_comp + n_measured    # combined predicted
     axis0 = comb_row + 1              # per-axis metrics start here
-    y_all = M[y_row, :ncol]
+    y_all = M[m0 + y_row, :ncol]
     valid = ~np.isnan(y_all)
     X = M[axis0:axis0 + n_axes, :ncol].T[valid]
     y = y_all[valid]
+    measured = M[m0:m0 + n_measured, :ncol][:, valid]   # (n_measured, N_valid)
     y_comb = M[comb_row, :ncol][valid] if M.shape[0] > comb_row else X.sum(1)
-    return dict(X=X, y=y, y_combined=y_comb, n_valid=int(valid.sum()))
+    return dict(X=X, y=y, y_combined=y_comb, measured=measured,
+                n_valid=int(valid.sum()))
 
 
 # ───────────────────────── LongEval testcase gen ─────────────────────────
@@ -371,7 +389,8 @@ def run_final(args, ctx, ps, I, pf, K):
         quant_model_paths=args.quant_model_paths,
         outlier=torch.load(args.outlier_path) if args.outlier_path else None,
         seqlen=args.seqlen, min_seqlen=args.min_seqlen, n_sample=args.n_sample,
-        datasets=args.datasets, device_map=ctx.device_map, dtype=ctx.dtype,
+        datasets=args.datasets, logit_dataset=args.logit_dataset,
+        device_map=ctx.device_map, dtype=ctx.dtype,
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
         group_size=ctx.group_size, residual_length=args.residual_length,
         attn_sink=args.attn_sink,
@@ -395,8 +414,10 @@ def run_final(args, ctx, ps, I, pf, K):
         for idx in tqdm(I, desc=f'verify top-{len(I)}'):
             arch = ps[idx]
             model = evaluator.sample(arch)
+            # rank by the FIRST --metric (the surrogate objective)
             metric = evaluate_metric(args, arch, model, evaluator,
-                                     ctx.accelerator)
+                                     ctx.accelerator, metric=args.metric[0],
+                                     loss_func=args.loss_func)
             measured[idx] = float(list(metric.values())[0])
             print(f'[verify] idx={idx} measured={measured[idx]:.6f} '
                   f'pred={pf[idx, 0]:.6f}')
@@ -412,6 +433,9 @@ def run_final(args, ctx, ps, I, pf, K):
                           f'pred-rank={ranked_by_meas.index(i)})' for i in I)
               + ' — benchmarks run on these only')
 
+    # long-format rows persisted to --save/--results_csv_file: one row per
+    # (arch, metric, dataset) so ALL metrics land in a file, not just stdout.
+    metric_rows = [('idx', 'metric', 'dataset', 'value')]
     for idx in tqdm(I):
         arch = ps[idx]
         complexity = get_net_info(arch, ctx.config, ctx.group_size,
@@ -422,10 +446,18 @@ def run_final(args, ctx, ps, I, pf, K):
         model = evaluator.sample(arch)
 
         if args.datasets:
-            metric = evaluate_metric(args, arch, model, evaluator,
-                                     ctx.accelerator)
-            print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, '
-                  f'pred_metric: {pf[idx, 0]}, per_axis_metric: '
+            # measure + OUTPUT every --metric entry (loss uses --loss_func + the
+            # logit_dataset subset; ppl uses the test split, all datasets).
+            for m in args.metric:
+                res = evaluate_metric(args, arch, model, evaluator,
+                                      ctx.accelerator, metric=m,
+                                      loss_func=args.loss_func)
+                label = f'{m}({args.loss_func})' if m == 'loss' else m
+                print(f'[{idx}] {label}: {list(res.values())}')
+                for ds, v in res.items():
+                    metric_rows.append((idx, label, ds, float(v)))
+            metric_rows.append((idx, 'pred_metric', '', float(pf[idx, 0])))
+            print(f'[{idx}] pred_metric: {pf[idx, 0]}, per_axis_metric: '
                   f'{pf[idx, [1 + 2 * i for i in range(K)]].tolist()}')
 
         run_benchmarks(args, model, model_id)
@@ -434,6 +466,15 @@ def run_final(args, ctx, ps, I, pf, K):
                for m in ('awq', 'gptq', 'qeft', 'awq_qeft')):
             del model, evaluator.model
             clean_up()
+
+    # persist all measured metrics (long format) to --save/--results_csv_file
+    if args.datasets and args.save and args.results_csv_file and len(metric_rows) > 1:
+        os.makedirs(args.save, exist_ok=True)
+        out_path = os.path.join(args.save, args.results_csv_file)
+        with open(out_path, 'w', newline='') as f:
+            csv.writer(f).writerows(metric_rows)
+        print(f'[post_search] wrote {len(metric_rows) - 1} metric row(s) '
+              f'({len(args.metric)} metric(s) × final arch(s)) to {out_path}')
 
 
 def main(args):
@@ -673,7 +714,18 @@ def build_parser():
     p.add_argument('--outlier_path', type=str, default='')
     # calibration data / metric
     p.add_argument('--datasets', type=str, nargs='+', default=[])
-    p.add_argument('--metric', type=str, default='ppl')
+    p.add_argument('--logit_dataset', type=str, nargs='+', default=None,
+                   help="subset of --datasets that gets FP-teacher logits stored "
+                        "(⇒ the only datasets JSD/KLD loss is measured on). Default "
+                        "None = all --datasets. e.g. --datasets wikitext2 c4 "
+                        "--logit_dataset wikitext2 → PPL on both, JSD on wikitext2 "
+                        "only (c4 teacher logits never stored, saves VRAM).")
+    p.add_argument('--metric', type=str, nargs='+', default=['ppl'],
+                   help="one or more calibration metrics to MEASURE on the final "
+                        "arch(s), e.g. --metric loss ppl. The FIRST is the "
+                        "selection/verify objective; all are reported. 'loss' "
+                        "pairs with --loss_func (+ --logit_dataset subset), 'ppl' "
+                        "uses the test split over all --datasets.")
     p.add_argument('--loss_func', type=str, default='cross_entropy')
     p.add_argument('--stride', type=int, default=None)
     p.add_argument('--last_tokens', type=int, default=None)

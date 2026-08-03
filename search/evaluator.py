@@ -22,6 +22,7 @@ class LlamaEvaluator:
                 #  quant_model_bits=[],
                  outlier=None,
                  datasets=['wikitext2'],
+                 logit_dataset=None,
                  data_batch_size=1,
                  seed=0,
                  seqlen=2048,
@@ -89,6 +90,14 @@ class LlamaEvaluator:
             self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=False, seed=seed, seqlen=seqlen, min_seqlen=min_seqlen)) for dataset in datasets}
 
         self.loss_func = loss_func
+        # logit_dataset = subset of datasets for which the FP-teacher logits are
+        # STORED (⇒ the only datasets JSD/KLD is computed on). None = all datasets
+        # (legacy behaviour). Lets PPL span every --datasets entry while the costly
+        # dense_logits (vocab-wide, GPU-resident) are kept for only a subset — e.g.
+        # PPL on wikitext2+c4 but JSD on wikitext2 only, so c4's teacher logits are
+        # never materialised.
+        self._logit_datasets = (set(self.train_loaders) if logit_dataset is None
+                                else set(logit_dataset))
         self.dense_logits = (precomputed_dense_logits if precomputed_dense_logits is not None
                              else {dataset: None for dataset in self.train_loaders.keys()})
         self.key_token_list = (precomputed_key_token_list if precomputed_key_token_list is not None
@@ -156,12 +165,16 @@ class LlamaEvaluator:
                     accelerator.wait_for_everyone()
 
             if need_dense:
+                # only store teacher logits for datasets in logit_dataset; others
+                # stay None (no VRAM, no teacher forward) and are skipped by the
+                # divergence-loss path in eval().
                 self.dense_logits = {
-                    dataset: get_logits(
+                    dataset: (get_logits(
                         model, loader,
                         key_token_list=self.key_token_list[dataset] if use_key_token else None,
                         last_tokens=self.last_tokens
-                    ) for dataset, loader in self.train_loaders.items()
+                    ) if dataset in self._logit_datasets else None)
+                    for dataset, loader in self.train_loaders.items()
                 }
 
             del model
@@ -413,8 +426,13 @@ class LlamaEvaluator:
         else:
             raise NotImplementedError(f"metric should be 'ppl', 'loss', or 'gsm8k', not {metric}")
         
+        needs_dense = self.loss_func in ['jsd', 'kld', 'topk', 'forward_kl']
         metric_list = dict()
         for dataset, loader in loaders.items():
+            # divergence loss needs stored teacher logits; datasets outside
+            # logit_dataset have none → they are PPL-only, skip them here.
+            if metric == 'loss' and needs_dense and self.dense_logits.get(dataset) is None:
+                continue
             result = eval_metric(
                 model=self.sample(arch) if model is None else model, 
                 accelerator=accelerator,
@@ -425,7 +443,7 @@ class LlamaEvaluator:
                 stride=stride,
                 last_tokens=self.last_tokens,
                 prefill_prompt=prefill_prompt,
-                dense_logits_list=self.dense_logits[dataset] if (self.loss_func in ['jsd', 'kld', 'topk', 'forward_kl']) else None,
+                dense_logits_list=self.dense_logits[dataset] if needs_dense else None,
                 key_token_list=self.key_token_list[dataset] if self.use_key_token else None, 
                 tokenizer=self.tokenizer,
                 num_fewshot=self.num_fewshot, 

@@ -1088,11 +1088,19 @@ def configure_model_cache(args, model, *, use_cache):
     model.config.use_cache = use_cache
 
 
-def evaluate_metric(args, arch, model, evaluator, accelerator):
-    """Run the calibration-set metric (loss/JSD/ppl) for one architecture."""
+def evaluate_metric(args, arch, model, evaluator, accelerator,
+                    metric=None, loss_func=None):
+    """Run one calibration-set metric (loss/JSD/ppl) for one architecture.
+
+    metric/loss_func default to args.metric/args.loss_func; pass them explicitly
+    to measure a specific metric when args.metric is a LIST (post_search accepts
+    e.g. --metric loss ppl). Callers that keep args.metric a plain string
+    (sample_surrogate / surrogate_pipeline) are unaffected."""
+    metric = args.metric if metric is None else metric
+    loss_func = args.loss_func if loss_func is None else loss_func
     use_cache = args.stride is not None or args.prefill_prompt
     configure_model_cache(args, model, use_cache=use_cache)
-    return evaluator.eval(arch=arch, metric=args.metric, model=model,
-                          accelerator=accelerator, loss_func=args.loss_func,
+    return evaluator.eval(arch=arch, metric=metric, model=model,
+                          accelerator=accelerator, loss_func=loss_func,
                           stride=args.stride,
                           prefill_prompt=args.prefill_prompt)[0]

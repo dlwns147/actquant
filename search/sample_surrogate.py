@@ -10,7 +10,10 @@ downstream benchmarks live in post_search.py.
 
 results.csv row layout (see post_search.load_sample_csv / analysis/v5):
     rows 0..n_comp-1   complexity (get_net_info keys)
-    rows n_comp..       measured metric, one row per --datasets entry
+    next M*D rows      measured metrics, metric-major: for each --metric entry
+                       (M of them) one row per --datasets entry (D of them).
+                       Row n_comp = first --metric on first --datasets = the
+                       surrogate objective post_search trains on.
     next row            combined predicted metric (pf column 0, args scales)
     next n_axes rows    per-axis search metric, order == expr_keys
 """
@@ -181,8 +184,15 @@ def main(args):
 
     comp_save_list = [list() for _ in comp_key_order(ctx.config, ctx.group_size)]
     pf_metric_idx = [0] + [1 + 2 * i for i in range(len(expr_keys))]
-    metric_save_list = [list() for _ in
-                        range(len(args.datasets) + len(pf_metric_idx))]
+    n_ds = len(args.datasets)
+    # results.csv stores EVERY --metric entry, metric-major: metric_0 over all
+    # datasets, then metric_1, ... (so len(args.metric) * n_ds measured rows),
+    # then the combined + per-axis rows. The first metric's first dataset stays
+    # at row n_comp, so post_search.load_sample_csv reads it as the surrogate
+    # objective unchanged (extra metric rows are absorbed into its auto-detected
+    # row count).
+    n_metric_rows = len(args.metric) * n_ds
+    metric_save_list = [list() for _ in range(n_metric_rows + len(pf_metric_idx))]
 
     for idx in tqdm(I):
         arch = ps[idx]
@@ -195,18 +205,24 @@ def main(args):
 
         if not args.datasets:
             continue
-        metric = evaluate_metric(args, arch, model, evaluator, ctx.accelerator)
-        print(f'[{idx}] {args.metric}: {[p for p in metric.values()]}, '
-              f'metric: {[pf[idx, 0]]}, '
+        # measure every --metric entry; collect all for the print + CSV rows
+        printed = []
+        for m_j, m_name in enumerate(args.metric):
+            res = evaluate_metric(args, arch, model, evaluator, ctx.accelerator,
+                                  metric=m_name, loss_func=args.loss_func)
+            vals = list(res.values())
+            printed.append(f'{m_name}={vals}')
+            if args.save and args.results_csv_file:
+                for d_i, v in enumerate(vals):
+                    metric_save_list[m_j * n_ds + d_i].append(v)
+        print(f'[{idx}] ' + ', '.join(printed) + f', metric: {[pf[idx, 0]]}, '
               f'prev_metric: {pf[idx, pf_metric_idx[1:]].tolist()}')
 
         if args.save and args.results_csv_file:
             for c_i, c in enumerate(complexity.values()):
                 comp_save_list[c_i].append(c)
-            for m_i, m in enumerate(metric.values()):
-                metric_save_list[m_i].append(m)
             for m_i, col in enumerate(pf_metric_idx):
-                metric_save_list[m_i + len(args.datasets)].append(pf[idx, col])
+                metric_save_list[n_metric_rows + m_i].append(pf[idx, col])
             os.makedirs(args.save, exist_ok=True)
             with open(os.path.join(args.save, args.results_csv_file), 'w') as f:
                 writer = csv.writer(f)
@@ -253,7 +269,11 @@ def build_parser():
     p.add_argument('--outlier_path', type=str, default='')
     # calibration data / metric
     p.add_argument('--datasets', type=str, nargs='+', default=[])
-    p.add_argument('--metric', type=str, default='ppl')
+    p.add_argument('--metric', type=str, nargs='+', default=['ppl'],
+                   help="calibration metric(s); matches post_search's list form. "
+                        "ALL entries are measured and written to results.csv "
+                        "(metric-major); the FIRST is the surrogate objective "
+                        "post_search reads.")
     p.add_argument('--loss_func', type=str, default='cross_entropy')
     p.add_argument('--stride', type=int, default=None)
     p.add_argument('--last_tokens', type=int, default=None)
