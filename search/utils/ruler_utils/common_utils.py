@@ -46,7 +46,8 @@ def postprocess_pred(prediction: list[str]) -> list[str]:
 def string_match_all(preds: list[str], refs: list[list[str]]) -> float:
     score = sum(
         [
-            sum([1.0 if r.lower() in pred.lower() else 0.0 for r in ref]) / len(ref)
+            (sum([1.0 if r.lower() in pred.lower() else 0.0 for r in ref]) / len(ref)
+             if ref else 0.0)                       # guard empty ref -> no div-by-zero
             for pred, ref in zip(preds, refs)
         ]
     ) / len(preds)
@@ -61,7 +62,8 @@ def string_match_part(preds: list[str], refs: list[list[str]]) -> float:
     # fraction of aliases matched rather than "any alias matched".
     score = sum(
         [
-            max([1.0 if r.lower() in pred.lower() else 0.0 for r in ref])
+            (max([1.0 if r.lower() in pred.lower() else 0.0 for r in ref])
+             if ref else 0.0)                       # guard empty ref -> no max([]) ValueError
             for pred, ref in zip(preds, refs)
         ]
     ) / len(preds)
