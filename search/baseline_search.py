@@ -32,6 +32,7 @@ from utils.ga import IntMutation
 from utils.func import get_net_info, get_correlation, set_seed, init_accelerator
 from utils.select import maximin_extras, even_select, moo_subset_select, subset_select
 from utils.second_stage import save_viz
+from utils.metric_specs import protocol_dict
 
 
 class BaselineJointSearch(Search):
@@ -226,7 +227,8 @@ class BaselineJointSearch(Search):
                                    'surrogate': {'model': self.predictor, 'name': self.predictor,
                                                  'winner': self.predictor, 'rmse': rmse, 'rho': rho,
                                                  'tau': tau, 'total_time': iter_time},
-                                   'coverage': cov, 'iteration': it}, f)
+                                   'coverage': cov, 'protocol': protocol_dict(self.args),
+                                   'iteration': it}, f)
                     if self.debug:
                         save_viz(self.save_path, it, archive, c_metric, c_pred, c_comp, cov,
                                  self.comp_obj, self.comp_obj_min, self.comp_obj_max)

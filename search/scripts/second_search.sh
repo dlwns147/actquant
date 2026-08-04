@@ -101,13 +101,9 @@ CAND_TAG=subset                                                 # down-select = 
 [ "${COMPANION_KV}" -gt 0 ] && CAND_TAG+="-ckv${COMPANION_KV}${COMPANION_METHOD:0:3}"  # +companion KV sweep
 SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}  # e.g. rbfplstyp
 
-# 측정 프로토콜 → utils/metric_specs.py의 이름(stderr) + 짧은 태그(stdout).
-# _mX = 일치하는 이름 없음 = 다른 스크립트 아카이브와 비교 가능한지 보장 못 함.
-MTAG=$(python -m utils.metric_specs --verbose \
-    --dataset ${DATASET} --n_sample ${N_SAMPLE} --seqlen ${SEQLEN} \
-    --min_seqlen ${MIN_SEQLEN:-0} --loss_func ${LOSS_FUNC} --metric ${METRIC:-loss} \
-    --stride ${STRIDE} --last_tokens ${LAST_TOKENS:-0} \
-    --prefill_prompt ${PREFILL_PROMPT:-False})
+source "$(dirname "${BASH_SOURCE[0]}")/metric_tag.sh"
+MTAG=$(metric_tag_from_knobs "${DATASET:-${DATASETS}}" "${LOSS_FUNC}" "${METRIC:-loss}" \
+                             "${N_SAMPLE}" "${SEQLEN}" "${MIN_SEQLEN:-0}")
 
 SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}${MTAG}_s${SEED}
 

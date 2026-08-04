@@ -24,6 +24,7 @@ from pymoo.core.evaluator import Evaluator
 from search_space.llama import LlamaSearchSpace
 from predictor.factory import get_predictor
 from utils.func import get_net_info, init_accelerator, set_seed, get_correlation, process_dtype
+from utils.metric_specs import protocol_dict
 from utils.ga import MySampling, BinaryCrossover, MyMutation, IntPolynomialMutation, MyTwoPointCrossover, MyUniformCrossover, IntegerFromFloatMutation, IntMutation
 from lm_eval.tasks import TaskManager, get_task_dict
 
@@ -301,15 +302,18 @@ class Search:
                                       f"full=[{c['full_min']:.3f}, {c['full_max']:.3f}]")
                 accelerator.print(f'iteration time : {iter_time:.2f}s')
 
-                # dump the statistics
-                if it % self.save_iter == 0:
+                # dump the statistics (also always on the FINAL iter, else a run
+                # whose last iteration isn't a save_iter multiple silently loses
+                # its newest archive — mirrors baseline_search/second_search)
+                if it % self.save_iter == 0 or it == self.iterations:
                     os.makedirs(self.save_path, exist_ok=True)
                     with open(os.path.join(self.save_path, "iter_{}.stats".format(it)), "w") as handle:
                         json.dump({'archive': archive, 'candidates': archive[-self.n_iter:], 'hv': hv,
                                 'surrogate': {
                                     'model': self.predictor, 'name': metric_predictor.name,
                                     'winner': metric_predictor.winner if self.predictor == 'as' else metric_predictor.name,
-                                    'rmse': rmse, 'rho': rho, 'tau': tau, 'total_time': iter_time}, 'coverage': coverage, 'iteration' : it}, handle)
+                                    'rmse': rmse, 'rho': rho, 'tau': tau, 'total_time': iter_time}, 'coverage': coverage,
+                                'protocol': protocol_dict(self.args), 'iteration' : it}, handle)
                     if self.debug:
                         import matplotlib.pyplot as plt
                         n_obj = len(self.comp_obj)
@@ -357,6 +361,12 @@ class Search:
                 sentences.append(f"{k}: {v}\n")
             sentences.append(f'Total time: {total_time_elapsed:.2f}s')
 
+            # save_path is otherwise created only inside the `it % save_iter == 0`
+            # branch, so a run that never hits it (iterations < save_iter, or the
+            # DOE-only iterations<1 mode) used to die HERE with FileNotFoundError
+            # after all the compute. baseline_search/second_search already guard
+            # their final write the same way.
+            os.makedirs(self.save_path, exist_ok=True)
             with open(os.path.join(self.save_path, self.result_file), 'w') as f:
                 for sentence in sentences:
                     f.write(sentence)

@@ -114,16 +114,14 @@ COVERAGE_PARETO_SELECT=knee
 SINK_TAG=""
 [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
 
-# 측정 프로토콜 → utils/metric_specs.py의 이름(stderr) + 짧은 태그(stdout).
-# _mX = 일치하는 이름 없음 = 이 results.csv가 search/post_search 아카이브와
-# 같은 뜻인지 보장 못 함 (surrogate 학습 데이터라 특히 중요).
-MTAG=$(python -m utils.metric_specs --verbose \
-    --dataset ${DATASETS} --n_sample ${N_SAMPLE} --seqlen ${SEQLEN} \
-    --min_seqlen ${MIN_SEQLEN:-0} --loss_func ${LOSS_FUNC} --metric ${METRIC:-loss} \
-    --stride ${STRIDE} --last_tokens ${LAST_TOKENS:-0} \
-    --prefill_prompt ${PREFILL_PROMPT:-False})
+source "$(dirname "${BASH_SOURCE[0]}")/metric_tag.sh"
+MTAG=$(metric_tag_from_knobs "${DATASET:-${DATASETS}}" "${LOSS_FUNC}" "${METRIC:-loss}" \
+                             "${N_SAMPLE}" "${SEQLEN}" "${MIN_SEQLEN:-0}")
 
-SAVE=save/result/sample/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample_${SEED}seed${SINK_TAG}${MTAG}
+# stride/답변창은 search.sh와 같은 _st<STRIDE>_pp<LAST_TOKENS> 관례로. 지금까지
+# 이 두 값이 dir 이름에 없어서 stride만 바꾼 샘플링 런이 구분되지 않았다.
+PP_TAG=""; [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
+SAVE=save/result/sample/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample_${SEED}seed${SINK_TAG}_st${STRIDE}${PP_TAG}${MTAG}
 [ -n "${W_EXPR}" ]      && SAVE+="_w_expr"
 [ -n "${KV_EXPR}" ]     && SAVE+="_kv_expr"
 [ -n "${KVDIM_EXPR}" ]  && SAVE+="_kvdim_expr"
