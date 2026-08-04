@@ -12,6 +12,12 @@ from quant.model import get_quantized_model
 # from monkeypatch.ftllama_modeling import convert_model_to_ft
 # from monkeypatch.ftllama_generate import replace_generate_functions
 
+# "argument not supplied" sentinel for eval(last_tokens=...): None is a
+# MEANINGFUL value there (= score the whole sequence), so it cannot double as
+# the default for "use the evaluator's own window".
+_INHERIT = object()
+
+
 class LlamaEvaluator:
     def __init__(self,  
                  config,
@@ -23,6 +29,25 @@ class LlamaEvaluator:
                  outlier=None,
                  datasets=['wikitext2'],
                  logit_dataset=None,
+                 # ── per-metric data protocol (None = inherit the shared knob) ──
+                 # 'loss' (JSD/KLD/CE) reads train_loaders, 'ppl' reads
+                 # test_loaders (see eval()), so each side can use a DIFFERENT
+                 # dataset / seqlen / n_sample / min_seqlen. Leave all None for
+                 # the legacy behaviour (both sides built identically from
+                 # datasets/seqlen/min_seqlen/n_sample).
+                 loss_datasets=None,
+                 loss_seqlen=None,
+                 loss_min_seqlen=None,
+                 loss_n_sample=None,
+                 loss_data_batch_size=None,
+                 ppl_datasets=None,
+                 ppl_seqlen=None,
+                 ppl_min_seqlen=None,
+                 ppl_n_sample=None,
+                 ppl_data_batch_size=None,
+                 # 'cpu' = park the FP-teacher logits off-GPU (see below).
+                 # None = keep them on the GPU (default, unchanged).
+                 dense_logits_device=None,
                  data_batch_size=1,
                  seed=0,
                  seqlen=2048,
@@ -81,13 +106,34 @@ class LlamaEvaluator:
         # upstream in ONE FP-teacher pass and reused across metric groups — see
         # correlation.py). Injecting the SAME loader objects the dense_logits
         # were computed over guarantees index alignment in eval_loss.
+        # resolve the two data protocols (None = inherit the shared knob)
+        def _side(ds, sl, ms, ns, bs):
+            return dict(datasets=list(ds) if ds else list(datasets),
+                        seqlen=seqlen if sl is None else int(sl),
+                        min_seqlen=min_seqlen if ms is None else int(ms),
+                        n_sample=n_sample if ns is None else int(ns),
+                        batch_size=data_batch_size if bs is None else int(bs))
+        loss_proto = _side(loss_datasets, loss_seqlen, loss_min_seqlen,
+                           loss_n_sample, loss_data_batch_size)
+        ppl_proto = _side(ppl_datasets, ppl_seqlen, ppl_min_seqlen,
+                          ppl_n_sample, ppl_data_batch_size)
+        self.loss_proto, self.ppl_proto = loss_proto, ppl_proto
+        # seqlen forwarded to eval_metric per side (eval_ppl/eval_loss keep it
+        # for compatibility only — both normalise by the ACTUAL scored-token
+        # count — but the right value keeps logs//debug honest).
+        self.loss_seqlen, self.ppl_seqlen = loss_proto['seqlen'], ppl_proto['seqlen']
         if precomputed_train_loaders is not None:
             self.train_loaders = precomputed_train_loaders
             self.test_loaders = (precomputed_test_loaders
                                  if precomputed_test_loaders is not None else {})
         else:
-            self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=True, seed=seed, seqlen=seqlen, min_seqlen=min_seqlen)) for dataset in datasets}
-            self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=n_sample, batch_size=data_batch_size, train=False, seed=seed, seqlen=seqlen, min_seqlen=min_seqlen)) for dataset in datasets}
+            self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=loss_proto['n_sample'], batch_size=loss_proto['batch_size'], train=True, seed=seed, seqlen=loss_proto['seqlen'], min_seqlen=loss_proto['min_seqlen'])) for dataset in loss_proto['datasets']}
+            self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=ppl_proto['n_sample'], batch_size=ppl_proto['batch_size'], train=False, seed=seed, seqlen=ppl_proto['seqlen'], min_seqlen=ppl_proto['min_seqlen'])) for dataset in ppl_proto['datasets']}
+            if loss_proto != ppl_proto:
+                accelerator.print(
+                    f"[evaluator] split data protocol — "
+                    f"loss(train_loaders): {loss_proto} | "
+                    f"ppl(test_loaders): {ppl_proto}")
 
         self.loss_func = loss_func
         # logit_dataset = subset of datasets for which the FP-teacher logits are
@@ -95,9 +141,18 @@ class LlamaEvaluator:
         # (legacy behaviour). Lets PPL span every --datasets entry while the costly
         # dense_logits (vocab-wide, GPU-resident) are kept for only a subset — e.g.
         # PPL on wikitext2+c4 but JSD on wikitext2 only, so c4's teacher logits are
-        # never materialised.
+        # never materialised. With a split protocol it is a subset of the LOSS
+        # side (train_loaders) — naming a dataset that has no train loader used
+        # to silently produce ZERO JSD (all dense_logits None → eval() skips
+        # every dataset), so that case is now a hard error.
         self._logit_datasets = (set(self.train_loaders) if logit_dataset is None
                                 else set(logit_dataset))
+        if logit_dataset is not None and not (self._logit_datasets & set(self.train_loaders)):
+            raise ValueError(
+                f"logit_dataset={sorted(self._logit_datasets)} has no overlap with the "
+                f"loss-side datasets {sorted(self.train_loaders)} → no teacher logits "
+                f"would be stored and JSD/KLD would silently measure NOTHING. "
+                f"logit_dataset must be a subset of loss_datasets (or --datasets).")
         self.dense_logits = (precomputed_dense_logits if precomputed_dense_logits is not None
                              else {dataset: None for dataset in self.train_loaders.keys()})
         self.key_token_list = (precomputed_key_token_list if precomputed_key_token_list is not None
@@ -168,14 +223,24 @@ class LlamaEvaluator:
                 # only store teacher logits for datasets in logit_dataset; others
                 # stay None (no VRAM, no teacher forward) and are skipped by the
                 # divergence-loss path in eval().
-                self.dense_logits = {
-                    dataset: (get_logits(
+                # dense_logits_device='cpu' parks each masked tensor on the CPU as
+                # it is produced, so a big set (n_sample × last_tokens × vocab,
+                # e.g. 16.8 GB for wikitext2 128×512) never sits on the GPU — not
+                # even transiently during this teacher pass. eval_loss uploads the
+                # one sequence it needs (utils/eval.py::_dense_seq). Default None
+                # keeps everything on the GPU: search.py evaluates thousands of
+                # archs and should not pay an H2D copy per eval.
+                def _dense(dataset, loader):
+                    if dataset not in self._logit_datasets:
+                        return None
+                    return get_logits(
                         model, loader,
                         key_token_list=self.key_token_list[dataset] if use_key_token else None,
-                        last_tokens=self.last_tokens
-                    ) if dataset in self._logit_datasets else None)
-                    for dataset, loader in self.train_loaders.items()
-                }
+                        last_tokens=self.last_tokens,
+                        store_device=dense_logits_device)
+
+                self.dense_logits = {dataset: _dense(dataset, loader)
+                                     for dataset, loader in self.train_loaders.items()}
 
             del model
             clean_up()
@@ -416,17 +481,33 @@ class LlamaEvaluator:
 
         return self.model
 
-    def eval(self, accelerator, arch, metric, model=None, loss_func='cross_entropy', stride=0, prefill_prompt=False):
+    def eval(self, accelerator, arch, metric, model=None, loss_func='cross_entropy', stride=0, prefill_prompt=False,
+             last_tokens=_INHERIT):
+        """`last_tokens` defaults to the evaluator-wide value (which the FP
+        teacher's dense_logits were masked with); pass it explicitly to give
+        ONE metric its own answer window — e.g. full-sequence PPL
+        (last_tokens=None) alongside last-512 JSD."""
         if metric == 'ppl':
-            loaders = self.test_loaders
+            loaders, seqlen = self.test_loaders, self.ppl_seqlen
         elif metric == 'loss':
-            loaders = self.train_loaders
+            loaders, seqlen = self.train_loaders, self.loss_seqlen
         elif 'gsm8k' in metric:
-            loaders = {metric: None}
+            loaders, seqlen = {metric: None}, self.seqlen
         else:
             raise NotImplementedError(f"metric should be 'ppl', 'loss', or 'gsm8k', not {metric}")
-        
+
+        last_tokens = self.last_tokens if last_tokens is _INHERIT else last_tokens
         needs_dense = self.loss_func in ['jsd', 'kld', 'topk', 'forward_kl']
+        # dense_logits were pre-masked to self.last_tokens positions by
+        # get_logits(); eval_loss compares them element-wise against the
+        # student's masked logits, so a different window silently misaligns.
+        if (metric == 'loss' and needs_dense
+                and (last_tokens or None) != (self.last_tokens or None)):
+            raise ValueError(
+                f"loss last_tokens={last_tokens} != evaluator last_tokens={self.last_tokens}: "
+                f"the teacher dense_logits are pre-masked to the evaluator value, so the "
+                f"divergence would be computed against misaligned positions. Set the "
+                f"evaluator's last_tokens (loss side) instead.")
         metric_list = dict()
         for dataset, loader in loaders.items():
             # divergence loss needs stored teacher logits; datasets outside
@@ -437,14 +518,20 @@ class LlamaEvaluator:
                 model=self.sample(arch) if model is None else model, 
                 accelerator=accelerator,
                 metric=metric, 
-                loader=loader, 
-                seqlen=self.seqlen, 
-                loss_func=loss_func, 
+                loader=loader,
+                seqlen=seqlen,
+                loss_func=loss_func,
                 stride=stride,
-                last_tokens=self.last_tokens,
+                last_tokens=last_tokens,
                 prefill_prompt=prefill_prompt,
-                dense_logits_list=self.dense_logits[dataset] if needs_dense else None,
-                key_token_list=self.key_token_list[dataset] if self.use_key_token else None, 
+                # dense_logits / key_token_list are keyed by the LOSS-side
+                # datasets, so a ppl-only dataset has no entry — .get(), and
+                # only for the metric that actually consumes them (eval_ppl
+                # ignores dense_logits_list entirely).
+                dense_logits_list=(self.dense_logits.get(dataset)
+                                   if (needs_dense and metric == 'loss') else None),
+                key_token_list=(self.key_token_list.get(dataset)
+                                if self.use_key_token else None),
                 tokenizer=self.tokenizer,
                 num_fewshot=self.num_fewshot, 
                 limit=self.limit,

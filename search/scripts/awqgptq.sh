@@ -102,6 +102,10 @@ N=1
 DATASETS="gov_report"
 METRIC="ppl"
 LOSS_FUNC="cross_entropy"
+# teacher logits(=JSD/KLD 기준) 보관 위치. cpu = 필요한 시퀀스만 GPU로 올림(기본).
+# 크기 = N_SAMPLE × (LAST_TOKENS 또는 SEQLEN) × vocab × 2B. LOSS_FUNC가 발산 계열
+# (jsd/kld/topk/forward_kl)이 아니면 무관.
+DENSE_LOGITS_DEVICE=cpu
 
 
 # DATASETS="gov_report"
@@ -222,6 +226,7 @@ ARGS="
 --clip_asym \
 --metric ${METRIC} \
 --loss_func ${LOSS_FUNC} \
+--dense_logits_device ${DENSE_LOGITS_DEVICE} \
 --n_sample ${N_SAMPLE} \
 --seqlen ${SEQLEN} \
 --min_seqlen ${MIN_SEQLEN} \

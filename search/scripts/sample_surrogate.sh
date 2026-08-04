@@ -56,7 +56,10 @@ LOSS_FUNC="jsd"
 
 N_SAMPLE=128
 SEQLEN=2048
-MIN_SEQLEN=2048
+# wikitext2/c4 로더는 min_seqlen을 아예 받지 않아 값이 무의미하다(gov_report/gsm8k
+# 전용). search.sh와 같은 0으로 맞춰야 프로토콜 이름이 일치한다(안 그러면 _mX).
+MIN_SEQLEN=0
+# MIN_SEQLEN=2048
 DATA_BATCH_SIZE=1
 
 STRIDE=128
@@ -111,7 +114,16 @@ COVERAGE_PARETO_SELECT=knee
 SINK_TAG=""
 [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
 
-SAVE=save/result/sample/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample_${SEED}seed${SINK_TAG}
+# 측정 프로토콜 → utils/metric_specs.py의 이름(stderr) + 짧은 태그(stdout).
+# _mX = 일치하는 이름 없음 = 이 results.csv가 search/post_search 아카이브와
+# 같은 뜻인지 보장 못 함 (surrogate 학습 데이터라 특히 중요).
+MTAG=$(python -m utils.metric_specs --verbose \
+    --dataset ${DATASETS} --n_sample ${N_SAMPLE} --seqlen ${SEQLEN} \
+    --min_seqlen ${MIN_SEQLEN:-0} --loss_func ${LOSS_FUNC} --metric ${METRIC:-loss} \
+    --stride ${STRIDE} --last_tokens ${LAST_TOKENS:-0} \
+    --prefill_prompt ${PREFILL_PROMPT:-False})
+
+SAVE=save/result/sample/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample_${SEED}seed${SINK_TAG}${MTAG}
 [ -n "${W_EXPR}" ]      && SAVE+="_w_expr"
 [ -n "${KV_EXPR}" ]     && SAVE+="_kv_expr"
 [ -n "${KVDIM_EXPR}" ]  && SAVE+="_kvdim_expr"

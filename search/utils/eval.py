@@ -201,8 +201,54 @@ def eval_ppl(model, accelerator, loader, seqlen=2048, stride=0,
 
     return ppl.item()
 
+def _dense_seq(dense_logits_list, batch_idx, seq_idx, ref):
+    """One sequence of FP-teacher logits, on `ref`'s device.
+
+    The teacher logits may be parked on CPU (get_logits(store_device='cpu'), used
+    by post_search to keep n_sample*last_tokens*vocab off the GPU) — upload just
+    this sequence. A no-op when they already sit next to the student logits, so
+    the GPU-resident path (search.py) is unchanged.
+    """
+    t = dense_logits_list[batch_idx][seq_idx].contiguous()
+    return t if t.device == ref.device else t.to(ref.device, non_blocking=True)
+
+
+class LazyGpuList:
+    """List-of-lists of teacher logits held on CPU; `[batch][seq]` uploads that
+    ONE tensor to `device`. Drop-in for `evaluator.dense_logits[dataset]`.
+
+    Used by correlation.py, which converts already-GPU dense_logits to CPU after
+    the fact (`_move_all_dense_logits_to_cpu`). NEW code does not need it: pass
+    `get_logits(store_device='cpu')` and eval_loss uploads per sequence itself
+    (`_dense_seq`), which also avoids guessing the target device on a sharded
+    model.
+    """
+
+    class _Batch:
+        def __init__(self, seqs, device):
+            self._seqs, self._device = seqs, device
+
+        def __getitem__(self, j):
+            t = self._seqs[j]
+            return t.to(self._device, non_blocking=True) if t.device.type == 'cpu' else t
+
+        def __len__(self):
+            return len(self._seqs)
+
+    def __init__(self, batches, device=None):
+        self._batches = batches
+        self._device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+
+    def __getitem__(self, i):
+        return LazyGpuList._Batch(self._batches[i], self._device)
+
+    def __len__(self):
+        return len(self._batches)
+
+
 @torch.no_grad()
-def get_logits(model, loader, key_token_list=None, last_tokens=None, ignore_index=-100):
+def get_logits(model, loader, key_token_list=None, last_tokens=None, ignore_index=-100,
+               store_device=None):
     """
     Get model logits for each batch, storing only positions that participate in loss
     (masked by get_loss_mask) to reduce memory.
@@ -213,6 +259,10 @@ def get_logits(model, loader, key_token_list=None, last_tokens=None, ignore_inde
         key_token_list: Optional list of key token indices per batch/seq (same format as in eval_loss).
         last_tokens: Optional int; only last N positions per sequence are kept.
         ignore_index: Label value to ignore.
+        store_device: Optional device to park each masked tensor on as it is
+            produced (e.g. 'cpu'). Streaming the move keeps the whole set from
+            piling up on the GPU during the teacher pass; wrap the result in
+            LazyGpuList to read it back lazily.
 
     Returns:
         dense_logits_list: List of batches. Each batch is a list of tensors of shape
@@ -235,7 +285,8 @@ def get_logits(model, loader, key_token_list=None, last_tokens=None, ignore_inde
                 continue
             mask = get_loss_mask(seq_shift_labels, key_tokens=key_tokens, last_tokens=last_tokens, ignore_index=ignore_index, device=lm_logits.device)
             logits_s = lm_logits[seq_idx][mask]
-            batch_masked.append(logits_s)
+            # park it off-GPU right away when asked (see store_device)
+            batch_masked.append(logits_s.to(store_device) if store_device else logits_s)
         del lm_logits
         clean_up()
 
@@ -383,14 +434,16 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
             
             elif loss_func == 'jsd':
                 # Dense logits for this sequence are already masked (same mask as seq_shift_logits)
-                dense_logits_seq = dense_logits_list[batch_idx][seq_idx].contiguous()
+                dense_logits_seq = _dense_seq(dense_logits_list, batch_idx,
+                                              seq_idx, seq_shift_logits)
                 # Compute JSD on selected tokens
                 loss_fct = JSD()
                 loss = loss_fct(seq_shift_logits[mask], dense_logits_seq)
 
             elif loss_func == 'forward_kl':
                 # directional KL(FP16 teacher ‖ candidate); same dense-logits path as jsd
-                dense_logits_seq = dense_logits_list[batch_idx][seq_idx].contiguous()
+                dense_logits_seq = _dense_seq(dense_logits_list, batch_idx,
+                                              seq_idx, seq_shift_logits)
                 loss_fct = ForwardKL()
                 loss = loss_fct(seq_shift_logits[mask], dense_logits_seq)
 
