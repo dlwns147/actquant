@@ -27,10 +27,12 @@ from evaluator import LlamaEvaluator
 from predictor.factory import get_predictor
 from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
                         evaluate_metric, configure_model_cache, get_net_info,
-                        clean_up, _LazyComp)
+                        clean_up, metric_protocol, _LazyComp)
 from utils.select import (LazyPs, build_arch, assemble_F, select_valid_nd_idx,
                           per_axis_metric)
 from utils.eval import eval_zeroshot
+from utils.metric_specs import (METRIC_KEYS, resolve_tasks, groups_for,
+                                precompute_groups, apply_group, run_task)
 from utils.longbench import pred_longbench, eval_longbench_preds
 from utils.data import get_tokenizer
 from utils.ruler import eval_ruler
@@ -375,6 +377,30 @@ def select_joint(args, ctx):
     return ps, I, pf, sel_mode
 
 
+def _has_data(args):
+    """Any calibration data configured? Each metric names its own datasets."""
+    return bool(args.metric_tasks or args.loss_datasets or args.ppl_datasets)
+
+
+def check_metric_data(args):
+    """Every requested --metric needs its side's datasets — there is no shared
+    --datasets to fall back on, and an empty side would otherwise measure
+    nothing at all (empty loader dict ⇒ empty result dict, no error)."""
+    if args.metric_tasks:
+        resolve_tasks(args.metric_tasks)          # validate names, fail early
+        print(f"[post_search] --metric_tasks {args.metric_tasks} → the --metric / "
+              f"--loss_*/--ppl_* knobs are ignored for measurement")
+        return
+    for m in args.metric:
+        side = 'ppl' if m == 'ppl' else 'loss'
+        if not getattr(args, f'{side}_datasets'):
+            raise SystemExit(
+                f"--metric {m} needs --{side}_datasets (e.g. --{side}_datasets "
+                f"wikitext2). The loss and ppl sides are configured separately: "
+                f"--{side}_datasets/_seqlen/_min_seqlen/_n_sample/_data_batch_size"
+                f"/_stride/_prefill_prompt/_last_tokens.")
+
+
 def run_final(args, ctx, ps, I, pf, K):
     """Shared backend: build the evaluator, optionally top-k verify, then
     evaluate + benchmark the selected archs. `ps[idx]` yields an arch dict,
@@ -383,22 +409,59 @@ def run_final(args, ctx, ps, I, pf, K):
     model_id = f'{args.model_path}/{args.model_name}'
     if 'hqq' not in args.w_method:
         args.quant_model_paths = []
+    # ── named metric tasks (--metric_tasks): resolve → groups → ONE FP-teacher
+    # pass covering every group (dense_logits are arch-independent, so it also
+    # serves every arch below). The teacher is freed before the quant model is
+    # built. The first group's data is injected into the evaluator so its
+    # __init__ skips both the loader build and a second teacher pass.
+    tasks = resolve_tasks(args.metric_tasks) if args.metric_tasks else []
+    for key, _g, ds, kw in tasks:
+        if kw.get('kind') or ds is None:
+            raise SystemExit(
+                f"--metric_tasks '{key}' needs a custom loader (kind="
+                f"{kw.get('kind')!r}) that only correlation.py provides. "
+                f"Drop it here and measure it with correlation.py --mode eval.")
+    group_items = groups_for(tasks, key_token_path=args.key_token_path) if tasks else []
+    store_device = None if args.dense_logits_device == 'gpu' else 'cpu'
+    precomp = (precompute_groups(ctx.accelerator, model_id, group_items,
+                                 seed=args.seed, dtype=ctx.dtype,
+                                 device_map=ctx.device_map,
+                                 store_device=store_device, tasks=tasks)
+               if group_items else {})
+    inj = precomp[group_items[0][0]] if group_items else {}
+
+    # The evaluator-wide last_tokens masks the FP-teacher dense_logits ⇒ it is a
+    # LOSS-side quantity (--loss_last_tokens); the ppl side gets its own window
+    # per-call via metric_protocol.
+    loss_last_tokens = metric_protocol(args, 'loss')[2]
     evaluator = LlamaEvaluator(
         ctx.config, accelerator=ctx.accelerator, model_id=model_id,
         method={'w': args.w_method, 'kv': args.kv_method},
         quant_model_paths=args.quant_model_paths,
         outlier=torch.load(args.outlier_path) if args.outlier_path else None,
-        seqlen=args.seqlen, min_seqlen=args.min_seqlen, n_sample=args.n_sample,
-        datasets=args.datasets, logit_dataset=args.logit_dataset,
+        logit_dataset=args.logit_dataset,
+        # loss side = the evaluator's base protocol (self.seqlen etc.), ppl side
+        # overrides the test_loaders; see LlamaEvaluator.__init__.
+        datasets=args.loss_datasets, seqlen=args.loss_seqlen,
+        min_seqlen=args.loss_min_seqlen, n_sample=args.loss_n_sample,
+        data_batch_size=args.loss_data_batch_size,
+        ppl_datasets=args.ppl_datasets, ppl_seqlen=args.ppl_seqlen,
+        ppl_min_seqlen=args.ppl_min_seqlen, ppl_n_sample=args.ppl_n_sample,
+        ppl_data_batch_size=args.ppl_data_batch_size,
+        dense_logits_device=(None if args.dense_logits_device == 'gpu' else 'cpu'),
         device_map=ctx.device_map, dtype=ctx.dtype,
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
         group_size=ctx.group_size, residual_length=args.residual_length,
         attn_sink=args.attn_sink,
         k_quant_scheme=args.k_quant_scheme, v_quant_scheme=args.v_quant_scheme,
-        loss_func=args.loss_func, last_tokens=args.last_tokens,
+        loss_func=args.loss_func, last_tokens=loss_last_tokens,
         use_key_token=args.use_key_token, trunc_len=args.trunc_len,
         sliding_window=args.sliding_window, alpha=args.alpha, beta=args.beta,
-        key_token_path=args.key_token_path)
+        key_token_path=args.key_token_path,
+        precomputed_train_loaders=inj.get('train_loaders'),
+        precomputed_test_loaders=inj.get('test_loaders'),
+        precomputed_dense_logits=inj.get('dense_logits'),
+        precomputed_key_token_list=inj.get('key_token_list'))
 
     # ── top-k verify (racing-lite): cheaply MEASURE the predicted top-k JSD
     # (k = --verify_topk), then benchmark only the measured-best `-n`. Within a
@@ -407,17 +470,29 @@ def run_final(args, ctx, ps, I, pf, K):
     # measured-best of the predicted top-5 recovers it 96-100% with worst-band
     # regret ≈ 0 (band-val-1000 study). Costs (k − n) extra metric evals.
     if args.select_measured_best and len(I) > 1:
-        if not args.datasets:
+        if not _has_data(args):
             raise SystemExit('--select_measured_best needs --datasets '
-                             '(the verification metric).')
+                             '(or --loss_datasets/--ppl_datasets/--metric_tasks) '
+                             '— the verification metric.')
+        # With named tasks the FIRST task is the verify objective: point the
+        # evaluator at its group first, otherwise the anonymous --loss_* protocol
+        # would be run against another group's pre-masked teacher logits.
+        if tasks:
+            v_key, v_group, v_ds, v_kw = tasks[0]
+            apply_group(evaluator, precomp[v_group])
+            print(f'[verify] objective = {v_key} (first --metric_tasks entry)')
         measured = {}
         for idx in tqdm(I, desc=f'verify top-{len(I)}'):
             arch = ps[idx]
             model = evaluator.sample(arch)
-            # rank by the FIRST --metric (the surrogate objective)
-            metric = evaluate_metric(args, arch, model, evaluator,
-                                     ctx.accelerator, metric=args.metric[0],
-                                     loss_func=args.loss_func)
+            if tasks:
+                v = run_task(args, ctx.accelerator, evaluator, v_ds, v_kw)
+                metric = {v_ds: float(v.item() if hasattr(v, 'item') else v)}
+            else:
+                # rank by the FIRST --metric (the surrogate objective)
+                metric = evaluate_metric(args, arch, model, evaluator,
+                                         ctx.accelerator, metric=args.metric[0],
+                                         loss_func=args.loss_func)
             measured[idx] = float(list(metric.values())[0])
             print(f'[verify] idx={idx} measured={measured[idx]:.6f} '
                   f'pred={pf[idx, 0]:.6f}')
@@ -438,24 +513,53 @@ def run_final(args, ctx, ps, I, pf, K):
     metric_rows = [('idx', 'metric', 'dataset', 'value')]
     for idx in tqdm(I):
         arch = ps[idx]
+        # attn_sink is part of the KV memory accounting, so it must be passed
+        # here too — select_joint() filters the budget box WITH it, and printing
+        # a sink-less number next to a sink-aware selection is just misleading.
         complexity = get_net_info(arch, ctx.config, ctx.group_size,
-                                  n_token=args.n_token)
+                                  n_token=args.n_token, attn_sink=args.attn_sink)
         print(f'complexity: {list(complexity.keys())}')
         print(f'complexity: {list(complexity.values())}')
         ctx.accelerator.print(f'arch: {arch}')
         model = evaluator.sample(arch)
 
-        if args.datasets:
-            # measure + OUTPUT every --metric entry (loss uses --loss_func + the
-            # logit_dataset subset; ppl uses the test split, all datasets).
+        if tasks:
+            # ── named metric tasks (utils/metric_specs.py, shared with
+            # correlation.py) ── each task carries its own group (data side) and
+            # forward protocol, so one arch is measured on several protocols in a
+            # row. Groups are walked in order and only the evaluator's DATA side is
+            # swapped per group (apply_group) — the quantized model is built ONCE.
+            for g, spec in group_items:
+                apply_group(evaluator, precomp[g])
+                for key, tg, ds, kw in tasks:
+                    if tg != g:
+                        continue
+                    t0 = time()
+                    v = run_task(args, ctx.accelerator, evaluator, ds, kw)
+                    v = float(v.item() if hasattr(v, 'item') else v)
+                    print(f'[{idx}] {key}: {v:.6f}  (group {g}: {ds} '
+                          f'seqlen={spec["seqlen"]} n={spec["n_sample"]} '
+                          f'lt={spec["last_tokens"]} | stride={kw.get("stride") or 0} '
+                          f'prefill={bool(kw.get("prefill_prompt"))}) {time() - t0:.1f}s')
+                    metric_rows.append((idx, key, ds, v))
+
+        elif _has_data(args):
+            # anonymous protocol (--loss_*/--ppl_*): one loss task + one ppl task
+            # spelled out as knobs instead of named. Each metric runs its own data
+            # + forward protocol (see metric_protocol), so this loop can report
+            # long-context JSD and standard-window PPL for the same arch too.
             for m in args.metric:
                 res = evaluate_metric(args, arch, model, evaluator,
                                       ctx.accelerator, metric=m,
                                       loss_func=args.loss_func)
                 label = f'{m}({args.loss_func})' if m == 'loss' else m
-                print(f'[{idx}] {label}: {list(res.values())}')
+                _st, _pp, _lt, _ = metric_protocol(args, m)
+                print(f'[{idx}] {label}: {list(res.values())}  '
+                      f'(stride={_st} prefill={_pp} last_tokens={_lt})')
                 for ds, v in res.items():
                     metric_rows.append((idx, label, ds, float(v)))
+
+        if tasks or _has_data(args):
             metric_rows.append((idx, 'pred_metric', '', float(pf[idx, 0])))
             print(f'[{idx}] pred_metric: {pf[idx, 0]}, per_axis_metric: '
                   f'{pf[idx, [1 + 2 * i for i in range(K)]].tolist()}')
@@ -468,7 +572,7 @@ def run_final(args, ctx, ps, I, pf, K):
             clean_up()
 
     # persist all measured metrics (long format) to --save/--results_csv_file
-    if args.datasets and args.save and args.results_csv_file and len(metric_rows) > 1:
+    if _has_data(args) and args.save and args.results_csv_file and len(metric_rows) > 1:
         os.makedirs(args.save, exist_ok=True)
         out_path = os.path.join(args.save, args.results_csv_file)
         with open(out_path, 'w', newline='') as f:
@@ -482,6 +586,7 @@ def main(args):
     ctx = init_run(args)
     if maybe_generate_testcases(args):
         return
+    check_metric_data(args)
 
     n_comp_obj = len(args.comp_obj)
     assert n_comp_obj == len(args.comp_obj_min) == len(args.comp_obj_max)
@@ -712,28 +817,76 @@ def build_parser():
     p.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'])
     p.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'])
     p.add_argument('--outlier_path', type=str, default='')
-    # calibration data / metric
-    p.add_argument('--datasets', type=str, nargs='+', default=[])
-    p.add_argument('--logit_dataset', type=str, nargs='+', default=None,
-                   help="subset of --datasets that gets FP-teacher logits stored "
-                        "(⇒ the only datasets JSD/KLD loss is measured on). Default "
-                        "None = all --datasets. e.g. --datasets wikitext2 c4 "
-                        "--logit_dataset wikitext2 → PPL on both, JSD on wikitext2 "
-                        "only (c4 teacher logits never stored, saves VRAM).")
+    # ── calibration data / metric ──
+    # There are NO shared --datasets/--seqlen/--stride/… knobs here: the two
+    # metrics measure different things and were forced to share one protocol,
+    # which silently coupled long-context JSD to standard-window PPL. Each side
+    # is configured on its own below.
     p.add_argument('--metric', type=str, nargs='+', default=['ppl'],
                    help="one or more calibration metrics to MEASURE on the final "
                         "arch(s), e.g. --metric loss ppl. The FIRST is the "
                         "selection/verify objective; all are reported. 'loss' "
-                        "pairs with --loss_func (+ --logit_dataset subset), 'ppl' "
-                        "uses the test split over all --datasets.")
+                        "pairs with --loss_func and reads the --loss_* protocol "
+                        "(train split); 'ppl' reads the --ppl_* protocol (test "
+                        "split). Each metric requires its side's --*_datasets.")
     p.add_argument('--loss_func', type=str, default='cross_entropy')
-    p.add_argument('--stride', type=int, default=None)
-    p.add_argument('--last_tokens', type=int, default=None)
-    p.add_argument('--prefill_prompt', action='store_true')
-    p.add_argument('--n_sample', type=int, default=128)
-    p.add_argument('--seqlen', type=int, default=2048)
-    p.add_argument('--min_seqlen', type=int, default=0)
-    p.add_argument('--data_batch_size', type=int, default=1)
+    p.add_argument('--metric_tasks', type=str, nargs='+', default=[],
+                   help="named calibration metrics from utils/metric_specs.py, "
+                        "e.g. --metric_tasks wt2_jsd_pp512_s32 gov_jsd_pp128_s32 "
+                        "c4_ppl. A name fixes BOTH the data protocol (dataset / "
+                        "seqlen / n_sample / answer window) and the forward "
+                        "protocol (stride / prefill), so the number means the same "
+                        "thing here as in correlation.py. Tasks sharing a group "
+                        "share one FP-teacher pass. Takes precedence over --metric "
+                        "+ the --loss_*/--ppl_* knobs. Valid names: "
+                        + ', '.join(METRIC_KEYS))
+    p.add_argument('--dense_logits_device', type=str, default='cpu',
+                   choices=['cpu', 'gpu'],
+                   help="where the FP-teacher logits (JSD/KLD reference) live. "
+                        "'cpu' (default here) streams them off-GPU and uploads "
+                        "one sequence at a time — post_search evaluates a handful "
+                        "of archs, so the H2D copy is noise next to the forward "
+                        "pass, and it frees n_sample*last_tokens*vocab of VRAM "
+                        "(16.8 GB for wikitext2 128x512) next to the quant model. "
+                        "'gpu' keeps the old behaviour.")
+    p.add_argument('--logit_dataset', type=str, nargs='+', default=None,
+                   help="subset of --loss_datasets that gets FP-teacher logits "
+                        "stored (⇒ the only datasets JSD/KLD is measured on). "
+                        "Default None = all --loss_datasets. Use it to keep the "
+                        "costly vocab-wide dense_logits for one dataset while the "
+                        "loss side still loads several.")
+    # ── per-metric protocol (loss = train split / JSD, ppl = test split) ──
+    # 'loss' reads train_loaders and 'ppl' reads test_loaders, so each carries its
+    # OWN data protocol (datasets / seqlen / min_seqlen / n_sample / batch) and
+    # forward protocol (stride / prefill_prompt / last_tokens). That is what lets
+    # one run report gov_report long-context JSD (8196 tok, answer window 512)
+    # AND standard wikitext2/c4 PPL (2048 tok, full window) for the same arch.
+    for _side, _what in (('loss', 'loss/JSD — train split'),
+                         ('ppl', 'PPL — test split')):
+        g = p.add_argument_group(f'{_side}-side protocol — {_what}')
+        g.add_argument(f'--{_side}_datasets', type=str, nargs='+', default=[],
+                       help=f'datasets to measure {_side} on (required to measure it)')
+        g.add_argument(f'--{_side}_seqlen', type=int, default=2048,
+                       help='token window each sample is cut to')
+        g.add_argument(f'--{_side}_min_seqlen', type=int, default=0,
+                       help='drop samples shorter than this (gov_report/gsm8k only; '
+                            'wikitext2/c4 loaders ignore it)')
+        g.add_argument(f'--{_side}_n_sample', type=int, default=128,
+                       help='#samples (train split / gov_report; the wikitext2 and '
+                            'c4 TEST splits use everything they have)')
+        g.add_argument(f'--{_side}_data_batch_size', type=int, default=1)
+        g.add_argument(f'--{_side}_stride', type=int, default=0,
+                       help='forward stride; 0 = single pass (no chunking)')
+        g.add_argument(f'--{_side}_prefill_prompt',
+                       action=argparse.BooleanOptionalAction, default=False,
+                       help='prefill the prompt, then push the answer window in '
+                            'stride-sized chunks (real-decode KV evolution)')
+        g.add_argument(f'--{_side}_last_tokens', type=int, default=0,
+                       help='answer window; 0 = score the whole sequence'
+                            + (' — this ALSO masks the FP-teacher dense_logits'
+                               if _side == 'loss' else
+                               ' (free to differ from the loss window: PPL uses '
+                               'no teacher logits)'))
     p.add_argument('--n_token', type=int, default=0)
     # expr archives + additive-metric scales (fallback when no sample CSV)
     p.add_argument('--w_expr', type=str, default='')

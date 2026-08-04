@@ -109,23 +109,66 @@ N=1
 SELECT_MEASURED_BEST=False   # second_expr: loss already measured → no re-screen
 VERIFY_TOPK=5
 
-DATASETS="wikitext2 c4"
-LOGIT_DATASET="wikitext2"
-# METRIC는 공백구분 리스트로 여러 지표를 최종 arch에서 잰다(첫 항목=선택/verify 기준).
-# 'loss'는 --loss_func + LOGIT_DATASET subset(=wikitext2)만, 'ppl'은 test split(전 DATASETS).
-# → loss(jsd): wikitext2만, ppl: wikitext2+c4  (c4 teacher logits 미저장)
+# ── (A) 이름으로 재기 — utils/metric_specs.py 레지스트리 ──
+# 이름 하나가 데이터 프로토콜(dataset/seqlen/n_sample/답변창)과 포워드 프로토콜
+# (stride/prefill)을 모두 고정한다 → correlation.py의 같은 이름과 정의가 동일.
+# 같은 group을 쓰는 태스크끼리는 FP-teacher 패스를 공유한다.
+#   wt2_jsd_pp512_s32  (A_pp    : wikitext2 2048tok n128, 답변창512, s32)
+#   wt2_jsd_pp128_s32  (A_lt128 : wikitext2 2048tok n128, 답변창128, s32)
+#   gov_jsd_pp512_s128 (B_pp    : gov_report 8196tok n8, 답변창512, s128)
+#   gov_jsd_pp128_s32  (B_lt128 : gov_report 8196tok n8, 답변창128, s32)
+#   c4_ppl / wt2_ppl   (A       : 전체창 단일 forward PPL)
+# 전체 목록: python post_search.py --help 의 --metric_tasks 참고.
+# ⚠️ needle_*/gsm8k_jsd_pp_* 는 전용 로더가 필요해서 correlation.py에서만 된다.
+# ⚠️ teacher logits(CPU) 크기 = n_sample × 답변창 × vocab × 2B. 요청한 태스크가
+#    실제로 쓰는 것만 만든다(PPL 전용이면 0). gov 계열은 합쳐서 ~1.3GB지만
+#    wt2_jsd_pp512_* 를 추가하면 +16.8GB, 답변창 없는 wt2_jsd는 +67GB.
+METRIC_TASKS="gov_jsd_pp512_s128 gov_jsd_pp128_s32 wt2_ppl c4_ppl"
+# METRIC_TASKS="gov_jsd_pp512_s128 gov_jsd_pp128_s32 wt2_jsd_pp512_s32 wt2_jsd_pp128_s32 wt2_ppl c4_ppl"
+# METRIC_TASKS=""   # 비우면 아래 (B) knob 방식으로 동작
+
+# ── (B) knob으로 재기 — 레지스트리에 없는 임시 조합용 ──
+# METRIC_TASKS가 비어 있을 때만 쓰인다. 첫 항목=선택/verify 기준.
 METRIC="loss ppl"
 LOSS_FUNC="jsd"
 # METRIC="ppl"
 # LOSS_FUNC="cross_entropy"
 
-N_SAMPLE=128
-SEQLEN=2048
-MIN_SEQLEN=2048
-DATA_BATCH_SIZE=1
-STRIDE=128
-PREFILL_PROMPT=True
-LAST_TOKENS=512
+# ── metric별 데이터/포워드 프로토콜 (공유 knob 없음, 각자 다 지정) ──
+# 'loss'(JSD)는 train_loaders, 'ppl'은 test_loaders를 읽는다. METRIC에 넣은
+# 지표는 해당 쪽 DATASETS가 반드시 있어야 한다(없으면 즉시 에러).
+# STRIDE/LAST_TOKENS 는 0 = 끄기(단일 forward / 전체 시퀀스 채점).
+# MIN_SEQLEN은 gov_report/gsm8k에만 적용(wikitext2/c4 로더는 무시).
+# N_SAMPLE은 train split·gov_report에만 적용(wikitext2/c4 TEST split은 전량 사용).
+# ⚠️ LOSS_LAST_TOKENS 는 FP-teacher dense_logits 마스킹까지 결정한다.
+#    gov_report 8x8196을 전체 위치로 저장하면 ~16.8GB VRAM → 512 유지 권장(~1GB).
+LOSS_DATASETS="gov_report"
+LOSS_SEQLEN=8196
+LOSS_MIN_SEQLEN=8192
+LOSS_N_SAMPLE=8
+LOSS_DATA_BATCH_SIZE=1
+LOSS_STRIDE=128
+LOSS_PREFILL_PROMPT=True
+LOSS_LAST_TOKENS=512
+
+PPL_DATASETS="wikitext2 c4"
+PPL_SEQLEN=2048
+PPL_MIN_SEQLEN=0
+PPL_N_SAMPLE=128
+PPL_DATA_BATCH_SIZE=1
+PPL_STRIDE=0
+PPL_PREFILL_PROMPT=False
+PPL_LAST_TOKENS=0
+
+# LOGIT_DATASET = teacher logit(=JSD 측정)을 저장할 LOSS_DATASETS의 부분집합.
+# 비워두면 LOSS_DATASETS 전체. LOSS쪽에 없는 이름을 주면 즉시 에러(예전엔 JSD가
+# 조용히 0개 측정됐음).
+LOGIT_DATASET=""
+
+# teacher logits 보관 위치. cpu = 필요한 시퀀스만 GPU로 올림(기본).
+# 크기 = LOSS_N_SAMPLE × LOSS_LAST_TOKENS × vocab × 2B
+#   gov n8·lt512 ≈ 1.0GB / wt2 n128·lt512 ≈ 16.8GB / wt2 n128·lt128 ≈ 4.2GB
+DENSE_LOGITS_DEVICE=cpu
 
 TRUNC_LEN=256
 SLIDING_WINDOW=64
@@ -185,13 +228,26 @@ RULER_LENGTH=16384
 # RULER_LENGTH=65536
 # RULER_LENGTH=128000
 # RULER_LENGTH=131072
-RULER_SAMPLE=5
-# RULER_SAMPLE=50
+# RULER_SAMPLE=5
+RULER_SAMPLE=50
 RULER_BATCH_SIZE=1
 RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}${SINK_TAG}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs_${SEED}seed
 
 
-SAVE=save/post_search/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${SURROGATE}${SINK_TAG}
+# 잰 지표 → 짧은 태그(stdout) + 전체 목록(stderr). 이름 방식이면 첫 태스크 코드
+# +나머지 개수(_mgovj+3), knob 방식이면 프로토콜을 이름과 대조해서 _m<code>/_mX.
+# 정확한 목록은 어차피 results.csv에 metric 열로 남는다.
+if [ -n "${METRIC_TASKS}" ]; then
+    MTAG=$(python -m utils.metric_specs --verbose --tasks "${METRIC_TASKS}")
+else
+    MTAG=$(python -m utils.metric_specs --verbose \
+        --dataset ${LOSS_DATASETS} --n_sample ${LOSS_N_SAMPLE} --seqlen ${LOSS_SEQLEN} \
+        --min_seqlen ${LOSS_MIN_SEQLEN:-0} --loss_func ${LOSS_FUNC} --metric loss \
+        --stride ${LOSS_STRIDE:-0} --last_tokens ${LOSS_LAST_TOKENS:-0} \
+        --prefill_prompt ${LOSS_PREFILL_PROMPT:-False})
+fi
+
+SAVE=save/post_search/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${SURROGATE}${SINK_TAG}${MTAG}
 
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
@@ -227,14 +283,14 @@ for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 if [ ${USE_KEY_TOKEN} == 'True' ]; then
     ARGS+=" --use_key_token --trunc_len ${TRUNC_LEN} --sliding_window ${SLIDING_WINDOW} --alpha ${ALPHA} --beta ${BETA} --key_token_path ${KEY_TOKEN_PATH} "
 fi
-[ ${STRIDE} -gt 0 ] && ARGS+=" --stride ${STRIDE} "
-[ ${PREFILL_PROMPT} == 'True' ] && ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
 [ ${W_METHOD} == "hqq" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS} "
 # QEFT / AWQ-QEFT: the multi-rank outlier dict from extract_outidx.py. Its
 # ranks (e.g. r32_64_96_128) must cover every n_outlier the arch selects and
-# the dataset must match how extract_outidx.sh was run.
+# OUTLIER_DATASET must match how extract_outidx.sh was run (it names the dir —
+# it is NOT the loss/ppl measurement dataset).
+OUTLIER_DATASET=wikitext2
 if [ "${W_METHOD}" == "qeft" ] || [ "${W_METHOD}" == "awq_qeft" ]; then
-    OUTLIER_PATH=/NAS/SJ/actquant/search/outlier/${MODEL_NAME}/w16_r32_64_96_128_${DATASETS}/outlier.pth
+    OUTLIER_PATH=/NAS/SJ/actquant/search/outlier/${MODEL_NAME}/w16_r32_64_96_128_${OUTLIER_DATASET}/outlier.pth
     ARGS+=" --outlier_path ${OUTLIER_PATH} "
 fi
 if [ -n "${SECOND_EXPR}" ]; then
@@ -250,8 +306,24 @@ else
 fi
 [ "${SELECT_MEASURED_BEST:-False}" = "True" ] && ARGS+=" --select_measured_best --verify_topk ${VERIFY_TOPK:-5}"
 
-ARGS+=" --datasets ${DATASETS} --seqlen ${SEQLEN} --min_seqlen ${MIN_SEQLEN} --n_sample ${N_SAMPLE} --data_batch_size ${DATA_BATCH_SIZE}"
 [ -n "${LOGIT_DATASET}" ] && ARGS+=" --logit_dataset ${LOGIT_DATASET}"
+# (A) 이름 방식이 지정되면 그게 우선 — 아래 loss_*/ppl_* knob은 무시된다
+[ -n "${METRIC_TASKS}" ] && ARGS+=" --metric_tasks ${METRIC_TASKS}"
+[ -n "${DENSE_LOGITS_DEVICE}" ] && ARGS+=" --dense_logits_device ${DENSE_LOGITS_DEVICE}"
+# metric별 프로토콜: loss_* / ppl_* 를 그대로 넘긴다(빈 값은 생략 = argparse 기본값)
+for SIDE in loss ppl; do
+    UP=$(echo ${SIDE} | tr '[:lower:]' '[:upper:]')
+    for KEY in DATASETS SEQLEN MIN_SEQLEN N_SAMPLE DATA_BATCH_SIZE STRIDE LAST_TOKENS; do
+        VAR_NAME="${UP}_${KEY}"
+        VAR_VALUE="${!VAR_NAME}"
+        LOW=$(echo ${KEY} | tr '[:upper:]' '[:lower:]')
+        [ -n "${VAR_VALUE}" ] && ARGS+=" --${SIDE}_${LOW} ${VAR_VALUE}"
+    done
+    PP_NAME="${UP}_PREFILL_PROMPT"
+    PP_VALUE="${!PP_NAME}"
+    [ "${PP_VALUE}" == "True" ]  && ARGS+=" --${SIDE}_prefill_prompt"
+    [ "${PP_VALUE}" == "False" ] && ARGS+=" --no-${SIDE}_prefill_prompt"
+done
 # ARGS+=" --zeroshot --tasks ${TASKS} --lm_eval_batch_size ${LM_EVAL_BATCH_SIZE}"
 # ARGS+=" --longbench --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG} --longbench_e "
 # ARGS+=" --minilongbench --minilongbench_result_path ${MINILONGBENCH_RESULT_PATH} --longbench_config ${LONGBENCH_CONFIG}"

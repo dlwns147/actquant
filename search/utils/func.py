@@ -1088,6 +1088,33 @@ def configure_model_cache(args, model, *, use_cache):
     model.config.use_cache = use_cache
 
 
+def metric_protocol(args, metric):
+    """Forward protocol (stride / prefill_prompt / last_tokens) for one metric.
+
+    post_search configures 'loss' and 'ppl' separately (--loss_stride /
+    --ppl_stride, …). The single-protocol callers (sample_surrogate,
+    surrogate_pipeline) have only the plain knobs, which then serve both.
+    0 means OFF — stride → single pass, last_tokens → score the whole sequence —
+    since the CLI cannot pass None.
+
+    Returns (stride, prefill_prompt, last_tokens, use_cache)."""
+    side = 'ppl' if metric == 'ppl' else 'loss'
+
+    def pick(name, default=None):
+        v = getattr(args, f'{side}_{name}', None)
+        return getattr(args, name, default) if v is None else v
+
+    def off_if_zero(v):
+        return None if (v is not None and int(v) <= 0) else v
+
+    stride = off_if_zero(pick('stride'))
+    last_tokens = off_if_zero(pick('last_tokens'))
+    prefill_prompt = bool(pick('prefill_prompt', False))
+    # use_cache=True → strided / prefill forward (needs past_kv, real cache
+    # path); False → single shot with quantised KV output.
+    return stride, prefill_prompt, last_tokens, (stride is not None or prefill_prompt)
+
+
 def evaluate_metric(args, arch, model, evaluator, accelerator,
                     metric=None, loss_func=None):
     """Run one calibration-set metric (loss/JSD/ppl) for one architecture.
@@ -1095,12 +1122,16 @@ def evaluate_metric(args, arch, model, evaluator, accelerator,
     metric/loss_func default to args.metric/args.loss_func; pass them explicitly
     to measure a specific metric when args.metric is a LIST (post_search accepts
     e.g. --metric loss ppl). Callers that keep args.metric a plain string
-    (sample_surrogate / surrogate_pipeline) are unaffected."""
+    (sample_surrogate / surrogate_pipeline) are unaffected.
+
+    stride/prefill_prompt/last_tokens come from metric_protocol(), so 'loss' and
+    'ppl' can run DIFFERENT forward protocols in the same call loop (e.g. JSD on
+    the last 512 answer tokens vs full-window PPL)."""
     metric = args.metric if metric is None else metric
     loss_func = args.loss_func if loss_func is None else loss_func
-    use_cache = args.stride is not None or args.prefill_prompt
+    stride, prefill_prompt, last_tokens, use_cache = metric_protocol(args, metric)
     configure_model_cache(args, model, use_cache=use_cache)
     return evaluator.eval(arch=arch, metric=metric, model=model,
                           accelerator=accelerator, loss_func=loss_func,
-                          stride=args.stride,
-                          prefill_prompt=args.prefill_prompt)[0]
+                          stride=stride, prefill_prompt=prefill_prompt,
+                          last_tokens=last_tokens)[0]

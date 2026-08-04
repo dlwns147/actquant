@@ -53,7 +53,11 @@ CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 --main_process_port=1
   --w_expr ... --kv_expr ... --kvdim_expr ... --expr_front \
   --sample_path path/results.csv --surrogate ard_gp --ard_kernel matern32 \
   --comp_obj wbits kvbits kvdim --comp_obj_min ... --comp_obj_max ... -n 5 \
-  --datasets wikitext2 --longbench --ruler ...
+  --metric loss ppl --loss_func jsd \
+  --loss_datasets wikitext2 --loss_seqlen 2048 --loss_stride 128 \
+  --loss_prefill_prompt --loss_last_tokens 512 \
+  --ppl_datasets wikitext2 c4 --ppl_seqlen 2048 \
+  --longbench --ruler ...
 
 # 3) Loss/PPL ↔ LongBench/RULER correlation harness (correlation.py)
 #    --mode sample writes archs.csv; --mode eval evaluates one --idx; aggregate offline.
@@ -99,6 +103,62 @@ single joint search:
 `results.csv` layout: `n_comp` complexity rows, then one measured-metric row per
 `--datasets`, then the combined-predicted row, then `n_axes` per-axis search-metric
 rows (see `post_search.load_sample_csv`).
+
+**Named metrics (`utils/metric_specs.py`) — the ONE registry.** `GROUPS` +
+`METRIC_TASKS` (31 names: `wt2_jsd_pp512_s32`, `gov_jsd_pp128_s32`, `c4_ppl`, …)
+live here; `correlation.py` imports them under their original names and
+`post_search.py --metric_tasks <name>...` resolves the same ones, so a number
+reported by one script IS the number reported by the other. A **group** owns the
+data side (datasets / n_sample / seqlen / min_seqlen / last_tokens / use_key_token
+— everything the pre-masked FP-teacher `dense_logits` depend on); a **task** owns
+the forward side (metric / loss_func / stride / prefill_prompt). Tasks sharing a
+group share one teacher pass. Helpers: `resolve_tasks` (names → tasks),
+`groups_for`, `precompute_groups` (ONE FP pass for every group, CPU-parked;
+`tasks=` restricts it to the (group, dataset) pairs actually consumed — a PPL-only
+request on a jsd group would otherwise build a full-sequence 67 GB set nobody
+reads), `apply_group` (point an existing evaluator's data side at a group — no
+model rebuild, `LlamaEvaluator.__init__` untouched), `run_task` (measure one task
+on one dataset). post_search rejects the custom-loader tasks (`kind=needle_*` /
+`gsm8k_unpad_pp`): those need correlation.py's own loaders.
+
+**Per-metric protocol (`--loss_*` / `--ppl_*`) — the anonymous fallback; post_search
+has NO shared data knobs.** Used when `--metric_tasks` is empty (a one-off
+combination not worth a registry name). `loss` (JSD/KLD/CE) reads `train_loaders`, `ppl` reads `test_loaders`, so
+each metric is configured on its own: **data** protocol
+`--{loss,ppl}_datasets/_seqlen/_min_seqlen/_n_sample/_data_batch_size` (consumed by
+`LlamaEvaluator.__init__`) and **forward** protocol
+`--{loss,ppl}_stride/_prefill_prompt/_last_tokens` (resolved per call by
+`utils/func.py::metric_protocol`). `--datasets/--seqlen/--min_seqlen/--n_sample/
+--data_batch_size/--stride/--prefill_prompt/--last_tokens` are **gone from
+post_search** (they forced long-context JSD and standard-window PPL to share one
+protocol); `search.py`/`sample_surrogate.py`/`correlation.py` keep them since they
+measure a single metric, and `metric_protocol` falls back to them for those callers.
+`0` means OFF (`stride` → single pass, `last_tokens` → whole sequence) since the CLI
+cannot pass `None`. Typical use: gov_report long-context JSD (8196 tok, answer window
+512) **and** standard wikitext2/c4 PPL (2048 tok, full window) for the same arch in
+ONE run. Gotchas: every `--metric` needs its side's `_datasets` (hard error, was a
+silent empty result); `--loss_last_tokens` also masks the FP-teacher `dense_logits`
+(gov_report 8×8196 ≈ 1 GB at 512, ≈ 16.8 GB unmasked) and a mismatched loss window is
+a hard error; `--logit_dataset` is a subset of `--loss_datasets` and naming a non-loss
+dataset raises instead of silently measuring zero JSD. `metric_protocol` also drives
+`configure_model_cache`, so a full-window PPL runs the single-shot
+`quant_kv_output=True` path while the answer-phase JSD runs the real cache path.
+
+**Teacher-logit placement (`--dense_logits_device`, post_search default `cpu`).**
+`dense_logits` is `n_sample × last_tokens × vocab` fp16 — 1.0 GB for gov_report
+8×512 but **16.8 GB** for wikitext2 128×512 — and used to live on the GPU next to
+the quant model for the whole run. `get_logits(store_device='cpu')` now parks each
+masked tensor on the CPU *as it is produced* (so it never piles up on the GPU even
+during the teacher pass) and `utils/eval.py::_dense_seq` uploads the one sequence
+eval_loss needs, on the student logits' own device (correct under a sharded
+`device_map`; a no-op when both are already on the GPU). Opted into by the two "measure a handful of archs, then
+benchmark" entry points — `post_search.py` and `awqgptq.py` (both default `cpu`).
+The evaluator kwarg defaults to `None` = GPU, so `search.py` / `baseline_search.py` /
+`second_search.py` / `sample_surrogate.py` / `utils/awq_pool.py` are untouched: they
+evaluate thousands of archs against a small wikitext2 reference and should not pay an
+H2D copy per eval. `correlation.py` already offloads on its own (it converts after the
+teacher pass via `_move_all_dense_logits_to_cpu`); its `_LazyGpuList` is now an alias
+of `utils/eval.LazyGpuList`. New code just uses `store_device`.
 
 ### Correlation harness (`correlation.py`)
 

@@ -83,7 +83,7 @@ from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
 from utils.select import (build_arch, select_valid_nd_idx, assemble_F,
                           LazyPs, draw_random, quantile_select, axis_of_map,
                           coverage_subset_nsga2_extras, per_axis_metric)
-from utils.eval import eval_metric, eval_loss
+from utils.eval import eval_metric, eval_loss, LazyGpuList
 from utils.data import get_tokenizer
 from utils.longbench import pred_longbench, eval_longbench_preds
 from utils.ruler import eval_ruler
@@ -94,224 +94,14 @@ warnings.simplefilter("ignore")
 # ════════════════════════════════════════════════════════════════════════════
 # Calibration metric specs
 # ════════════════════════════════════════════════════════════════════════════
-# Each task references one evaluator GROUP (shared datasets / n_sample / seqlen
-# / loss_func / use_key_token / key_token_path — i.e. things you cannot change
-# without rebuilding the FP-model dense_logits). Multiple tasks inside a group
-# only differ in stride / prefill_prompt / last_tokens, which can be varied
-# per-call without rebuilding.
+# The registry (GROUPS / METRIC_TASKS and every metric NAME) lives in
+# utils/metric_specs.py so correlation.py and post_search.py measure the same
+# thing when they are given the same name. Imported here under the original
+# names; this module's own code is unchanged.
+from utils.metric_specs import (GROUPS, METRIC_TASKS, METRIC_KEYS, BENCH_KEYS,
+                                ALL_KEYS, precompute_groups, move_dense_to_cpu,
+                                run_task)
 
-GROUPS = {
-    'A': dict(  # wikitext2 / c4 base — full-sequence JSD, no key-token
-        datasets=['wikitext2', 'c4'], n_sample=128, seqlen=2048, min_seqlen=0,
-        loss_func='jsd', use_key_token=False, last_tokens=None,
-        trunc_len=512, sliding_window=128, alpha=2, beta=-2,
-    ),
-    'A_pp': dict(  # wikitext2 only — answer-phase (last 512 tokens) JSD
-        # get_logits' last_tokens at init MUST match eval_loss' last_tokens
-        # per-call (dense_logits is pre-masked). Putting wt2_jsd_pp512_s128
-        # in its own group with last_tokens=512 keeps it consistent.
-        datasets=['wikitext2'], n_sample=128, seqlen=2048, min_seqlen=0,
-        loss_func='jsd', use_key_token=False, last_tokens=512,
-        trunc_len=512, sliding_window=128, alpha=2, beta=-2,
-    ),
-    'A_lt128': dict(  # wikitext2 — last-128-token JSD (dense_logits masked to
-        # the last 128 positions). Serves both wt2_jsd_lt128 (single-pass) and
-        # wt2_jsd_pp128_s32 (answer-phase prefill+stride) — the FP-teacher
-        # dense_logits depend only on last_tokens, not the forward strategy.
-        # quant_kv_output=True is implicit for the single-pass path
-        # (stride=0, prefill_prompt=False) sets use_cache=False, which in
-        # turn flips configure_model_cache to quant_kv_output=True; the
-        # answer-phase metric re-configures the cache per-call (use_cache=True).
-        datasets=['wikitext2'], n_sample=128, seqlen=2048, min_seqlen=0,
-        loss_func='jsd', use_key_token=False, last_tokens=128,
-        trunc_len=512, sliding_window=128, alpha=2, beta=-2,
-    ),
-    'B_pp': dict(  # gov_report — answer-phase JSD with prefill_prompt
-        # last_tokens=512 makes dense_logits tiny (~1 GB) so the standard
-        # eval_loss path fits without stream_dense gymnastics.
-        datasets=['gov_report'], n_sample=8, seqlen=8196, min_seqlen=8192,
-        loss_func='jsd', use_key_token=False, last_tokens=512,
-        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
-    ),
-    'B_lt128': dict(  # gov_report — last-128-token JSD (shared by the
-        # single-pass gov_jsd_lt128 and answer-phase gov_jsd_pp128_s32).
-        datasets=['gov_report'], n_sample=8, seqlen=8196, min_seqlen=8192,
-        loss_func='jsd', use_key_token=False, last_tokens=128,
-        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
-    ),
-    'D': dict(  # gsm8k — short answer-only loss, JSD
-        datasets=['gsm8k'], n_sample=8, seqlen=2048, min_seqlen=0,
-        loss_func='jsd', use_key_token=False, last_tokens=None,
-        trunc_len=512, sliding_window=128, alpha=2, beta=-2,
-    ),
-    'B': dict(  # gov_report long, no key-token
-        datasets=['gov_report'], n_sample=8, seqlen=8196, min_seqlen=8192,
-        loss_func='jsd', use_key_token=False, last_tokens=None,
-        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
-    ),
-    'C': dict(  # gov_report long, with key-token
-        datasets=['gov_report'], n_sample=8, seqlen=8196, min_seqlen=8192,
-        loss_func='jsd', use_key_token=True, last_tokens=None,
-        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
-    ),
-}
-
-# (key, group, dataset, eval_kwargs)
-#   eval_kwargs forwarded to eval_metric (stride, prefill_prompt, last_tokens,
-#   metric, loss_func). dataset=None marks tasks handled by a custom path
-#   (needle_nll generates its own prompts; see _run_needle_nll).
-METRIC_TASKS = [
-    ('c4_ppl',            'A', 'c4',
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=0, prefill_prompt=False, last_tokens=None)),
-    ('c4_ppl_pp512_s128', 'A', 'c4',
-        # Answer-phase PPL: prefill prompt + stride answer (s128) over the
-        # last 512 tokens. eval_ppl now supports last_tokens / prefill_prompt;
-        # dense_logits is unused for PPL so Group A's last_tokens=None is fine.
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=128, prefill_prompt=True, last_tokens=512)),
-    ('c4_ppl_pp128_s32',  'A', 'c4',
-        # Same answer-phase PPL with a shorter last_tokens=128 window and
-        # finer stride=32 (4× the chunks of s128).
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=32, prefill_prompt=True, last_tokens=128)),
-    ('wt2_ppl',           'A', 'wikitext2',
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=0, prefill_prompt=False, last_tokens=None)),
-    ('wt2_ppl_pp512_s128', 'A', 'wikitext2',
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=128, prefill_prompt=True, last_tokens=512)),
-    ('wt2_ppl_pp128_s32', 'A', 'wikitext2',
-        # last_tokens=128 answer window, finer stride=32 (PPL → no dense_logits,
-        # so Group A's last_tokens=None is fine).
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=32, prefill_prompt=True, last_tokens=128)),
-    ('wt2_jsd',           'A', 'wikitext2',
-        dict(metric='loss', loss_func='jsd',
-             stride=0, prefill_prompt=False, last_tokens=None)),
-    ('wt2_jsd_s512',      'A', 'wikitext2',
-        dict(metric='loss', loss_func='jsd',
-             stride=512, prefill_prompt=False, last_tokens=None)),
-    ('wt2_jsd_pp512_s128', 'A_pp', 'wikitext2',
-        dict(metric='loss', loss_func='jsd',
-             stride=128, prefill_prompt=True, last_tokens=512)),
-    ('wt2_jsd_pp512_s32', 'A_pp', 'wikitext2',
-        # Same Group A_pp + answer-phase mask, finer stride=32 for denser
-        # answer-token coverage (4× the chunks of s128 → ~4× eval time).
-        dict(metric='loss', loss_func='jsd',
-             stride=32, prefill_prompt=True, last_tokens=512)),
-    ('wt2_jsd_pp128_s32', 'A_lt128', 'wikitext2',
-        # Answer-phase JSD on the last 128 tokens (prefill_prompt + stride=32).
-        # Group A_lt128 (last_tokens=128) supplies the matching pre-masked
-        # dense_logits — it is arch- and forward-strategy-independent, so it is
-        # shared with wt2_jsd_lt128 (no extra FP-teacher pass).
-        dict(metric='loss', loss_func='jsd',
-             stride=32, prefill_prompt=True, last_tokens=128)),
-    ('wt2_jsd_lt128',     'A_lt128', 'wikitext2',
-        # single-pass JSD on last 128 tokens. last_tokens is set at evaluator
-        # init (Group A_lt128) and matches the eval_loss mask.
-        dict(metric='loss', loss_func='jsd',
-             stride=0, prefill_prompt=False, last_tokens=128)),
-    ('needle_nll',        'A', None,
-        dict(kind='needle_nll',
-             stride=0, prefill_prompt=False, last_tokens=None)),
-    ('needle_nll_s512',   'A', None,
-        # chunked forward (use_cache=True path); answer-tokens loss unchanged.
-        dict(kind='needle_nll',
-             stride=512, prefill_prompt=False, last_tokens=None)),
-    ('needle_nll_pp512_s128', 'A', None,
-        # prefill prompt then stride answer in 128-chunks. last_tokens=512
-        # bounds the answer span; label=-100 already restricts loss to the
-        # actual answer tokens (which lie at the very end of the prompt).
-        dict(kind='needle_nll',
-             stride=128, prefill_prompt=True, last_tokens=512)),
-    ('needle_nll_pp512_s32', 'A', None,
-        # Same as needle_nll_pp512_s128 with finer stride=32 over answer span.
-        dict(kind='needle_nll',
-             stride=32, prefill_prompt=True, last_tokens=512)),
-    ('needle_nll_pp128_s32', 'A', None,
-        # Shorter last_tokens=128 answer window, finer stride=32.
-        dict(kind='needle_nll',
-             stride=32, prefill_prompt=True, last_tokens=128)),
-    ('needle_jsd_pp512_s128', 'A', None,
-        # JSD variant: FP teacher dense_logits cached per-process + on disk
-        # (needle prompts are seed-deterministic). Higher SNR than CE since
-        # it compares the full output distribution at answer positions.
-        dict(kind='needle_jsd',
-             stride=128, prefill_prompt=True, last_tokens=512)),
-    ('needle_jsd_pp512_s32', 'A', None,
-        dict(kind='needle_jsd',
-             stride=32, prefill_prompt=True, last_tokens=512)),
-    ('needle_jsd_pp128_s32', 'A', None,
-        # Shorter last_tokens=128 answer window, finer stride=32. The FP-teacher
-        # dense_logits are cached separately (keyed by _lt128), so this does not
-        # collide with the lt512 needle_jsd cache.
-        dict(kind='needle_jsd',
-             stride=32, prefill_prompt=True, last_tokens=128)),
-    ('gsm8k_jsd',         'D', 'gsm8k',
-        # Standard path. The padded-input KIVI bug is now fixed at the
-        # source (quant/kivi_utils/new_pack.py:fake_quant handles 2D
-        # HF padding masks via _kivi_mask_to_bnh11t1).
-        dict(metric='loss', loss_func='jsd',
-             stride=0, prefill_prompt=False, last_tokens=None)),
-    ('gov_jsd',           'B', 'gov_report',
-        # Standard path. _move_all_dense_logits_to_cpu has already replaced
-        # evaluator.dense_logits['gov_report'] with a _LazyGpuList shim, so
-        # the 16 GiB of dense logits no longer sit on GPU.
-        dict(metric='loss', loss_func='jsd',
-             stride=0, prefill_prompt=False, last_tokens=None)),
-    ('gov_jsd_s512',      'B', 'gov_report',
-        # Same Group B + cpu-shim, plus stride=512 chunked forward to
-        # bound peak activation memory at 8K context.
-        dict(metric='loss', loss_func='jsd',
-             stride=512, prefill_prompt=False, last_tokens=None)),
-    ('gov_jsd_pp512_s128', 'B_pp', 'gov_report',
-        # answer-phase JSD (prefill_prompt + last_tokens=512 + stride=128).
-        # dense_logits is tiny under last_tokens=512 → standard path is OK.
-        dict(metric='loss', loss_func='jsd',
-             stride=128, prefill_prompt=True, last_tokens=512)),
-    ('gov_jsd_pp512_s32', 'B_pp', 'gov_report',
-        # Same Group B_pp, finer stride=32 over the 512-token answer span.
-        dict(metric='loss', loss_func='jsd',
-             stride=32, prefill_prompt=True, last_tokens=512)),
-    ('gov_jsd_pp128_s32', 'B_lt128', 'gov_report',
-        # Answer-phase JSD on the last 128 tokens (prefill_prompt + stride=32);
-        # Group B_lt128 (last_tokens=128) supplies the matching pre-masked
-        # dense_logits (shared with gov_jsd_lt128).
-        dict(metric='loss', loss_func='jsd',
-             stride=32, prefill_prompt=True, last_tokens=128)),
-    ('gov_jsd_lt128',     'B_lt128', 'gov_report',
-        # single-pass JSD on last 128 tokens. Group B_lt128's dense_logits
-        # is also trimmed to last 128 so the mask matches.
-        dict(metric='loss', loss_func='jsd',
-             stride=0, prefill_prompt=False, last_tokens=128)),
-    ('gsm8k_jsd_pp_s128', 'D', 'gsm8k',
-        # gsm8k unpadded → answer is at the end → prefill question, stride
-        # answer in 128-chunks. last_tokens=512 caps the answer span; the
-        # label=-100 mask filters out any question tokens that fall inside
-        # the last 512 window. Dense_logits is reused from Group D (padded
-        # forward gives identical FP logits at the answer positions because
-        # causal attention only sees past tokens).
-        dict(kind='gsm8k_unpad_pp',
-             stride=128, prefill_prompt=True, last_tokens=512)),
-    ('gsm8k_jsd_pp_s32', 'D', 'gsm8k',
-        # Same Group D + unpadded path, finer stride=32 over the answer
-        # span (4× chunks of s128). Same dense_logits reuse.
-        dict(kind='gsm8k_unpad_pp',
-             stride=32, prefill_prompt=True, last_tokens=512)),
-    ('gov_jsd_kt',        'C', 'gov_report',
-        dict(metric='loss', loss_func='jsd',
-             stride=0, prefill_prompt=False, last_tokens=None)),
-    ('gov_jsd_kt_s512',   'C', 'gov_report',
-        # stride=512 chunked forward over the same key-token archive as
-        # gov_jsd_kt — bounds peak activation memory at 8K context while
-        # keeping the key-token weighting identical.
-        dict(metric='loss', loss_func='jsd',
-             stride=512, prefill_prompt=False, last_tokens=None)),
-]
-METRIC_KEYS = [t[0] for t in METRIC_TASKS]
-BENCH_KEYS = ['longbench', 'longbench_e', 'ruler']
-ALL_KEYS = METRIC_KEYS + BENCH_KEYS
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -710,137 +500,20 @@ def _benchmarks_from_args(args):
     return keys, rerun_set
 
 
-class _LazyGpuList:
-    """List-of-lists of tensors held on CPU; per-tensor `__getitem__` moves
-    to GPU lazily. Drop-in for `evaluator.dense_logits[dataset]` so the
-    standard utils.eval.eval_loss path works unchanged:
-
-      `dense_logits_list[batch_idx][seq_idx].contiguous()`
-        → _LazyGpuList[batch_idx]      → _LazyGpuBatch
-        →                  [seq_idx]   → CPU→GPU upload of that one tensor
-
-    Saves ~16 GB GPU for the gov_report group (8 × 8195 × 128k vocab fp16)
-    and ~4 GB for the wikitext2+c4 group — total slack matters because the
-    quant model + 3 HQQ template copies + KV cache + transient JSD compute
-    eat the rest of 48 GB.
-    """
-
-    class _Batch:
-        def __init__(self, seqs, device):
-            self._seqs = seqs
-            self._device = device
-
-        def __getitem__(self, j):
-            t = self._seqs[j]
-            return t.to(self._device, non_blocking=True) if t.device.type == 'cpu' else t
-
-        def __len__(self):
-            return len(self._seqs)
-
-    def __init__(self, batches, device):
-        self._batches = batches
-        self._device = device
-
-    def __getitem__(self, i):
-        return _LazyGpuList._Batch(self._batches[i], self._device)
-
-    def __len__(self):
-        return len(self._batches)
-
-
-def _move_all_dense_logits_to_cpu(evaluator):
-    """For every dataset present in evaluator.dense_logits, replace the
-    GPU-resident list-of-lists with a _LazyGpuList shim backed by CPU
-    tensors. Run once right after _build_evaluator + before any eval_loss
-    call. eval_loss's interface is unchanged (it reads `[bi][si].contiguous()`)."""
-    target_device = evaluator.model.device if evaluator.model is not None else 'cuda'
-    n_moved = 0
-    for dataset, batches in list(evaluator.dense_logits.items()):
-        if batches is None:
-            continue
-        if isinstance(batches, _LazyGpuList):
-            continue   # already wrapped
-        cpu_batches = [[t.detach().to('cpu', copy=False) for t in batch]
-                       for batch in batches]
-        evaluator.dense_logits[dataset] = _LazyGpuList(cpu_batches, target_device)
-        n_moved += sum(len(b) for b in cpu_batches)
-    clean_up()
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        free, total = torch.cuda.mem_get_info()
-        print(f"[dense_logits→cpu] moved {n_moved} per-seq tensors to CPU, "
-              f"GPU free={free/1e9:.2f}GB / {total/1e9:.2f}GB")
+# The CPU-offload shim and the one-FP-pass group builder live in
+# utils/metric_specs.py (shared with post_search.py). Thin aliases keep this
+# module's call sites unchanged.
+_LazyGpuList = LazyGpuList
+_move_all_dense_logits_to_cpu = move_dense_to_cpu
 
 
 def _precompute_group_data(args, ctx, model_id, group_items):
-    """Load the FP teacher ONCE and build every metric group's data side up
-    front: loaders + dense_logits (+ key tokens), all stashed on CPU. The
-    dense_logits do NOT depend on the arch, so this single FP pass serves every
-    group of this idx — and the FP teacher is freed before the quant model is
-    built, so the two never sit on the GPU together. dense_logits is a raw CPU
-    list-of-lists (wrapped to a _LazyGpuList by _build_evaluator →
-    _move_all_dense_logits_to_cpu).
-
-    The SAME train-loader objects used here for get_logits are returned for
-    injection, so dense_logits[i] aligns with eval_loss's loader[i] exactly.
-    Returns {g: dict(train_loaders, test_loaders, dense_logits, key_token_list)}.
-    """
-    from utils.func import get_hfmodel
-    from utils.eval import get_logits
-    from utils.loss import get_key_token_list
-    from utils.data import get_loader
-
-    accel = ctx.accelerator
-    out, pending = {}, []
-    for g, spec in group_items:
-        tl = {d: accel.prepare(get_loader(d, model=model_id, n_sample=spec['n_sample'],
-                batch_size=1, train=True, seed=args.seed, seqlen=spec['seqlen'],
-                min_seqlen=spec['min_seqlen'])) for d in spec['datasets']}
-        vl = {d: accel.prepare(get_loader(d, model=model_id, n_sample=spec['n_sample'],
-                batch_size=1, train=False, seed=args.seed, seqlen=spec['seqlen'],
-                min_seqlen=spec['min_seqlen'])) for d in spec['datasets']}
-        is_jsd = spec['loss_func'] in ('jsd', 'kld', 'topk')
-        dense = {d: None for d in spec['datasets']} if is_jsd else None
-        keytok = {d: None for d in spec['datasets']} if spec['use_key_token'] else None
-        out[g] = dict(train_loaders=tl, test_loaders=vl,
-                      dense_logits=dense, key_token_list=keytok)
-        if is_jsd or spec['use_key_token']:
-            pending.append((g, spec))
-
-    if pending:
-        print(f"[group_dense] one FP-teacher pass for groups "
-              f"{[g for g, _ in pending]} (dense_logits are arch-independent) …")
-        t0 = time()
-        fp = get_hfmodel(model_id, dtype=ctx.dtype, device_map=ctx.device_map)
-        fp.eval()
-        tok = get_tokenizer(model_id, use_fast=True)
-        for g, spec in pending:
-            r = out[g]
-            if spec['use_key_token']:
-                ktp = spec.get('key_token_path', '') or ''
-                r['key_token_list'] = {
-                    d: get_key_token_list(
-                        evaluator_model=fp, evaluator_tokenizer=tok, loader=loader,
-                        trunc_len=spec['trunc_len'], sliding_window=spec['sliding_window'],
-                        alpha=spec['alpha'], beta=spec['beta'],
-                        load_path=os.path.join(ktp, d), mode='offline')
-                    for d, loader in r['train_loaders'].items()}
-            if r['dense_logits'] is None:
-                continue
-            for d, loader in r['train_loaders'].items():
-                kt = r['key_token_list'][d] if spec['use_key_token'] else None
-                dg = get_logits(fp, loader, key_token_list=kt,
-                                last_tokens=spec['last_tokens'])
-                r['dense_logits'][d] = [[t.detach().to('cpu', copy=False) for t in batch]
-                                        for batch in dg]
-                del dg
-                clean_up()
-                print(f"[group_dense] {g}/{d}: computed "
-                      f"({len(r['dense_logits'][d])} batches, on CPU)")
-        del fp
-        clean_up()
-        print(f"[group_dense] FP-teacher pass done ({time() - t0:.1f}s)")
-    return out
+    """One FP-teacher pass for every group of this idx → the shared builder.
+    store_device='cpu' also removes the transient GPU pile-up the old local
+    version had (it built on GPU, then moved)."""
+    return precompute_groups(ctx.accelerator, model_id, group_items,
+                             seed=args.seed, dtype=ctx.dtype,
+                             device_map=ctx.device_map, store_device='cpu')
 
 
 def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
@@ -1111,34 +784,8 @@ def _run_gsm8k_unpad_pp(args, ctx, evaluator, *,
 
 
 def _run_calibration_task(args, ctx, evaluator, dataset, eval_kwargs):
-    """Run one calibration metric on an already-prepared evaluator+model.
-
-    Bypasses LlamaEvaluator.eval() (which loops over all loaders in the
-    evaluator) so we can pick one dataset + run with task-specific
-    stride / prefill_prompt / last_tokens.
-    """
-    model = evaluator.model
-    use_cache = (eval_kwargs.get('stride') or 0) > 0 or eval_kwargs.get('prefill_prompt')
-    configure_model_cache(args, model, use_cache=use_cache)
-
-    if eval_kwargs['metric'] == 'ppl':
-        loader = evaluator.test_loaders[dataset]
-    else:
-        loader = evaluator.train_loaders[dataset]
-    dense_logits = (evaluator.dense_logits.get(dataset)
-                    if eval_kwargs.get('loss_func') in ('jsd', 'kld', 'topk')
-                    else None)
-    key_token_list = (evaluator.key_token_list.get(dataset)
-                      if evaluator.use_key_token else None)
-    return eval_metric(
-        model=model, accelerator=ctx.accelerator,
-        metric=eval_kwargs['metric'], loader=loader, seqlen=evaluator.seqlen,
-        loss_func=eval_kwargs.get('loss_func', 'cross_entropy'),
-        dense_logits_list=dense_logits, key_token_list=key_token_list,
-        stride=eval_kwargs.get('stride') or 0,
-        last_tokens=eval_kwargs.get('last_tokens'),
-        prefill_prompt=bool(eval_kwargs.get('prefill_prompt')),
-        tokenizer=evaluator.tokenizer)
+    """One calibration metric on the prepared evaluator+model → shared runner."""
+    return run_task(args, ctx.accelerator, evaluator, dataset, eval_kwargs)
 
 
 def _run_benchmark_block(args, model, model_id, which):

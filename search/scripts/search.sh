@@ -329,7 +329,16 @@ if [ -n "${N_QEFT_COLUMN}" ]; then
     QEFT_TAG="_qc$(echo ${N_QEFT_COLUMN} | sed 's/ /-/g')_ob$(echo ${BASE_OUTLIER_BITS} | sed 's/ //g')"
 fi
 
-SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${KV_METHOD_TEXT}${QEFT_TAG}${SINK_TAG}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_r${RESIDUAL_LENGTH}_kd${K_PRUNING_DIM_C}_vd${V_PRUNING_DIM_C}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_st${STRIDE}${PP_TAG}
+# 측정 프로토콜이 utils/metric_specs.py의 어느 이름인지 출력(stderr) + 짧은 태그
+# (stdout). 태그 _mX = 일치하는 이름 없음 = 이 아카이브의 loss가 다른 스크립트와
+# 같은 뜻인지 보장 못 함. dir 이름에 이미 _st/_pp/샘플수가 있어 태그는 4~6자만.
+MTAG=$(python -m utils.metric_specs --verbose \
+    --dataset ${DATASET} --n_sample ${N_SAMPLE} --seqlen ${SEQLEN} \
+    --min_seqlen ${MIN_SEQLEN:-0} --loss_func ${LOSS_FUNC} --metric ${METRIC:-loss} \
+    --stride ${STRIDE} --last_tokens ${LAST_TOKENS:-0} \
+    --prefill_prompt ${PREFILL_PROMPT:-False})
+
+SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${KV_METHOD_TEXT}${QEFT_TAG}${SINK_TAG}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_r${RESIDUAL_LENGTH}_kd${K_PRUNING_DIM_C}_vd${V_PRUNING_DIM_C}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_st${STRIDE}${PP_TAG}${MTAG}
 
 N_PROC=1
 

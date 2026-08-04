@@ -172,6 +172,7 @@ def main(args):
         quant_model_paths=args.quant_model_paths,
         outlier=torch.load(args.outlier_path) if args.outlier_path else None,
         seqlen=args.seqlen, min_seqlen=args.min_seqlen, n_sample=args.n_sample,
+        data_batch_size=args.data_batch_size,   # was parsed but never forwarded
         datasets=args.datasets, device_map=ctx.device_map, dtype=ctx.dtype,
         bits={'w': args.w_bits, 'k': args.k_bits, 'v': args.v_bits},
         group_size=ctx.group_size, residual_length=args.residual_length,

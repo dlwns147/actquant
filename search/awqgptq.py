@@ -14,7 +14,8 @@ from evaluator import LlamaEvaluator
 from tqdm import tqdm
 import csv
 from matplotlib import pyplot as plt
-from utils.func import init_accelerator, clean_up, process_dtype, get_net_info, set_seed
+from utils.func import (init_accelerator, clean_up, process_dtype, get_net_info,
+                        set_seed, configure_model_cache)
 from utils.eval import measure_latency, eval_zeroshot
 from utils.longbench import pred_longbench, eval_longbench_preds
 from utils.data import get_tokenizer
@@ -127,7 +128,8 @@ def main(args):
         alpha=args.alpha,
         beta=args.beta,
         key_token_path=args.key_token_path,
-        last_tokens=args.last_tokens
+        last_tokens=args.last_tokens,
+        dense_logits_device=(None if args.dense_logits_device == 'gpu' else 'cpu'),
     )
 
     # Canonical arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
@@ -155,21 +157,9 @@ def main(args):
     model = evaluator.sample(arch)
 
     if args.datasets:
-        if args.stride is not None:
-            if 'kivi' in args.kv_method or 'think' in args.kv_method:
-                model.config.kivi_config.residual_length = args.residual_length
-            elif 'hqq' in args.kv_method:
-                model.generation_config.cache_config['residual_length'] = args.residual_length
-            model.config.quant_kv_output = False
-            model.config.use_cache = True
-            
-        else:
-            if 'kivi' in args.kv_method or 'think' in args.kv_method:
-                model.config.kivi_config.residual_length = 0
-            elif 'hqq' in args.kv_method:
-                model.generation_config.cache_config['residual_length'] = 0
-            model.config.quant_kv_output = True
-            model.config.use_cache = False
+        # strided/prefill → real cache path; single shot → quantised KV output.
+        # Same rule (and the same three fields) as post_search / correlation.
+        configure_model_cache(args, model, use_cache=args.stride is not None)
 
         metric_start = time()
         metric = evaluator.eval(arch=arch, metric=args.metric, model=model, accelerator=accelerator, loss_func=args.loss_func, stride=args.stride)[0]
@@ -181,13 +171,7 @@ def main(args):
 
     if args.pass_key_file:
         clean_up()
-        # model.config.residual_length = args.residual_length
-        if 'kivi' in args.kv_method or 'think' in args.kv_method:
-            model.config.kivi_config.residual_length = args.residual_length
-        elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config['residual_length'] = args.residual_length
-        model.config.quant_kv_output = False
-        model.config.use_cache = True
+        configure_model_cache(args, model, use_cache=True)
         
         # method_name = f"K{config.k_bits}V{config.v_bits} KiVi"
         print( "-----------------------------------" )
@@ -221,13 +205,7 @@ def main(args):
     
     if args.zeroshot:
         clean_up()
-        # model.config.residual_length = args.residual_length
-        if 'kivi' in args.kv_method or 'think' in args.kv_method:
-            model.config.kivi_config.residual_length = args.residual_length
-        elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config['residual_length'] = args.residual_length
-        model.config.quant_kv_output = False
-        model.config.use_cache = True
+        configure_model_cache(args, model, use_cache=True)
         
         results = eval_zeroshot(model, tokenizer=get_tokenizer(model_id), task_list=args.tasks, batch_size=args.lm_eval_batch_size, num_fewshot=args.num_fewshot)
         
@@ -257,13 +235,7 @@ def main(args):
 
     if args.longbench:
         clean_up()
-        # model.config.residual_length = args.residual_length
-        if 'kivi' in args.kv_method or 'think' in args.kv_method:
-            model.config.kivi_config.residual_length = args.residual_length
-        elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config['residual_length'] = args.residual_length
-        model.config.quant_kv_output = False
-        model.config.use_cache = True
+        configure_model_cache(args, model, use_cache=True)
         
         longbench_start = time()
         preds = pred_longbench(model, tokenizer=get_tokenizer(model_id), save_path=args.longbench_result_path, longbench_config=args.longbench_config, e=args.longbench_e, model_name=args.model_name)
@@ -285,12 +257,7 @@ def main(args):
     if args.ruler:
         clean_up()
         set_seed(args.seed, deterministic=True)
-        if 'kivi' in args.kv_method or 'think' in args.kv_method:
-            model.config.kivi_config.residual_length = args.residual_length
-        elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config['residual_length'] = args.residual_length
-        model.config.quant_kv_output = False
-        model.config.use_cache = True
+        configure_model_cache(args, model, use_cache=True)
         # tokenizer=get_tokenizer(model_id)
         # tokenizer.pad_token = tokenizer.eos_token
         
@@ -302,12 +269,7 @@ def main(args):
 
     if args.minilongbench:
         clean_up()
-        if 'kivi' in args.kv_method or 'think' in args.kv_method:
-            model.config.kivi_config.residual_length = args.residual_length
-        elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config['residual_length'] = args.residual_length
-        model.config.quant_kv_output = False
-        model.config.use_cache = True
+        configure_model_cache(args, model, use_cache=True)
 
         from time import time as _time
         mlb_start = _time()
@@ -335,12 +297,7 @@ def main(args):
 
     if args.longeval:
         clean_up()
-        if 'kivi' in args.kv_method or 'think' in args.kv_method:
-            model.config.kivi_config.residual_length = args.residual_length
-        elif 'hqq' in args.kv_method:
-            model.generation_config.cache_config['residual_length'] = args.residual_length
-        model.config.quant_kv_output = False
-        model.config.use_cache = True
+        configure_model_cache(args, model, use_cache=True)
         
         tokenizer = get_tokenizer(model_id)
         longeval_start = time()
@@ -475,6 +432,16 @@ if __name__ == '__main__':
                         help='which metric predictor model to fit (ppl/loss)')
     parser.add_argument('--loss_func', type=str, default='cross_entropy',
                         help='')
+    parser.add_argument('--dense_logits_device', type=str, default='cpu',
+                        choices=['cpu', 'gpu'],
+                        help="where the FP-teacher logits (JSD/KLD reference) live. "
+                             "'cpu' (default) parks them off-GPU and uploads one "
+                             "sequence at a time — like post_search.py, this script "
+                             "measures ONE arch, so the H2D copy is noise next to the "
+                             "forward pass and it frees n_sample*last_tokens*vocab of "
+                             "VRAM (4.2 GB for gov_report 8x2047) next to the quant "
+                             "model. 'gpu' keeps the old behaviour. Irrelevant unless "
+                             "--loss_func is a divergence (jsd/kld/topk/forward_kl).")
     parser.add_argument('--stride', type=int, default=None, 
                         help='')
     parser.add_argument('--last_tokens', type=int, default=None, 
