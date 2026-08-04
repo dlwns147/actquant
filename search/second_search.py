@@ -28,6 +28,7 @@ from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from search_space.llama import LlamaSearchSpace
 from predictor.factory import get_predictor
 from utils.func import set_seed, get_correlation, get_net_info
+from utils.metric_specs import protocol_dict
 from utils.select import subset_select
 from utils.second_stage import (
     encoding_xu, nw_split, load_block_pools, load_band_blocks, subset_select_moo, pareto_first_front,
@@ -885,7 +886,8 @@ class SecondSearch:
                     with open(os.path.join(self.save_path, f"iter_{it}.stats"), 'w') as f:
                         json.dump({'archive': archive, 'candidates': archive[-n_added:], 'hv': hv,
                                    'surrogate': {'model': self.predictor, 'rmse': rmse, 'rho': rho, 'tau': tau},
-                                   'coverage': cov, 'iteration': it}, f)
+                                   'coverage': cov, 'protocol': protocol_dict(self.args),
+                                   'iteration': it}, f)
                     if self.debug:
                         save_viz(self.save_path, it, archive, c_metric, c_pred, c_comp, cov,
                                  self.comp_obj, self.comp_obj_min, self.comp_obj_max)

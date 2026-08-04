@@ -104,13 +104,9 @@ PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
 QEFT_TAG=""; [ -n "${N_QEFT_COLUMN}" ] && QEFT_TAG="_qc$(echo ${N_QEFT_COLUMN} | sed 's/ /-/g')_ob$(echo ${BASE_OUTLIER_BITS} | sed 's/ //g')"
 DS_TAG="_${CAND_EVEN}"; [ "${CAND_EVEN}" == "moo" ] && [ "${MOO_OBJS}" == "axis_gap" ] && DS_TAG="_moo_axg"
 AE_TAG=""; [ "${ANCHOR_ENDPOINTS}" == "True" ] && AE_TAG="_ae"
-# 측정 프로토콜 → utils/metric_specs.py의 이름(stderr) + 짧은 태그(stdout).
-# _mX = 일치하는 이름 없음 = 다른 스크립트 아카이브와 비교 가능한지 보장 못 함.
-MTAG=$(python -m utils.metric_specs --verbose \
-    --dataset ${DATASET} --n_sample ${N_SAMPLE} --seqlen ${SEQLEN} \
-    --min_seqlen ${MIN_SEQLEN:-0} --loss_func ${LOSS_FUNC} --metric ${METRIC:-loss} \
-    --stride ${STRIDE} --last_tokens ${LAST_TOKENS:-0} \
-    --prefill_prompt ${PREFILL_PROMPT:-False})
+source "$(dirname "${BASH_SOURCE[0]}")/metric_tag.sh"
+MTAG=$(metric_tag_from_knobs "${DATASET:-${DATASETS}}" "${LOSS_FUNC}" "${METRIC:-loss}" \
+                             "${N_SAMPLE}" "${SEQLEN}" "${MIN_SEQLEN:-0}")
 
 SAVE=save/baseline_search/${TODAY}_${MODEL_NAME}_baseline_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}${SINK_TAG}_${SURROGATE}_nsga3p${REF_PARTITIONS}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${GA_POP_SIZE}_st${STRIDE}${PP_TAG}${DS_TAG}${AE_TAG}${MTAG}_s${SEED}
 

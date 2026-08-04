@@ -234,17 +234,18 @@ RULER_BATCH_SIZE=1
 RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}${SINK_TAG}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs_${SEED}seed
 
 
-# 잰 지표 → 짧은 태그(stdout) + 전체 목록(stderr). 이름 방식이면 첫 태스크 코드
-# +나머지 개수(_mgovj+3), knob 방식이면 프로토콜을 이름과 대조해서 _m<code>/_mX.
-# 정확한 목록은 어차피 results.csv에 metric 열로 남는다.
+# 잰 지표 태그: METRIC_TASKS가 있으면 그 이름에서, 없으면 loss쪽 knob에서.
+# 정확한 목록은 어차피 results.csv의 metric 열에 남는다.
+source "$(dirname "${BASH_SOURCE[0]}")/metric_tag.sh"
 if [ -n "${METRIC_TASKS}" ]; then
-    MTAG=$(python -m utils.metric_specs --verbose --tasks "${METRIC_TASKS}")
+    MTAG=$(metric_tag_from_tasks "${METRIC_TASKS}")
 else
-    MTAG=$(python -m utils.metric_specs --verbose \
-        --dataset ${LOSS_DATASETS} --n_sample ${LOSS_N_SAMPLE} --seqlen ${LOSS_SEQLEN} \
-        --min_seqlen ${LOSS_MIN_SEQLEN:-0} --loss_func ${LOSS_FUNC} --metric loss \
-        --stride ${LOSS_STRIDE:-0} --last_tokens ${LOSS_LAST_TOKENS:-0} \
-        --prefill_prompt ${LOSS_PREFILL_PROMPT:-False})
+    MTAG=$(metric_tag_from_knobs "${LOSS_DATASETS}" "${LOSS_FUNC}" loss \
+                                 "${LOSS_N_SAMPLE}" "${LOSS_SEQLEN}" "${LOSS_MIN_SEQLEN:-0}")
+    # 이름 방식과 달리 knob 방식은 stride/답변창이 dir 어디에도 없다 → 여기서 붙인다
+    # (search.sh의 _st<STRIDE>_pp<LAST_TOKENS> 관례. loss쪽 = 선택 목적함수 기준)
+    [ "${LOSS_STRIDE:-0}" -gt 0 ] && MTAG="${MTAG}_st${LOSS_STRIDE}"
+    [ "${LOSS_PREFILL_PROMPT}" == "True" ] && MTAG="${MTAG}_pp${LOSS_LAST_TOKENS}"
 fi
 
 SAVE=save/post_search/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${SURROGATE}${SINK_TAG}${MTAG}

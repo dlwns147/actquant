@@ -24,12 +24,11 @@ evaluator's data side at a group — no model rebuild).
 import os
 from time import time
 
-import torch
-
-from utils.data import get_loader
-from utils.eval import get_logits, get_tokenizer, LazyGpuList
-from utils.func import clean_up, get_hfmodel
-from utils.loss import get_key_token_list
+# NOTE: nothing heavy at module level — the registry is plain dicts/lists, so
+# importing it costs ~0.04s. torch / utils.data / utils.eval (datasets,
+# transformers, lm_eval) cost ~4.4s and are only needed by the runtime helpers,
+# which import them when CALLED. (The SAVE-dir tag is built in the shell from
+# the task name or the knobs; see scripts/metric_tag.sh — no lookup needed.)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -329,6 +328,11 @@ def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto
     Returns {group: dict(train_loaders, test_loaders, dense_logits,
                          key_token_list, spec)}.
     """
+    from utils.data import get_loader
+    from utils.eval import get_logits, get_tokenizer
+    from utils.func import clean_up, get_hfmodel
+    from utils.loss import get_key_token_list
+
     wanted = None
     if tasks is not None:
         wanted = {(g, ds) for _k, g, ds, kw in tasks if needs_dense(kw)}
@@ -412,6 +416,10 @@ def move_dense_to_cpu(evaluator):
     """Replace GPU-resident dense_logits with CPU tensors behind a LazyGpuList.
     For data that was ALREADY built on the GPU; new code should pass
     ``get_logits(store_device='cpu')`` instead."""
+    import torch
+    from utils.eval import LazyGpuList
+    from utils.func import clean_up
+
     target = evaluator.model.device if evaluator.model is not None else 'cuda'
     n = 0
     for dataset, batches in list(evaluator.dense_logits.items()):
@@ -462,114 +470,20 @@ def run_task(args, accelerator, evaluator, dataset, eval_kwargs):
         tokenizer=evaluator.tokenizer)
 
 
-# ── protocol ↔ name matching + the SAVE-dir tag ─────────────────────────────
-# Dir names already carry the parameters (_st128_pp512, 128sample, 2048seq …)
-# and sit near the 255-byte limit, so the tag stays a SHORT identity code:
-# dataset + objective. `X` = this protocol matches NO registry name, i.e. the
-# archive may not be comparable with the other scripts'.
-_DS_CODE = {'wikitext2': 'wt2', 'c4': 'c4', 'gov_report': 'gov', 'gsm8k': 'g8k'}
-_LOSS_CODE = {'jsd': 'j', 'kld': 'k', 'topk': 't', 'forward_kl': 'f',
-              'cross_entropy': 'c'}
-_PROTO_FIELDS = ('datasets', 'n_sample', 'seqlen', 'min_seqlen', 'loss_func',
-                 'use_key_token', 'last_tokens')
+# ── measurement protocol, for embedding in an archive ───────────────────────
+# The SAVE-dir tag (scripts/metric_tag.sh) is a short IDENTITY label — dir names
+# sit near the 255-byte limit, so the numbers can't live there. results.txt does
+# hold every arg, but only for a run that finished. iter_<it>.stats is the file
+# that actually travels to second_search / post_search, so the protocol goes in
+# there: an archive should be self-describing about how its loss was measured.
+PROTOCOL_KEYS = ('dataset', 'datasets', 'n_sample', 'seqlen', 'min_seqlen',
+                 'data_batch_size', 'metric', 'loss_func', 'stride',
+                 'prefill_prompt', 'last_tokens', 'use_key_token',
+                 'attn_sink', 'residual_length')
 
 
-def match_protocol(*, dataset, n_sample, seqlen, min_seqlen=0, loss_func='jsd',
-                   metric='loss', stride=0, prefill_prompt=False,
-                   last_tokens=None, use_key_token=False):
-    """The registry name this measurement protocol IS, or None.
-
-    Lets a search run state which named metric its archive stores — the search
-    scripts hand-replicate the protocol, so a stray knob change would silently
-    make the stored loss mean something else."""
-    for key, g, ds, kw in METRIC_TASKS:
-        if kw.get('kind') or ds != dataset:
-            continue
-        s = GROUPS[g]
-        if (s['n_sample'] != n_sample or s['seqlen'] != seqlen
-                or s['min_seqlen'] != min_seqlen
-                or s['loss_func'] != loss_func
-                or bool(s['use_key_token']) != bool(use_key_token)
-                or s['last_tokens'] != last_tokens):
-            continue
-        if (kw.get('metric') != metric
-                or (kw.get('stride') or 0) != (stride or 0)
-                or bool(kw.get('prefill_prompt')) != bool(prefill_prompt)
-                or kw.get('last_tokens') != last_tokens):
-            continue
-        return key
-    return None
-
-
-def short_tag(name):
-    """Registry name → 3-5 char SAVE-dir code (dataset + objective).
-    None → 'X' (unknown protocol). e.g. wt2_jsd_pp512_s128 → 'wt2j',
-    c4_ppl → 'c4p', gov_jsd_pp128_s32 → 'govj'."""
-    if not name or name not in TASKS_BY_NAME:
-        return 'X'
-    _k, _g, ds, kw = TASKS_BY_NAME[name]
-    code = _DS_CODE.get(ds, 'ndl' if ds is None else str(ds)[:3])
-    if kw.get('metric') == 'ppl':
-        return code + 'p'
-    return code + _LOSS_CODE.get(kw.get('loss_func', ''), 'x')
-
-
-def tasks_tag(names):
-    """Several named tasks → one compact code: the FIRST task's code plus
-    '+N' for the rest (the exact list is in the run's results.csv).
-    e.g. [gov_jsd_pp512_s128, gov_jsd_pp128_s32, wt2_ppl, c4_ppl] → 'govj+3'."""
-    names = [n for n in names if n]
-    if not names:
-        return ''
-    head = short_tag(names[0])
-    return head + (f'+{len(names) - 1}' if len(names) > 1 else '')
-
-
-def _main():
-    """`python -m utils.metric_specs ...` → print the SAVE tag for a shell script.
-
-    Protocol form:  --dataset wikitext2 --n_sample 128 --seqlen 2048 --stride 128
-                    --last_tokens 512 --prefill_prompt True --loss_func jsd
-    Task-list form: --tasks "gov_jsd_pp128_s32 c4_ppl"
-    """
-    import argparse
-    p = argparse.ArgumentParser(description='SAVE-dir tag for a metric protocol')
-    p.add_argument('--tasks', type=str, default='')
-    p.add_argument('--dataset', type=str, default='')
-    p.add_argument('--n_sample', type=int, default=128)
-    p.add_argument('--seqlen', type=int, default=2048)
-    p.add_argument('--min_seqlen', type=int, default=0)
-    p.add_argument('--loss_func', type=str, default='jsd')
-    p.add_argument('--metric', type=str, default='loss')
-    p.add_argument('--stride', type=int, default=0)
-    p.add_argument('--last_tokens', type=int, default=0)
-    p.add_argument('--prefill_prompt', type=str, default='False')
-    p.add_argument('--prefix', type=str, default='_m', help='tag prefix ("" for bare)')
-    p.add_argument('--verbose', action='store_true',
-                   help='also print the full name / a drift warning on stderr')
-    a = p.parse_args()
-
-    if a.tasks:
-        names = a.tasks.replace(',', ' ').split()
-        tag, full = tasks_tag(names), ' '.join(names)
-    else:
-        full = match_protocol(
-            dataset=a.dataset, n_sample=a.n_sample, seqlen=a.seqlen,
-            min_seqlen=a.min_seqlen, loss_func=a.loss_func, metric=a.metric,
-            stride=a.stride, prefill_prompt=a.prefill_prompt.lower() == 'true',
-            last_tokens=a.last_tokens or None)
-        tag = short_tag(full)
-    if a.verbose:
-        import sys as _sys
-        if full:
-            msg = f'{full}  (tag {a.prefix}{tag})'
-        else:
-            msg = ('NO registry name for this protocol — the archive may not be '
-                   'comparable with the other scripts. Add a name in '
-                   'utils/metric_specs.py or match an existing one.')
-        print(f'[protocol] {msg}', file=_sys.stderr)
-    print(f'{a.prefix}{tag}' if tag else '')
-
-
-if __name__ == '__main__':
-    _main()
+def protocol_dict(args):
+    """Measurement-protocol subset of `args` (a dict or a Namespace), skipping
+    keys the caller doesn't have."""
+    get = args.get if hasattr(args, 'get') else (lambda k, d=None: getattr(args, k, d))
+    return {k: get(k) for k in PROTOCOL_KEYS if get(k) is not None}
