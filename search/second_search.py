@@ -170,7 +170,8 @@ class SecondSearch:
                        model_path=args.model_path,
                        method={'w': args.w_method, 'kv': args.kv_method},
                        quant_model_paths=args.quant_model_paths,
-                       seqlen=args.seqlen, n_sample=args.n_sample, dataset=args.dataset,
+                       seqlen=args.seqlen, min_seqlen=args.min_seqlen,
+                       n_sample=args.n_sample, dataset=args.dataset,
                        dtype=args.dtype, bits={'w': self.wbits, 'k': self.kvbits, 'v': self.kvbits},
                        group_size=self.ss.group_size, residual_length=args.residual_length,
                        attn_sink=args.attn_sink, k_quant_scheme=args.k_quant_scheme,
@@ -211,7 +212,8 @@ class SecondSearch:
             model_id=f'{args.model_path}/{args.model_name}',
             method={'w': args.w_method, 'kv': args.kv_method}, quant_model_paths=args.quant_model_paths,
             outlier=outlier,
-            seqlen=args.seqlen, n_sample=args.n_sample, datasets=[args.dataset], dtype=process_dtype(args.dtype),
+            seqlen=args.seqlen, min_seqlen=args.min_seqlen, n_sample=args.n_sample,
+            datasets=[args.dataset], dtype=process_dtype(args.dtype),
             bits={'w': self.wbits, 'k': self.kvbits, 'v': self.kvbits}, group_size=self.ss.group_size,
             residual_length=args.residual_length, attn_sink=args.attn_sink,
             k_quant_scheme=args.k_quant_scheme, v_quant_scheme=args.v_quant_scheme,
@@ -1032,6 +1034,10 @@ def build_parser():
     p.add_argument('--residual_length', type=int, default=128); p.add_argument('--k_quant_scheme', default='channel')
     p.add_argument('--v_quant_scheme', default='token'); p.add_argument('--dataset', default='wikitext2')
     p.add_argument('--n_sample', type=int, default=128); p.add_argument('--seqlen', type=int, default=2048)
+    # Only gov_report / gsm8k loaders read it (wikitext2/c4 ignore it), but it must
+    # be threaded: without it a gov_report run silently drops the intended
+    # long-document filter and measures a different sample set than search.sh.
+    p.add_argument('--min_seqlen', type=int, default=0)
     p.add_argument('--loss_func', default='jsd'); p.add_argument('--stride', type=int, default=128)
     p.add_argument('--prefill_prompt', action='store_true'); p.add_argument('--last_tokens', type=int, default=512)
     return p

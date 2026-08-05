@@ -168,18 +168,21 @@ def get_gov_report(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, split='
     
     tokenizer.pad_token = tokenizer.eos_token
     
-    # Collect samples that meet min_seqlen requirement
+    # Floor is max(min_seqlen, seqlen): kept documents are truncated to `seqlen`
+    # and torch.concat'ed, so anything SHORTER than seqlen breaks the concat
+    # ("Expected size {seqlen} but got size {len}").
+    length_floor = max(int(min_seqlen), int(seqlen))
     data_list = []
     for data in traindata:
         document = data['document']
         # Tokenize the document
         tokenized = tokenizer(document, add_special_tokens=False, return_tensors='pt', truncation=False)
         tokenized_length = tokenized['input_ids'].shape[1]
-        
-        # Filter by min_seqlen
-        if tokenized_length < min_seqlen:
+
+        # Filter by the length floor
+        if tokenized_length < length_floor:
             continue
-        
+
         # Truncate to seqlen
         tokenized = tokenizer(document, add_special_tokens=False, padding=True, truncation=True, max_length=seqlen, return_tensors='pt')
         input_ids = tokenized['input_ids']
@@ -192,7 +195,11 @@ def get_gov_report(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, split='
             break
     
     if len(data_list) < n_sample:
-        raise ValueError(f"Could not find enough samples with min_seqlen={min_seqlen}. Found {len(data_list)}, required {n_sample}")
+        raise ValueError(
+            f"Could not find enough gov_report documents of >= {length_floor} tokens "
+            f"(= max(min_seqlen={min_seqlen}, seqlen={seqlen})). Found {len(data_list)}, "
+            f"required n_sample={n_sample}. Lower --seqlen/--n_sample, or use a split "
+            f"with longer documents.")
     
     tokenizer.pad_token = None
     # Concatenate all samples

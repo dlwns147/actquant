@@ -134,11 +134,11 @@ post_search** (they forced long-context JSD and standard-window PPL to share one
 protocol); `search.py`/`sample_surrogate.py`/`correlation.py` keep them since they
 measure a single metric, and `metric_protocol` falls back to them for those callers.
 `0` means OFF (`stride` → single pass, `last_tokens` → whole sequence) since the CLI
-cannot pass `None`. Typical use: gov_report long-context JSD (8196 tok, answer window
+cannot pass `None`. Typical use: gov_report long-context JSD (8192 tok, answer window
 512) **and** standard wikitext2/c4 PPL (2048 tok, full window) for the same arch in
 ONE run. Gotchas: every `--metric` needs its side's `_datasets` (hard error, was a
 silent empty result); `--loss_last_tokens` also masks the FP-teacher `dense_logits`
-(gov_report 8×8196 ≈ 1 GB at 512, ≈ 16.8 GB unmasked) and a mismatched loss window is
+(gov_report 8×8192 ≈ 1 GB at 512, ≈ 16.8 GB unmasked) and a mismatched loss window is
 a hard error; `--logit_dataset` is a subset of `--loss_datasets` and naming a non-loss
 dataset raises instead of silently measuring zero JSD. `metric_protocol` also drives
 `configure_model_cache`, so a full-window PPL runs the single-shot

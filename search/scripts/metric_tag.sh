@@ -34,7 +34,7 @@ metric_tag_from_tasks() {
 # knob에서 직접:
 #   $1=dataset $2=loss_func $3=metric(loss|ppl) $4=n_sample $5=seqlen $6=min_seqlen
 # -> _mwt2j_n128q2048        (min_seqlen=0이면 생략)
-# -> _mgovj_n8q8196m8192
+# -> _mgovj_n8q8192m8192
 # n_sample/seqlen/min_seqlen까지 넣는 이유: stride(_st)·답변창(_pp)·residual(_r)·
 # sink(_sk)는 dir에 이미 있지만 이 셋은 어느 스크립트에도 없어서, N_SAMPLE만 바꾼
 # 런이 타임스탬프 빼고 같은 이름이 된다. $4~$6은 생략 가능(옛 호출 호환).
