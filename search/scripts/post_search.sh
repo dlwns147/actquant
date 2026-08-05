@@ -115,8 +115,8 @@ VERIFY_TOPK=5
 # 같은 group을 쓰는 태스크끼리는 FP-teacher 패스를 공유한다.
 #   wt2_jsd_pp512_s32  (A_pp    : wikitext2 2048tok n128, 답변창512, s32)
 #   wt2_jsd_pp128_s32  (A_lt128 : wikitext2 2048tok n128, 답변창128, s32)
-#   gov_jsd_pp512_s128 (B_pp    : gov_report 8196tok n8, 답변창512, s128)
-#   gov_jsd_pp128_s32  (B_lt128 : gov_report 8196tok n8, 답변창128, s32)
+#   gov_jsd_pp512_s128 (B_pp    : gov_report 8192tok n8, 답변창512, s128)
+#   gov_jsd_pp128_s32  (B_lt128 : gov_report 8192tok n8, 답변창128, s32)
 #   c4_ppl / wt2_ppl   (A       : 전체창 단일 forward PPL)
 # 전체 목록: python post_search.py --help 의 --metric_tasks 참고.
 # ⚠️ needle_*/gsm8k_jsd_pp_* 는 전용 로더가 필요해서 correlation.py에서만 된다.
@@ -141,9 +141,9 @@ LOSS_FUNC="jsd"
 # MIN_SEQLEN은 gov_report/gsm8k에만 적용(wikitext2/c4 로더는 무시).
 # N_SAMPLE은 train split·gov_report에만 적용(wikitext2/c4 TEST split은 전량 사용).
 # ⚠️ LOSS_LAST_TOKENS 는 FP-teacher dense_logits 마스킹까지 결정한다.
-#    gov_report 8x8196을 전체 위치로 저장하면 ~16.8GB VRAM → 512 유지 권장(~1GB).
+#    gov_report 8x8192을 전체 위치로 저장하면 ~16.8GB VRAM → 512 유지 권장(~1GB).
 LOSS_DATASETS="gov_report"
-LOSS_SEQLEN=8196
+LOSS_SEQLEN=8192
 LOSS_MIN_SEQLEN=8192
 LOSS_N_SAMPLE=8
 LOSS_DATA_BATCH_SIZE=1

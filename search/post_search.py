@@ -859,7 +859,7 @@ def build_parser():
     # 'loss' reads train_loaders and 'ppl' reads test_loaders, so each carries its
     # OWN data protocol (datasets / seqlen / min_seqlen / n_sample / batch) and
     # forward protocol (stride / prefill_prompt / last_tokens). That is what lets
-    # one run report gov_report long-context JSD (8196 tok, answer window 512)
+    # one run report gov_report long-context JSD (8192 tok, answer window 512)
     # AND standard wikitext2/c4 PPL (2048 tok, full window) for the same arch.
     for _side, _what in (('loss', 'loss/JSD — train split'),
                          ('ppl', 'PPL — test split')):

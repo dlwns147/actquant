@@ -31,7 +31,7 @@ Calibration metrics (`--metrics`):
     wt2_jsd_s512        wikitext2 JSD, … stride=512
     wt2_jsd_pp512_s128  wikitext2 JSD, … prefill_prompt=True last_tokens=512
                         stride=128
-    gov_jsd             gov_report JSD, n_sample=8 seqlen=8196 min_seqlen=8192
+    gov_jsd             gov_report JSD, n_sample=8 seqlen=8192 min_seqlen=8192
                         (trunc=256 sw=64 alpha=1 beta=-1; no key-token)
     gov_jsd_kt          gov_report JSD, … with `--key_token_path`
 

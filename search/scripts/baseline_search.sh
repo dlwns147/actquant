@@ -93,6 +93,9 @@ MAX_VALUE=0.7
 DATASET=wikitext2
 N_SAMPLE=128
 SEQLEN=2048
+# gov_report/gsm8k 전용 필터(wikitext2/c4 로더는 무시). gov_report로 바꿀 때는
+# DATASET=gov_report N_SAMPLE=8 SEQLEN=8192 MIN_SEQLEN=8192 처럼 같이 올려야 한다.
+MIN_SEQLEN=0
 STRIDE=128
 PREFILL_PROMPT=True
 LAST_TOKENS=512
@@ -152,6 +155,7 @@ ARGS="--config ${CONFIG} \
 --dataset ${DATASET} \
 --n_sample ${N_SAMPLE} \
 --seqlen ${SEQLEN} \
+--min_seqlen ${MIN_SEQLEN:-0} \
 --seed ${SEED} \
 --save_iter ${SAVE_ITER} \
 --debug \

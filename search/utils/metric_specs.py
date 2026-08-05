@@ -69,13 +69,13 @@ GROUPS = {
     'B_pp': dict(  # gov_report — answer-phase JSD with prefill_prompt
         # last_tokens=512 makes dense_logits tiny (~1 GB) so the standard
         # eval_loss path fits without stream_dense gymnastics.
-        datasets=['gov_report'], n_sample=8, seqlen=8196, min_seqlen=8192,
+        datasets=['gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
         loss_func='jsd', use_key_token=False, last_tokens=512,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
     'B_lt128': dict(  # gov_report — last-128-token JSD (shared by the
         # single-pass gov_jsd_lt128 and answer-phase gov_jsd_pp128_s32).
-        datasets=['gov_report'], n_sample=8, seqlen=8196, min_seqlen=8192,
+        datasets=['gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
         loss_func='jsd', use_key_token=False, last_tokens=128,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
@@ -85,12 +85,12 @@ GROUPS = {
         trunc_len=512, sliding_window=128, alpha=2, beta=-2,
     ),
     'B': dict(  # gov_report long, no key-token
-        datasets=['gov_report'], n_sample=8, seqlen=8196, min_seqlen=8192,
+        datasets=['gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
         loss_func='jsd', use_key_token=False, last_tokens=None,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
     'C': dict(  # gov_report long, with key-token
-        datasets=['gov_report'], n_sample=8, seqlen=8196, min_seqlen=8192,
+        datasets=['gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
         loss_func='jsd', use_key_token=True, last_tokens=None,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
