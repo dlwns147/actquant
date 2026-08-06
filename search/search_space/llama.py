@@ -416,6 +416,49 @@ class LlamaSearchSpace:
             'p': {'k': k_dim_list, 'v': v_dim_list},
         }
 
+    def encode_batch(self, archs):
+        """Vectorized encode for a LIST of arch dicts — byte-identical to
+        np.stack([self.encode(a) for a in archs]) (tests/test_encode_batch.py).
+        encode() pays a numpy alloc + argwhere PER CELL (224 W + 64 KV + 64 dim
+        ≈ ms/arch); here values are assembled into (N, cells) matrices (python
+        touches drop to n_linear+4 per arch) and mapped to option indices with
+        one sorted-LUT searchsorted per column group. Memory: O(N·n_var) int64
+        intermediates ≈ 30 MB at N=17k (the stage-1 PLS pairs) — negligible.
+        Unknown option values raise ValueError (encode would IndexError)."""
+        if not len(archs):
+            return np.empty((0, (self.n_linear + 4) * self.n_block), int)
+
+        def lut(V, keys, tag):
+            o = np.asarray(keys, dtype=np.float64)
+            order = np.argsort(o, kind='stable')
+            so = o[order]
+            pos = np.clip(np.searchsorted(so, V), 0, len(so) - 1)
+            if not np.all(so[pos] == V):
+                raise ValueError(f"encode_batch: value outside {tag} options")
+            return order[pos]
+
+        cols = []
+        for linear in self.config['linear']:
+            name = linear.split('.')[-1]
+            opts = getattr(self, f'{name}_option')
+            V = np.asarray([a['q']['w'][linear] for a in archs], dtype=np.float64)
+            if self.w_outlier:                    # (bits, n_outlier) tuple options
+                if V.ndim == 2:                   # scalar bits ≡ (bits, 0)
+                    V = np.stack([V, np.zeros_like(V)], axis=-1)
+                cols.append(lut(V[..., 0] * 1e6 + V[..., 1],
+                                [o[0] * 1e6 + o[1] for o in opts], f'w:{name}'))
+            else:
+                cols.append(lut(V, list(opts), f'w:{name}'))
+        for part, opts in (('k', self.k_option), ('v', self.v_option)):
+            P = np.asarray([a['q'][part] for a in archs], dtype=np.float64)
+            cols.append(lut(P[..., 0] * 1e6 + P[..., 1],
+                            [o[0] * 1e6 + o[1] for o in opts], part))
+        for part, opts in (('k', self.k_pruning_dim_option),
+                           ('v', self.v_pruning_dim_option)):
+            D = np.asarray([a['p'][part] for a in archs], dtype=np.float64)
+            cols.append(lut(D, list(opts), f'{part}_dim'))
+        return np.concatenate(cols, axis=1).astype(int)
+
     def encode_predictor(self, arch):
         """Filtered encoding for the surrogate — single-option and pass_module
         entries are excluded (kept in sync with decode_encode_predictor)."""

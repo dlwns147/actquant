@@ -88,7 +88,7 @@ class SecondSearch:
             n_qeft_column=n_qeft_column, qeft_outlier_bits=qeft_bits)
         self.xu = encoding_xu(self.ss); self.nw = nw_split(self.ss); self.n_var = len(self.xu)
         self._comp = JointComp(self.ss)   # vectorized comp_obj (batch over genomes; skips decode+get_net_info)
-        self._feats = ArchFeatures(self.ss, self._comp)  # 15d mean13+comp ('self' mode's <n0 phase)
+        self._feats = ArchFeatures(self.ss, self._comp)  # 15d mean13+comp input (--surrogate_input feat/cv)
         self.ref_dirs = get_reference_directions("das-dennis", 3, n_partitions=12)
         self.segments = block_segments(self.ss)
 
@@ -334,9 +334,9 @@ class SecondSearch:
         cache = getattr(self, '_enc_cache', None)
         n = len(archive)
         if cache is None or cache.shape[0] > n:              # first call / resume / (defensive) shrink
-            self._enc_cache = self.ss.encode_batch([x[0] for x in archive]) if n else np.empty((0, self.n_var), int)
+            self._enc_cache = np.array([self.ss.encode(x[0]) for x in archive]) if n else np.empty((0, self.n_var), int)
         elif cache.shape[0] < n:                             # append only the freshly-added tail
-            new = self.ss.encode_batch([archive[i][0] for i in range(cache.shape[0], n)])
+            new = np.array([self.ss.encode(archive[i][0]) for i in range(cache.shape[0], n)])
             self._enc_cache = np.vstack([cache, new])
         return self._enc_cache
 
@@ -352,30 +352,12 @@ class SecondSearch:
             if len(active) > cap:
                 active = np.sort(active[np.argsort(-var[active])][:cap])
         kwargs = {'lb': np.zeros(len(active)), 'ub': self.xu[active].astype(float)} if self.predictor == 'rbf' else {}
-        kwargs.update(self._kernel_kwargs(self.predictor))
         pred = get_predictor(self.predictor, Xf[:, active], targets, device=self._pred_device, **kwargs)
         return pred, active
 
-    def _kernel_kwargs(self, name):
-        """--surrogate_kernel → the factory kwarg the BASE predictor reads (transform
-        prefixes stripped; rbf's RBF(**kwargs) would reject a foreign key). None =
-        model default (rbf→cubic, ard_gp→matern32)."""
-        val = getattr(self.args, 'surrogate_kernel', None)
-        if val is None:
-            return {}
-        base = name
-        for pre in ('sqrty_', 'logy_', 'logity_'):
-            if base.startswith(pre):
-                base = base[len(pre):]
-        if base == 'rbf':
-            return {'kernel': val}
-        if base == 'ard_gp':
-            return {'ard_kernel': val}
-        return {}
-
     def _fit_feat(self, Xf, targets):
         """low-dim arch-summary predictor: ArchFeatures mean13+comp (15d) → ard_gp;
-        INTERNAL-only since 2608 — the 'self' schedule's small-N (<--selfpls_n0) phase."""
+        sample-efficient at AWQ-archive sizes. pred.predict takes the FULL genome (active=all)."""
         inner = get_predictor('ard_gp', self._feats(Xf), targets, device=self._pred_device)
         feats = self._feats
         class _FeatPred:
@@ -398,7 +380,7 @@ class SecondSearch:
             def pairs(expr, half):
                 e = json.load(open(_last_stats(expr)))
                 arcs = e['archive'] + e.get('candidates', [])
-                G = self.ss.encode_batch([a[0] for a in arcs])
+                G = np.array([self.ss.encode(a[0]) for a in arcs])
                 return (G[:, :self.nw] if half == 'w' else G[:, self.nw:]), \
                     np.array([a[1] for a in arcs], float)
             GW, mW = pairs(self.args.w_expr, 'w')
@@ -430,7 +412,6 @@ class SecondSearch:
         kw = {}
         if inner_name == 'ard_gp' and getattr(self, '_warm_raw', None) is not None:
             kw['init_raw'] = self._warm_raw          # warm-start: prev iter's hp as extra init
-        kw.update(self._kernel_kwargs(inner_name))
         inner = get_predictor(inner_name, self._pls_features(Xf), targets,
                               device=self._pred_device, **kw)
         raw = getattr(inner, '_raw', None)
@@ -488,6 +469,25 @@ class SecondSearch:
                 return np.asarray(inner.predict(featf(np.asarray(X, float)))).ravel()
         return _HistPred()
 
+    def _kfold_rho(self, Xf, targets, which, k=5):
+        """OUT-of-sample 5-fold Spearman of a predictor family on the archive (rbf
+        interpolates exactly, so in-sample rho is meaningless for this comparison)."""
+        from scipy.stats import spearmanr
+        n = len(targets); idx = np.random.default_rng(0).permutation(n)
+        pred = np.full(n, np.nan)
+        for f in range(k):
+            te = np.sort(idx[f::k]); tr = np.setdiff1d(np.arange(n), te)
+            if which == 'feat':
+                m = self._fit_feat(Xf[tr], targets[tr])
+                pred[te] = m.predict(Xf[te])
+            elif which == 'plstyp':
+                m = self._fit_plstyp(Xf[tr], targets[tr])
+                pred[te] = m.predict(Xf[te])
+            else:
+                m, act = self._fit_genome(Xf[tr], targets[tr])
+                pred[te] = np.asarray(m.predict(Xf[te][:, act])).ravel()
+        return float(spearmanr(pred, targets).statistic)
+
     def _fit_predictor(self, archive):
         Xf = self._encode_archive(archive).astype(float)                     # full (N, n_var) encoding (cached)
         targets = np.array([x[1] for x in archive])
@@ -500,23 +500,38 @@ class SecondSearch:
             res = auto if self._pred_device in ('auto', None) else self._pred_device
             self.accelerator.print(f"[predictor] {self.predictor} on {res} (requested '{self._pred_device}')")
             self._pred_dev_logged = True
-        # input mode: 'genome' = per-cell encoding (large-N HQQ regime) · 'plstyp' =
-        # HQQ-supervised PLS (AWQ default) · 'self' = archive-free feat15→selfPLS schedule
-        # at --selfpls_n0 (feat15 lives on ONLY as this internal small-N phase) · 'hist' =
-        # occupancy histogram. ('feat'/'cv' removed 2608 — prev/second_search_2608_*.py.)
+        # input mode: 'genome' = per-cell encoding (large-N HQQ regime) · 'feat' = 15d
+        # ArchFeatures (small AWQ archives) · 'plstyp' = HQQ-supervised PLS (AWQ default) ·
+        # 'self' = archive-free feat15→selfPLS schedule at --selfpls_n0 · 'hist' = occupancy
+        # histogram · 'cv' = per-iter 5-fold bake-off (research).
         mode = getattr(self.args, 'surrogate_input', 'genome')
         if mode == 'hist':
             self.active = np.arange(self.n_var)
             pred = self._fit_hist(Xf, targets)
             return pred, pred.predict(Xf)
         if mode == 'self':
-            self.active = np.arange(self.n_var)
             n0 = int(getattr(self.args, 'selfpls_n0', 200))
-            pred = self._fit_selfpls(Xf, targets) if len(targets) >= n0 else self._fit_feat(Xf, targets)
-            return pred, pred.predict(Xf)
-        if mode == 'plstyp':
-            self.active = np.arange(self.n_var)      # consumes the full genome
-            pred = self._fit_plstyp(Xf, targets)
+            if len(targets) >= n0:
+                self.active = np.arange(self.n_var)
+                pred = self._fit_selfpls(Xf, targets)
+                return pred, pred.predict(Xf)
+            mode = 'feat'
+        if mode == 'cv':
+            if len(targets) >= 30:
+                rhos = {'genome': self._kfold_rho(Xf, targets, 'genome'),
+                        'feat':   self._kfold_rho(Xf, targets, 'feat')}
+                try:                       # plstyp needs the 1st-stage archives (skip if absent)
+                    rhos['plstyp'] = self._kfold_rho(Xf, targets, 'plstyp')
+                except Exception as e:     # noqa: BLE001 — cv degrades gracefully
+                    self.accelerator.print(f"[surrogate_cv] plstyp unavailable ({type(e).__name__}: {e})")
+                mode = max(rhos, key=rhos.get)
+                self.accelerator.print("[surrogate_cv] " + "  ".join(
+                    f"{k} {v:.3f}" for k, v in rhos.items()) + f" → {mode}")
+            else:
+                mode = 'feat'          # tiny archive: the low-dim input is the safe default
+        if mode in ('feat', 'plstyp'):
+            self.active = np.arange(self.n_var)      # these preds consume the full genome
+            pred = self._fit_feat(Xf, targets) if mode == 'feat' else self._fit_plstyp(Xf, targets)
             return pred, pred.predict(Xf)
         pred, active = self._fit_genome(Xf, targets)
         self.active = active                                                 # _next reads this (set before it)
@@ -928,21 +943,16 @@ def build_parser():
     p.add_argument('--w_expr', required=True, help='1st-stage W-axis archive dir or iter_N.stats')
     p.add_argument('--eff_kv_expr', required=True, help='1st-stage eff_kvbits archive dir or iter_N.stats')
     p.add_argument('--surrogate', default='rbf', help='arch-input predictor (rbf/gp/ard_gp/carts)')
-    p.add_argument('--surrogate_kernel', default=None,
-                   choices=['cubic', 'tps', 'linear', 'matern32', 'matern52', 'rbf', 'rq'],
-                   help='kernel for the active --surrogate (rbf: cubic/tps/linear; '
-                        'ard_gp: matern32/matern52/rbf/rq). Default None = model default '
-                        '(rbf→cubic, ard_gp→matern32).')
     p.add_argument('--selfpls_n0', type=int, default=200,
                    help="'self' input mode: archive size at which the surrogate input "
                         "switches feat15 → self-bootstrapped PLS (measured crossover "
                         "N≈200, tests/awq_alloc_flip/selfpls_check.py)")
     p.add_argument('--surrogate_input', default='genome',
-                   choices=['genome', 'plstyp', 'self', 'hist'],
+                   choices=['genome', 'feat', 'plstyp', 'self', 'hist', 'cv'],
                    help="predictor input: genome = per-cell encoding (large-N HQQ regime); "
-                        "plstyp = HQQ-supervised PLS embedding + comp (AWQ default, best "
-                        "within-cell at small N); self/hist = archive-free variants "
-                        "('feat'/'cv' removed 2608; feat15 survives only as self's <n0 phase)")
+                        "feat = 15d ArchFeatures (small AWQ archives); plstyp = HQQ-supervised "
+                        "PLS embedding + comp (AWQ default, best within-cell at small N); "
+                        "self/hist = archive-free variants; cv = per-iter 5-fold bake-off")
     p.add_argument('--plstyp_typ', action='store_true',
                    help="plstyp: append the 2d BandTable typicality features (OFF by default — "
                         "ablation-neutral on the AWQ archive, corner Δ within noise; kept as a "

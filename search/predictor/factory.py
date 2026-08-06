@@ -106,7 +106,7 @@ def _build_base(model, inputs, targets, device='auto', **kwargs):
         from predictor.ard_gp import ARDGP
         predictor = ARDGP(kernel=kwargs.get('ard_kernel', 'matern32'),
                           n_restarts=kwargs.get('gp_n_restarts', 10),
-                          device=device)
+                          device=device, init_raw=kwargs.get('init_raw'))
         predictor.fit(inputs, targets)
 
     elif model == 'badd_quad':

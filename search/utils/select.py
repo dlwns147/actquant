@@ -657,7 +657,47 @@ def even_select(comp, score, K, g, lo, hi, nd_F=None):
     return np.array(sel, int)
 
 
-def subset_select(comp, nd_F, K, pop_size=100, endpoints=None, n_gen=60, seed=None):
+def rotated_quantile_pick(cand_w, K, lo, hi, rnd):
+    """Deterministic W-anchor pick: K uniform quantile targets over [lo, hi],
+    phase-rotated by the golden ratio each call (``rnd`` = running round counter),
+    snapped to the nearest unused candidate. Knob-free and FRONT-BLIND by design:
+    the WAFE study (tests/anchor_w_density_study.py) measured that (a) the archive
+    front's W density is sampling-history contamination, not landscape signal —
+    every density-seeking variant lost (pure-count 0/8 vs even, p=0.008) via a
+    self-reinforcing collapse onto 3 anchored W's — and (b) the union std-of-gaps
+    GA saturates on companion-inflated real fronts (~1% objective discrimination
+    at front n≈1000-2300, picks leaving half the W range empty), while rotated
+    quantiles won the grid A/B outright (regret→0, 8/0 vs even, p=0.008; the
+    rotation is what spreads distinct anchored W's across rounds — the static
+    phase-0 variant re-anchors the same K W's and drops to mid-field)."""
+    cand_w = np.asarray(cand_w, float).ravel()
+    phase = (rnd * 0.6180339887498949) % 1.0
+    targets = lo + (((np.arange(K) + 0.5) / K + phase / K) % 1.0) * (hi - lo)
+    picks, used = [], set()
+    for t in targets:
+        for c in np.argsort(np.abs(cand_w - t)):
+            if c not in used:
+                picks.append(int(c)); used.add(int(c)); break
+    return np.array(picks, int)
+
+
+def front_w_count(cand_w, front_w, lo, hi, frac=1.0 / 16):
+    """Per-candidate Pareto-mass score: the number of front points whose W coordinate
+    lies within ±frac·(hi−lo) of the candidate's W, normalized by the max count → [0,1].
+    The window matters because companion KV sweeps put MANY front points on one exact
+    W block (identical wbits) while new candidate genomes never match it exactly —
+    windowed counting credits a candidate for sitting in that Pareto-KV-rich W band."""
+    cw = np.asarray(cand_w, float).ravel()
+    fw = np.sort(np.asarray(front_w, float).ravel())
+    h = max(float(hi) - float(lo), 1e-12) * float(frac)
+    cnt = (np.searchsorted(fw, cw + h, side='right')
+           - np.searchsorted(fw, cw - h, side='left')).astype(float)
+    m = cnt.max() if len(cnt) else 0.0
+    return cnt / m if m > 0 else cnt
+
+
+def subset_select(comp, nd_F, K, pop_size=100, endpoints=None, n_gen=60, seed=None,
+                  bonus=None, bonus_weight=0.0):
     """search.py::SubsetProblem down-select on plain arrays: pick K rows of `comp` by a
     single-objective GA minimizing the pooled std-of-gaps over nd_F(front comps) ∪ picks.
     The union with the front is what makes it HOLE-FILLING: an isolated edge candidate
@@ -667,15 +707,40 @@ def subset_select(comp, nd_F, K, pop_size=100, endpoints=None, n_gen=60, seed=No
     `endpoints` = (2, n_comp) [lo_row, hi_row] to anchor the achievable range (see
     SubsetProblem's endpoints branch). NOTE: gaps are pooled across comp columns in RAW
     scale — fine for similar-range axes (wbits/eff_kvbits); normalise comp+nd_F first when
-    mixing axes with very different ranges (e.g. kvdim 96-128)."""
+    mixing axes with very different ranges (e.g. kvdim 96-128).
+
+    ``bonus`` ((N,) in [0,1]) + ``bonus_weight`` α∈(0,1]: blend a per-candidate VALUE
+    term into the spacing objective — f = (1−α)·std_gaps/scale + α·(1 − mean pick bonus),
+    with scale = the ideal even mean gap so both terms are dimensionless. Used by
+    second_search --anchor_w_density (bonus = front_w_count: normalized Pareto-front
+    point count around each candidate's wbits): among similar-evenness subsets, prefer
+    W's where the archive front holds many Pareto (W,KV) points. The gap term keeps its
+    union-with-front hole-filling semantics untouched; α=0 (default) is EXACTLY the
+    legacy single-term objective (the bonus branch is never entered)."""
     import numpy as np
     from pymoo.optimize import minimize
     from pymoo.algorithms.soo.nonconvex.ga import GA
     from search import SubsetProblem                     # lazy: keeps select.py import light
     from utils.ga import MySampling, BinaryCrossover, MyMutation
     comp = np.asarray(comp, float)
-    problem = SubsetProblem(comp, np.asarray(nd_F, float), K, comp.shape[1],
-                            endpoints=endpoints)
+    nd_F = np.asarray(nd_F, float)
+    if bonus is not None and float(bonus_weight) > 0.0:
+        b = np.asarray(bonus, float).ravel()
+        a = float(bonus_weight)
+        lo = comp.min(0) if endpoints is None else np.asarray(endpoints, float)[0]
+        hi = comp.max(0) if endpoints is None else np.asarray(endpoints, float)[1]
+        # ideal even mean gap over the union → makes std_gaps dimensionless & O(1)
+        scale = max(float(np.mean(hi - lo)) / max(len(nd_F) + K + 1, 1), 1e-12)
+
+        class _BonusSubsetProblem(SubsetProblem):
+            def _evaluate(self, x, out, *args, **kwargs):
+                super()._evaluate(x, out, *args, **kwargs)
+                pen = np.array([(1.0 - b[_x].mean()) if _x.any() else 1.0 for _x in x])
+                out['F'] = (1.0 - a) * out['F'] / scale + a * pen[:, None]
+
+        problem = _BonusSubsetProblem(comp, nd_F, K, comp.shape[1], endpoints=endpoints)
+    else:
+        problem = SubsetProblem(comp, nd_F, K, comp.shape[1], endpoints=endpoints)
     algo = GA(pop_size=pop_size, sampling=MySampling(), crossover=BinaryCrossover(),
               mutation=MyMutation(), eliminate_duplicates=True)
     res = minimize(problem, algo, ('n_gen', n_gen), verbose=False,
