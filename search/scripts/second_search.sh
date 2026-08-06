@@ -61,7 +61,9 @@ DOE_RESULTS=""
 if [ "${W_METHOD}" == "awq" ]; then
     #W_METHOD=hqq # AWQ-setting pipeline for fast-eval debugging
     SURROGATE_INPUT=plstyp
-    SURROGATE=ard_gp
+    # sqrty_ard_gp (2608): sqrt-target head; with the one-hot 8y plstyp embedding
+    # cell-mean 0.414->0.646 @DOE100 vs plain ard_gp (tests/awq_alloc_flip/adoption_check3.py)
+    SURROGATE=sqrty_ard_gp
     N_DOE=100
     ITERATIONS=15
     N_ITER=20

@@ -384,30 +384,12 @@ class SecondSearch:
                 return np.asarray(inner.predict(feats(np.asarray(X, float)))).ravel()
         return _FeatPred()
 
-    def _one_hot_half(self, G, lo):
-        """per-cell one-hot of a genome half; lo = column offset into self.xu."""
-        G = np.asarray(G, int)
-        xu_part = self.xu[lo:lo + G.shape[1]].astype(int)
-        MO = int(xu_part.max()) + 1
-        OH = np.zeros((len(G), G.shape[1] * MO), np.float32)
-        OH[np.repeat(np.arange(len(G)), G.shape[1]),
-           (np.arange(G.shape[1])[None, :] * MO + G).ravel()] = 1.0
-        return OH
-
     def _pls_features(self, Xf):
-        """'plstyp' input (2608): per-cell ONE-HOT PLS embedding, sqrt(y_HQQ) supervision
-        (8 comps/axis, fit ONCE on the FULL 1st-stage per-axis (block, JSD) pairs) + comp
-        (exact wbits/eff_kvbits). one-hot gives every (cell, option) its OWN level — the
-        index encoding forced one slope per cell and could not express per-step convexity
-        (the 2bit-step catastrophe; the ladder is already eff-bits-monotone, so ordering
-        was never the problem). sqrt supervision rebalances the PLS covariance objective
-        toward the low-JSD region. Measured (tests/awq_alloc_flip/adoption_check{2,3,4}.py,
-        improvement_checks_fast.py): cell-mean 0.414→0.646 @N=100 / 0.613→0.700 @N=430
-        under the sqrty_ard_gp head; deployment prequential (comp-null-partialed)
-        0.532→0.66-0.71. K=8/axis confirmed by comp_count_check.py (KV holdout R² peaks
-        at 8; 16 comps HURT under ard_gp: 0.617 vs 0.667 @N=430). Transfer frame
-        unchanged: cheap HQQ supervision learns the representation, the AWQ archive fits
-        the head. Optional BandTable-P1 typicality (--plstyp_typ) unchanged."""
+        """'plstyp' input: HQQ-SUPERVISED PLS embedding (8 comps/axis, fit ONCE on the FULL
+        1st-stage per-axis (block, JSD) pairs) + comp (exact wbits/eff_kvbits). Transfer frame:
+        cheap HQQ supervision learns the representation, the AWQ archive fits the head —
+        recovers within-cell ranking that mean13 washes out. Optional BandTable-P1 typicality
+        (--plstyp_typ) is OFF by default (ablation-neutral; tests/awq_alloc_flip/)."""
         X = np.clip(np.round(np.asarray(Xf, float)), 0, self.xu).astype(int)
         use_typ = getattr(self, 'band_table', None) is not None and getattr(self.args, 'plstyp_typ', False)
         if getattr(self, '_pls', None) is None:
@@ -421,15 +403,13 @@ class SecondSearch:
                     np.array([a[1] for a in arcs], float)
             GW, mW = pairs(self.args.w_expr, 'w')
             GK, mK = pairs(self.args.eff_kv_expr, 'kv')
-            self._pls = (PLSRegression(8).fit(self._one_hot_half(GW, 0), np.sqrt(mW)),
-                         PLSRegression(8).fit(self._one_hot_half(GK, self.nw), np.sqrt(mK)))
+            self._pls = (PLSRegression(8).fit(GW, mW), PLSRegression(8).fit(GK, mK))
             self.accelerator.print(
-                f"[pls] ONE-HOT √y embedding fit: {len(mW)} W / {len(mK)} KV HQQ pairs → 8+8 comps + comp"
+                f"[pls] embedding fit: {len(mW)} W / {len(mK)} KV HQQ pairs → 8+8 comps + comp"
                 + (" + typicality" if use_typ else ""))
         pw, pk = self._pls
         C = self._comp.batch(X, ['wbits', 'eff_kvbits'])
-        cols = [pw.transform(self._one_hot_half(X[:, :self.nw], 0)),
-                pk.transform(self._one_hot_half(X[:, self.nw:], self.nw)), C]
+        cols = [pw.transform(X[:, :self.nw]), pk.transform(X[:, self.nw:]), C]
         if use_typ:
             bt = self.band_table
             bw = bt.band(C[:, 0], 'w'); bk = bt.band(C[:, 1], 'kv')
@@ -447,18 +427,13 @@ class SecondSearch:
         --surrogate (ard_gp recommended: companion-robust, ard_gp > rbf within-cell 0.965 vs
         0.939; tests/second_search_predictor_audit.py)."""
         inner_name = getattr(self.args, 'surrogate', 'ard_gp')
-        base_name = inner_name                       # strip target-transform prefixes
-        for pre in ('sqrty_', 'logy_', 'logity_'):   # (e.g. sqrty_ard_gp → ard_gp)
-            if base_name.startswith(pre):
-                base_name = base_name[len(pre):]
         kw = {}
-        if base_name == 'ard_gp' and getattr(self, '_warm_raw', None) is not None:
+        if inner_name == 'ard_gp' and getattr(self, '_warm_raw', None) is not None:
             kw['init_raw'] = self._warm_raw          # warm-start: prev iter's hp as extra init
         kw.update(self._kernel_kwargs(inner_name))
         inner = get_predictor(inner_name, self._pls_features(Xf), targets,
                               device=self._pred_device, **kw)
-        core = getattr(inner, 'base', inner)         # unwrap TargetTransformPredictor
-        raw = getattr(core, '_raw', None)
+        raw = getattr(inner, '_raw', None)
         if raw is not None:                          # keep for next iter's warm-start
             self._warm_raw = raw.detach().cpu().numpy().ravel()
         featf = self._pls_features
@@ -692,85 +667,20 @@ class SecondSearch:
             cands = np.array([np.concatenate([g[:self.nw], kvb])
                               for g in cand_genomes for kvb in KVg]).astype(int)
             comp2d = np.asarray(self._comp.batch(cands, self.comp_obj), float)   # (M,2) wbits,eff_kv
-            # fam id = anchor index (companion cands are anchor-major). Used by BOTH
-            # --companion_gap minimax (per-family minimax kv gap-std — pooled saturates on
-            # the companion-era front, Δ~1e-5, per-family holes 0.19-0.49 invisible) and
-            # --companion_front_ends (per-family predicted-front extremes).
-            fam_all = np.repeat(np.arange(len(cand_genomes)), len(KVg))
-            fam_mm = fam_all if getattr(self.args, 'companion_gap', 'minimax') == 'minimax' else None
             ref = np.vstack([front, np.asarray(self._comp.batch(cand_genomes, self.comp_obj), float)])
             budget = min(n_pick * len(cand_genomes), len(cands))
-            # --companion_true_ends: force the pool's TRUE box-end KV blocks per anchor —
-            # SUPPLY injection past the dominance filter (the flat high-kv tail is
-            # dominance-excluded by construction, so these are unreachable through fr:
-            # measured 60-70% of them sit outside the predicted front; without them the
-            # top row goes 0/20 families covered from iter6 on). Their proven value is
-            # predictive (starved high-kv rmse 0.019→0.011, extrapolation bias removal),
-            # not front value. 'top' default: the bottom row is already densely sampled
-            # (13-18/20 families) so 'bottom'/'both' mostly duplicate. Cost ≤ n_anchor
-            # evals (2.5% of a ckv40 budget); late iters often have fr<budget slack.
-            te_mode = getattr(self.args, 'companion_true_ends', 'top')
-            true_forced = []
-            if te_mode != 'off':
-                kv_col = comp2d[:len(KVg), 1]
-                if te_mode in ('top', 'both'):
-                    true_forced += [f * len(KVg) + int(np.argmax(kv_col))
-                                    for f in range(len(cand_genomes))]
-                if te_mode in ('bottom', 'both'):
-                    true_forced += [f * len(KVg) + int(np.argmin(kv_col))
-                                    for f in range(len(cand_genomes))]
-            true_forced = np.asarray(sorted(set(true_forced)), int)
             # companion scores on (kv-std-gap, 2D-cov-rad) only — wbits is anchor-fixed (std_axes=[1]).
             if predictor is not None:                          # keep the predicted Pareto front first
                 mu = np.asarray(predictor.predict(cands[:, self.active].astype(float))).ravel()
                 # fast exact first front over (loss, wbits, eff_kv); group by wbits (anchor-fixed).
                 fr = pareto_first_front(np.column_stack([mu, comp2d]), group_axis=1)
-                # --companion_front_ends: per anchor family, FORCE the predicted front's own
-                # kv-extreme members (min & max eff_kv on the family's front) into the picks —
-                # the subset GA has no pressure to take them (gap-std treats the injected box
-                # edge as present; the ends' value = pinning the family's front extent), and
-                # for flat-predicted families the front's max-kv end sits at the KNEE, an
-                # adaptive alternative to a fixed box-edge probe. Budget-neutral: the subset
-                # picks (budget − #forced) from the remaining front pool.
-                n_ends = int(getattr(self.args, 'companion_front_ends', 2))
-                forced = np.empty(0, int)
-                if n_ends > 0:
-                    fam_fr = fam_all[fr]
-                    picks = []
-                    for f in np.unique(fam_fr):
-                        mem = fr[fam_fr == f]
-                        kvs = comp2d[mem, 1]
-                        ends = [mem[int(np.argmax(kvs))]]
-                        if n_ends >= 2:
-                            ends.append(mem[int(np.argmin(kvs))])
-                        picks += ends
-                    forced = np.unique(np.asarray(picks, int))
-                forced = np.unique(np.concatenate([forced, true_forced]))[:budget]
-                pool = np.setdiff1d(fr, forced)
-                k_rest = min(budget, len(fr) + len(np.setdiff1d(true_forced, fr))) - len(forced)
-                loc = forced
-                if k_rest > 0 and len(pool):
-                    # forced rows enter as FROZEN GENES: the GA can't drop them but every
-                    # objective is scored over forced ∪ picks, so free picks complement
-                    # the ends instead of redundantly covering next to them.
-                    sub = np.asarray(subset_select_moo(
-                        comp2d[pool], ref, min(k_rest, len(pool)),
-                        self.args.subset_pop_size, endpoints=endpoints,
-                        seed=self.args.seed, std_axes=[1],
-                        fam=None if fam_mm is None else fam_mm[pool],
-                        fixed_comp=comp2d[forced] if len(forced) else None,
-                        fixed_fam=fam_all[forced] if len(forced) else None), int)
-                    loc = np.concatenate([forced, pool[sub]])
+                loc = fr[np.asarray(subset_select_moo(comp2d[fr], ref, min(budget, len(fr)),
+                                                      self.args.subset_pop_size, endpoints=endpoints,
+                                                      seed=self.args.seed, std_axes=[1]), int)]
             else:
-                pool = np.setdiff1d(np.arange(len(cands)), true_forced)
-                k = max(0, budget - len(true_forced))
-                sub = np.asarray(subset_select_moo(
-                    comp2d[pool], ref, min(k, len(pool)), self.args.subset_pop_size,
-                    endpoints=endpoints, seed=self.args.seed, std_axes=[1],
-                    fam=None if fam_mm is None else fam_mm[pool],
-                    fixed_comp=comp2d[true_forced] if len(true_forced) else None,
-                    fixed_fam=fam_all[true_forced] if len(true_forced) else None), int)
-                loc = np.concatenate([true_forced, pool[sub]]).astype(int)
+                loc = np.asarray(subset_select_moo(comp2d, ref, budget, self.args.subset_pop_size,
+                                                   endpoints=endpoints, seed=self.args.seed,
+                                                   std_axes=[1]), int)
             seen = {tuple(g.tolist()) for g in cand_genomes}
             extra = []
             for j in loc:
@@ -1066,28 +976,6 @@ def build_parser():
     # build amortizes. 0 = off (unchanged behaviour).
     p.add_argument('--companion_kv', type=int, default=0,
                    help='extra geometry-diverse KV archs to attach per W-anchor at the subset stage (0=off)')
-    p.add_argument('--companion_true_ends', default='both',
-                   choices=['off', 'top', 'bottom', 'both'],
-                   help='force the pool\'s TRUE box-end KV block(s) per anchor into the '
-                        'companion picks — supply injection past the dominance filter '
-                        '(the flat high-kv tail never enters the predicted front; measured '
-                        'top-row family coverage 0/20 without vs 20/20 with). both (default) '
-                        '= min+max eff_kv blocks; top = max only (the bottom row is already '
-                        'densely sampled 13-18/20, so its probes are partly redundant); '
-                        'value is predictive calibration (starved rmse 0.019→0.011, bias '
-                        'removal), NOT front value. Cost ≤ 2×n_anchor evals/iter.')
-    p.add_argument('--companion_front_ends', type=int, default=2,
-                   help='per anchor family, force this many predicted-front kv-extreme members '
-                        'into the companion picks (2 = min+max eff_kv ends, 1 = max end only, '
-                        '0 = off). Budget-neutral (subset picks the remainder). The subset GA '
-                        'never takes them on its own: gap-std injects the box edges virtually, '
-                        'so measuring an end is score-invisible; their value is pinning each '
-                        'family\'s predicted-front extent (flat families → the knee).')
-    p.add_argument('--companion_gap', default='minimax', choices=['minimax', 'pooled'],
-                   help='companion subset kv-gap scoring: minimax = per-anchor-family worst '
-                        'gap-std (default; pooled score saturates on the companion-era front '
-                        '— measured ~1e-5 sensitivity — and a mean would let K-1 laddered '
-                        'families hide one starving family). pooled = legacy union scoring.')
     p.add_argument('--companion_method', default='2d',
                    choices=['2d', 'stagger', 'std_gap', 'cov_rad'],
                    help="companion-KV placement. DEFAULT 2d: search stage = predicted-Pareto "
