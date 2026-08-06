@@ -139,11 +139,13 @@ def load_block_pools(w_expr, kv_expr, ss, w_eps=0.0, kv_eps=0.0, eps_rel=0.0,
     nw = nw_split(ss)
     dw = json.load(open(_last_stats(w_expr))); Ew = dw['archive'] + dw.get('candidates', [])
     jw = np.array([e[1] for e in Ew]); cw = np.array([e[2] for e in Ew])
-    fw, sw, Wg, w_comp = _select_blocks(jw, cw, lambda i: ss.encode(Ew[i][0])[:nw],
+    Gw = ss.encode_batch([e[0] for e in Ew])[:, :nw]     # one vectorized pass (~50x per-arch encode)
+    fw, sw, Wg, w_comp = _select_blocks(jw, cw, lambda i: Gw[i],
                                         w_eps, eps_rel, div_k, seed)
     dk = json.load(open(_last_stats(kv_expr))); Ek = dk['archive'] + dk.get('candidates', [])
     jk = np.array([e[1] for e in Ek]); ck = np.array([e[2] for e in Ek])
-    fk, sk, KVg, kv_comp = _select_blocks(jk, ck, lambda i: ss.encode(Ek[i][0])[nw:],
+    Gk = ss.encode_batch([e[0] for e in Ek])[:, nw:]
+    fk, sk, KVg, kv_comp = _select_blocks(jk, ck, lambda i: Gk[i],
                                           kv_eps, eps_rel, div_k, seed)
     ow = np.argsort(cw[fw]); wcurve = (cw[fw][ow], jw[fw][ow])     # proxy curve = front (not band)
     ok = np.argsort(ck[fk]); kcurve = (ck[fk][ok], jk[fk][ok])

@@ -44,7 +44,16 @@ def _resolve_device(device):
 class ARDGP:
     def __init__(self, kernel='matern32', with_noise=True, n_restarts=10,
                  device='auto', max_iter=200, predict_batch=None,
-                 predict_mem_budget=512 * 1024 ** 2):
+                 predict_mem_budget=512 * 1024 ** 2, init_raw=None):
+        # init_raw: optional WARM-START — the previous fit's best raw hp vector
+        # (self._raw) added as an EXTRA L-BFGS start beside the 11 cold inits.
+        # The healthy NLL basin is found by only ~2/11 cold inits (r0/r6, see
+        # tests/gp_restart_probe.py); archives grow ~7%/iter so last iter's
+        # optimum sits next to this iter's — starting there makes the healthy
+        # candidate independent of cold-init luck. Selection stays best-NLL, so
+        # a degenerate warm point can never displace a healthy cold winner
+        # (degenerate NLL/n ≈ 1.42 plateau loses to healthy ≈ −2.16).
+        self.init_raw = init_raw
         self.kernel = kernel
         self.with_noise = with_noise
         self.n_restarts = n_restarts
@@ -100,6 +109,26 @@ class ARDGP:
             i += n
         return out
 
+    @staticmethod
+    def _chol_jitter(K):
+        """Cholesky with adaptive Tikhonov jitter — the ard_gp twin of
+        rbf._robust_solve. Near-duplicate feature rows (companion families share
+        the exact W-block → identical W-features) make K near-singular in the
+        SMOOTH-lengthscale region, and torch's CUDA Cholesky raises there more
+        readily than CPU LAPACK. fit() used to discard the whole restart on that
+        RuntimeError, so only the always-well-conditioned DEGENERATE optimum
+        (lengthscale→bound, K≈diag) survived on some (data, device) draws — the
+        verified root cause of the 2607281255 iter5/iter10 companion dumps.
+        Escalating jitter keeps the healthy basin reachable on every device."""
+        eye = torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
+        scale = float(K.diagonal().abs().max().detach().cpu()) or 1.0
+        for j in (0.0, 1e-10, 1e-8, 1e-6, 1e-4):
+            try:
+                return torch.linalg.cholesky(K + (j * scale) * eye)
+            except RuntimeError:
+                continue
+        return torch.linalg.cholesky(K + (1e-2 * scale) * eye)
+
     def _nll(self, raw, X, y):
         hp = self._unpack(raw)
         n = X.shape[0]
@@ -111,7 +140,7 @@ class ARDGP:
         if self.with_noise:
             diag = diag + hp['white']
         K = K + diag * torch.eye(n, dtype=X.dtype, device=X.device)
-        L = torch.linalg.cholesky(K)
+        L = self._chol_jitter(K)
         alpha = torch.cholesky_solve(y, L)
         # 0.5 y^T K^-1 y + sum(log diag L) + n/2 log 2pi
         nll = 0.5 * (y * alpha).sum()
@@ -144,7 +173,11 @@ class ARDGP:
             bounds.append(('rq_alpha', (1e-2, 1e2)))
             psize['rq_alpha'] = 1
         if self.with_noise:
-            bounds.append(('white', (1e-9, 1e-2)))
+            # lower bound raised 1e-9 → 1e-6 (normalized-y scale): a zero-noise
+            # memorization fit is never legitimate on measured JSD, and the
+            # extra diagonal mass keeps smooth-kernel K invertible under the
+            # companion near-duplicate rows (see _chol_jitter).
+            bounds.append(('white', (1e-6, 1e-2)))
             psize['white'] = 1
         self._BOUNDS = bounds
         self._PSIZE = psize
@@ -152,16 +185,45 @@ class ARDGP:
 
         best_nll = float('inf')
         best_raw = None
+        best_s = -1
+        n_died = 0
         gen = torch.Generator(device='cpu').manual_seed(0)
-        n_starts = max(1, self.n_restarts) + 1
-        for s in range(n_starts):
-            if s == 0:
-                init = torch.zeros(n_param, dtype=torch.float64)
-            else:
-                init = torch.randn(n_param, generator=gen,
-                                   dtype=torch.float64) * 1.5
+        warm = None
+        if self.init_raw is not None:
+            w = torch.as_tensor(self.init_raw,
+                                dtype=torch.float64).detach().cpu().ravel()
+            if w.numel() == n_param and torch.isfinite(w).all():
+                warm = w.clone()
+        # cold-restart budget: random inits almost never find the healthy basin
+        # (autopsy tests/gp_restart_probe.py: winners come from the zeros init /
+        # warm start; random survivors are dominated degenerate fits). With a
+        # warm start the healthy candidate is double-covered (zeros + warm), so
+        # cold randoms are dropped entirely and both survivors run a 50-step
+        # budget — measured LOSSLESS with a production-stale (1-iter-old) warm
+        # on the real iter-13 workload (tests/ardgp_speed_ablation.py: OOS rho/
+        # rmse/family-rho identical to the 163s full fit at ~20s; stale warm
+        # reconverges in ~75 free steps, 50 suffices with zeros as the fallback
+        # competitor — NEVER warm-only: best-NLL selection is what stops a
+        # degenerate warm from sticking, so zeros must stay in the race).
+        n_cold = max(1, self.n_restarts) if warm is None else 0
+        warm_budget = min(self.max_iter, 50)
+        inits = [torch.zeros(n_param, dtype=torch.float64)]
+        inits += [torch.randn(n_param, generator=gen, dtype=torch.float64) * 1.5
+                  for _ in range(n_cold)]
+        warm_s = None
+        if warm is not None:
+            warm_s = len(inits)
+            inits.append(warm)
+        n_starts = len(inits)
+        for s, init in enumerate(inits):
             raw = init.to(dev).detach().clone().requires_grad_(True)
-            opt = torch.optim.LBFGS([raw], max_iter=self.max_iter,
+            # budgets: cold fit (no warm) = zeros full 200 + capped colds;
+            # warm fit = zeros@50 + warm@50 (measured lossless, see above).
+            if warm_s is not None:
+                mi = warm_budget
+            else:
+                mi = self.max_iter if s == 0 else min(self.max_iter, 50)
+            opt = torch.optim.LBFGS([raw], max_iter=mi,
                                     line_search_fn='strong_wolfe')
 
             def closure():
@@ -175,11 +237,20 @@ class ARDGP:
                 with torch.no_grad():
                     val = float(self._nll(raw, Xt, yt))
             except RuntimeError:
+                n_died += 1
                 continue
             if np.isfinite(val) and val < best_nll:
                 best_nll = val
                 best_raw = raw.detach().clone()
+                best_s = s
 
+        if warm_s is not None and best_s == warm_s:
+            print(f"[ard_gp] warm-start init won (nll/n={best_nll / n:.3f})")
+        if n_died:
+            # visible trace: silent restart mortality is how the degenerate
+            # optimum used to win by walkover (companion-dump root cause).
+            print(f"[ard_gp] WARNING: {n_died}/{n_starts} restarts died "
+                  f"(RuntimeError) despite jittered Cholesky")
         if best_raw is None:
             raise RuntimeError("ARDGP: all hyper-parameter restarts failed")
 
@@ -190,7 +261,7 @@ class ARDGP:
                                             hp.get('rq_alpha'))
             diag = self._alpha + (hp['white'] if self.with_noise else 0.0)
             K = K + diag * torch.eye(n, dtype=torch.float64, device=dev)
-            self._L = torch.linalg.cholesky(K)
+            self._L = self._chol_jitter(K)
             self._alpha_vec = torch.cholesky_solve(yt, self._L)
             self._hp = hp
         self._fitted = True
