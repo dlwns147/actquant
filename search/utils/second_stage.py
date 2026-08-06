@@ -488,13 +488,32 @@ def pareto_first_front(F, group_axis=None):
 
 
 def subset_select_moo(comp, nd_F, K, pop_size=100, endpoints=None, n_gen=60, seed=None, grid=28,
-                      std_axes=None):
+                      std_axes=None, fam=None, fixed_comp=None, fixed_fam=None):
     """2nd-stage-LOCAL multi-objective subset selector (NSGA-II). Minimise, over (nd_F ∪ picks):
     a normalised std(gaps)/range per axis in `std_axes` (even spacing) + one 2D covering radius
     (joint worst hole). std_axes default = all axes → downselect 3-obj (w-std, kv-std, 2D-cov);
     companion passes [eff_kv] → 2-obj (wbits is anchor-fixed, so its std would be constant). Final
     pick = max-min (minimax) compromise on the front. Grid→point distances are PRECOMPUTED once
-    (Dgc, Dgf), so a subset's cov radius is a slice+min, not a per-subset cdist."""
+    (Dgc, Dgf), so a subset's cov radius is a slice+min, not a per-subset cdist.
+
+    ``fam`` ((N,) int ids, optional): PER-FAMILY MINIMAX gap scoring — the std_axes gap
+    objective becomes max over families of the family's own picks' gap-std (endpoint-injected;
+    a family given no picks scores the 1.0 sentinel). Motivation (2026-08-06 measured): the
+    pooled gap column is computed over nd_F ∪ picks, and the companion-era front (1-3.6k pts)
+    blankets the kv axis, so the pooled score moves ~1e-5 no matter where picks go — zero
+    selection pressure, per-W holes invisible (max per-family gap-std 0.19-0.49 while pooled
+    reads 0.0017). Minimax restores guarantee semantics: the score IS the worst family, so K-1
+    well-laddered families can never subsidize a starving one (a MEAN would hide a 0.49
+    catastrophic family behind a 0.11 average — exactly the dump geometry). nd_F stays in the
+    cov_rad objective unchanged (global 2D reach); it is excluded from family gaps (front points
+    carry no family identity).
+
+    ``fixed_comp``/``fixed_fam``: comp rows (+family ids) that are ALWAYS in the pick set but
+    not selectable — frozen genes (e.g. forced end archs). Every objective is evaluated over
+    fixed ∪ picks (family gaps include the family's fixed rows; cov_rad treats fixed as
+    covered), so the free picks COMPLEMENT the fixed ones instead of redundantly covering
+    next to them — the failure mode of forcing outside the GA. Returned indices refer to
+    `comp` only; the caller appends its fixed rows itself."""
     from pymoo.algorithms.moo.nsga2 import NSGA2
     from pymoo.optimize import minimize
     from scipy.spatial.distance import cdist
@@ -509,6 +528,26 @@ def subset_select_moo(comp, nd_F, K, pop_size=100, endpoints=None, n_gen=60, see
     Gn = (np.stack(np.meshgrid(*axes, indexing='ij'), -1).reshape(-1, d)) / rng   # normalised grid
     Dgc = cdist(Gn, comp / rng)                                        # (n_grid, n_cand) PRECOMPUTED
     Dgf = cdist(Gn, nd_F / rng).min(1) if len(nd_F) else np.full(len(Gn), np.inf)
+    if fixed_comp is not None and len(fixed_comp):
+        fixed_comp = np.asarray(fixed_comp, float)
+        Dgf = np.minimum(Dgf, cdist(Gn, fixed_comp / rng).min(1))      # cov_rad: fixed = covered
+        fixed_fam = None if fixed_fam is None else np.asarray(fixed_fam, int)
+    else:
+        fixed_comp = fixed_fam = None
+    if fam is not None:
+        fam = np.asarray(fam, int)
+        fam_ids = np.unique(np.concatenate([fam, fixed_fam])
+                            if fixed_fam is not None else fam)
+        fam_masks = [fam == f for f in fam_ids]                        # PRECOMPUTED family rows
+        fam_fixed = [fixed_comp[fixed_fam == f] if fixed_fam is not None
+                     else np.empty((0, d)) for f in fam_ids]
+
+    def _gap(col, l, h):
+        tol = 1e-6 * (h - l); ex = []
+        if not np.any(np.abs(col - l) <= tol): ex.append(l)
+        if not np.any(np.abs(col - h) <= tol): ex.append(h)
+        if ex: col = np.concatenate((col, np.asarray(ex, float)))
+        return np.std(np.diff(np.sort(col))) / (h - l)
 
     class _Moo(Problem):
         def __init__(self):
@@ -521,16 +560,24 @@ def subset_select_moo(comp, nd_F, K, pop_size=100, endpoints=None, n_gen=60, see
                 objs = []
                 for j in saxes:                                        # per-axis normalised std-gap
                     l, h = lo[j], hi[j]
-                    if h > l:
+                    if h <= l:
+                        objs.append(0.0)
+                    elif fam is not None:                              # per-family MINIMAX
+                        worst = 0.0
+                        for msk, fx in zip(fam_masks, fam_fixed):
+                            colf = comp[_x & msk, j]
+                            if len(fx):
+                                colf = np.concatenate([colf, fx[:, j]])
+                            s = 1.0 if colf.size == 0 else _gap(colf, l, h)
+                            if s > worst:
+                                worst = s
+                        objs.append(worst)
+                    else:                                              # legacy pooled (nd_F ∪ picks)
                         col = comp[_x, j]
                         col = np.concatenate((ndf[:, j], col)) if len(ndf) else col
-                        tol = 1e-6 * (h - l); ex = []
-                        if not np.any(np.abs(col - l) <= tol): ex.append(l)
-                        if not np.any(np.abs(col - h) <= tol): ex.append(h)
-                        if ex: col = np.concatenate((col, np.asarray(ex, float)))
-                        objs.append(np.std(np.diff(np.sort(col))) / (h - l))
-                    else:
-                        objs.append(0.0)
+                        if fixed_comp is not None:
+                            col = np.concatenate((col, fixed_comp[:, j]))
+                        objs.append(_gap(col, l, h))
                 sub = Dgc[:, _x]                                        # (n_grid, |picks|) — slice only
                 near = sub.min(1) if sub.shape[1] else np.full(len(Gn), np.inf)
                 objs.append(float(np.minimum(Dgf, near).max()))        # 2D covering radius (norm)
