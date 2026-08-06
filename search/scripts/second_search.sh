@@ -78,7 +78,6 @@ GRID_SEED=True
 # COMPANION_KV=0       # WAFE: extra geometry-diverse KV archs attached per W-anchor at the subset
 COMPANION_KV=10       # WAFE: extra geometry-diverse KV archs attached per W-anchor at the subset
 COMPANION_METHOD=2d   # KV placement: 2d (DEFAULT) = predicted-Pareto filter (loss,wbits,eff_kv)
-ANCHOR_W_PICK=gap     # W-anchor pick: gap=union-std-gap GA (legacy) | qrot=rotated quantiles (knob-free)
 
 FRONT_EPS_REL=0.05
 # FRONT_EPS_REL=0
@@ -104,7 +103,6 @@ PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
 CAND_TAG=subset                                                 # down-select = subset (fixed)
 [ "${GRID_SEED}" == "True" ] && CAND_TAG+=-st                   # staircase supply seeds on
 [ "${COMPANION_KV}" -gt 0 ] && CAND_TAG+="-ckv${COMPANION_KV}${COMPANION_METHOD:0:3}"  # +companion KV sweep
-[ "${ANCHOR_W_PICK}" != "gap" ] && CAND_TAG+="-${ANCHOR_W_PICK}"                       # non-default W-anchor pick
 SURROGATE_KERNEL=""   # kernel for the active SURROGATE (rbf: cubic/tps/linear · ard_gp: matern32/52/rbf/rq); ""=model default
 SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}  # e.g. rbfplstyp
 [ -n "${SURROGATE_KERNEL}" ] && SURR_TAG+=${SURROGATE_KERNEL}   # e.g. rbfplstyptps
@@ -137,7 +135,6 @@ ARGS="--config ${CONFIG} \
 
 [ "${GRID_SEED}" == "True" ] && ARGS+=" --grid_seed"
 [ "${COMPANION_KV}" -gt 0 ] && ARGS+=" --companion_kv ${COMPANION_KV} --companion_method ${COMPANION_METHOD}"
-[ "${ANCHOR_W_PICK}" != "gap" ] && ARGS+=" --anchor_w_pick ${ANCHOR_W_PICK}"
 
 ARGS+=" --surrogate_input ${SURROGATE_INPUT}"
 [ -n "${SURROGATE_KERNEL}" ] && ARGS+=" --surrogate_kernel ${SURROGATE_KERNEL}"

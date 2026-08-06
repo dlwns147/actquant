@@ -29,7 +29,7 @@ from search_space.llama import LlamaSearchSpace
 from predictor.factory import get_predictor
 from utils.func import set_seed, get_correlation, get_net_info
 from utils.metric_specs import protocol_dict
-from utils.select import subset_select, rotated_quantile_pick
+from utils.select import subset_select
 from utils.second_stage import (
     encoding_xu, nw_split, load_block_pools, load_band_blocks, subset_select_moo, pareto_first_front,
     gene_weights, freeze_mask, block_segments, derive_options, derive_qeft,
@@ -629,13 +629,6 @@ class SecondSearch:
                    or getattr(self.args, 'decision_frac', 0.0) > 0)
         if not use_acq or pred is None:
             if getattr(self.args, 'companion_kv', 0) > 0:    # anchors span wbits; companions do eff_kv
-                if getattr(self.args, 'anchor_w_pick', 'gap') == 'qrot':
-                    # knob-free rotated-quantile anchors: immune to the union-gap
-                    # saturation a companion-inflated front causes (measured ~1%
-                    # GA discrimination on real runs) — see rotated_quantile_pick.
-                    self._anchor_round = getattr(self, '_anchor_round', 0) + 1
-                    return rotated_quantile_pick(comp[:, 0], K, endpoints[0, 0],
-                                                 endpoints[1, 0], self._anchor_round - 1)
                 return subset_select(comp[:, :1], front_comp[:, :1], K, self.args.subset_pop_size,
                                      endpoints=endpoints[:, :1], seed=self.args.seed)
             return subset_select_moo(comp, front_comp, K, self.args.subset_pop_size,   # 3-obj max-min
@@ -1094,15 +1087,12 @@ def build_parser():
                         "filter (loss,wbits,eff_kv) → front-referenced 2D subset over (wbits,eff_kv); "
                         "DOE (no front) = per-anchor greedy lowest-2D-covering-radius. stagger / "
                         "std_gap / cov_rad = 1D-eff_kv geometry variants (each anchor a different set).")
-    p.add_argument('--anchor_w_pick', default='gap', choices=['gap', 'qrot'],
-                   help='W-anchor down-select (companion_kv>0 only). gap = union std-of-gaps '
-                        'subset-GA (legacy; measured to SATURATE once companions inflate the '
-                        'front to 1000+ points — ~1%% objective discrimination, near-arbitrary '
-                        'picks). qrot = knob-free golden-ratio-rotated uniform quantiles over '
-                        'the wbits budget range, snapped to candidates (grid A/B 8/0 vs gap, '
-                        'p=0.008; tests/anchor_w_density_study.py). Density-seeking variants '
-                        '(anchors toward Pareto-KV-rich W bands) were tested and REJECTED: '
-                        'front density is sampling-history contamination, all variants lost.')
+    # W-anchor pick = subset_select (union std-of-gaps GA). Alternatives studied 2026-08-06
+    # (tests/anchor_w_density_study.py, visualize/anchor_w_pick_ab.py) and REMOVED after a
+    # 2-seed x 15-iter HQQ A/B tie: qrot (rotated quantiles — grid-sim winner, real-run
+    # no-op) and density-seeking variants (harmful: front density is sampling-history
+    # contamination). The gap GA's objective does saturate on companion-era fronts (~1%
+    # discrimination) but the archive-level outcome was insensitive.
     p.add_argument('--cand_grid', type=int, default=0, help='seed grid side over the budget box (0=auto=ceil(sqrt(n_iter)))')
     p.add_argument('--grid_seed', action='store_true', help='inject staircase even-supply genomes per box grid cell into the candidate pool each iter (guarantees high-comp supply)')
     # decision-aware down-select (AWQ regime, opt-in; utils/acquisition.py). Default 0/0.0
