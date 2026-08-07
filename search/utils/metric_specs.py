@@ -79,6 +79,37 @@ GROUPS = {
         loss_func='jsd', use_key_token=False, last_tokens=128,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
+    # gov_jsd_pp128_s32 n_sample × seqlen sweep — same last-128 answer window as
+    # B_lt128, but n_sample (8→4) and seqlen (8192→4096→2048) vary for a cost /
+    # context-length ablation. n_sample + seqlen + min_seqlen are group-owned
+    # (they set the loaders + FP-teacher dense_logits), so each combo needs its
+    # own group. min_seqlen tracks seqlen (standard shorter-context gov_report);
+    # dense_logits stay tiny (n_sample × 128 × vocab fp16) thanks to last_tokens=128.
+    'B_lt128_n8_sl4096': dict(  # gov_report — n8, seqlen 4096
+        datasets=['gov_report'], n_sample=8, seqlen=4096, min_seqlen=4096,
+        loss_func='jsd', use_key_token=False, last_tokens=128,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_n8_sl2048': dict(  # gov_report — n8, seqlen 2048
+        datasets=['gov_report'], n_sample=8, seqlen=2048, min_seqlen=2048,
+        loss_func='jsd', use_key_token=False, last_tokens=128,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_n4_sl8192': dict(  # gov_report — n4, seqlen 8192
+        datasets=['gov_report'], n_sample=4, seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=128,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_n4_sl4096': dict(  # gov_report — n4, seqlen 4096
+        datasets=['gov_report'], n_sample=4, seqlen=4096, min_seqlen=4096,
+        loss_func='jsd', use_key_token=False, last_tokens=128,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_n4_sl2048': dict(  # gov_report — n4, seqlen 2048
+        datasets=['gov_report'], n_sample=4, seqlen=2048, min_seqlen=2048,
+        loss_func='jsd', use_key_token=False, last_tokens=128,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
     'D': dict(  # gsm8k — short answer-only loss, JSD
         datasets=['gsm8k'], n_sample=8, seqlen=2048, min_seqlen=0,
         loss_func='jsd', use_key_token=False, last_tokens=None,
@@ -218,6 +249,26 @@ METRIC_TASKS = [
         # Answer-phase JSD on the last 128 tokens (prefill_prompt + stride=32);
         # Group B_lt128 (last_tokens=128) supplies the matching pre-masked
         # dense_logits (shared with gov_jsd_lt128).
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    # gov_jsd_pp128_s32 n_sample × seqlen sweep (see the B_lt128_n*_sl* groups).
+    # Same forward side as gov_jsd_pp128_s32 (jsd, stride=32, prefill,
+    # last_tokens=128); only the group's n_sample / seqlen / min_seqlen differ.
+    # Every SWEEP name spells out BOTH knobs (_n{N}_sl{L}); only the base
+    # gov_jsd_pp128_s32 (= n8 / sl8192) is left implicit, for back-compat.
+    ('gov_jsd_pp128_s32_n8_sl4096', 'B_lt128_n8_sl4096', 'gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_jsd_pp128_s32_n8_sl2048', 'B_lt128_n8_sl2048', 'gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_jsd_pp128_s32_n4_sl8192', 'B_lt128_n4_sl8192', 'gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_jsd_pp128_s32_n4_sl4096', 'B_lt128_n4_sl4096', 'gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_jsd_pp128_s32_n4_sl2048', 'B_lt128_n4_sl2048', 'gov_report',
         dict(metric='loss', loss_func='jsd',
              stride=32, prefill_prompt=True, last_tokens=128)),
     ('gov_jsd_lt128',     'B_lt128', 'gov_report',
