@@ -112,6 +112,19 @@ for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR EFF_KV_EXPR; do
     fi
 done
 
+# ── per-axis pool: strict Pareto front (0) or ε-band around it ──
+# FRONT_EPS_REL > 0 keeps every arch with metric <= front(comp)*(1+rel) — the
+# same near-front shell second_search.sh's FRONT_EPS_REL builds its block pools
+# from (utils/second_stage.select_eps_band), so the correlation rows are drawn
+# from the same population the 2nd-stage search sees, not only its front.
+# Sizes on the Llama archives below: W front 742 / eff_kv front 452 →
+# rel 0.01: 1730 / 1912 (n_total 3.3e6) · rel 0.05: 5788 / 6234 (3.6e7)
+# · rel 0.1: 7271 / 7092 (5.2e7). n_total is the DENSE combo product, held in
+# RAM (metric array + candidate index list): measured 3.6e7 → 232 s / 5.0 GB
+# peak for the qs+coverage path above. Stay at rel<=0.05 unless COMP_OBJ
+# bounds prune the product first (build_nd hard-stops at 5e8).
+FRONT_EPS_REL=0
+
 # ── (optional) comp_obj pre-filter; leave empty to sample from the full PF combo ──
 # COMP_OBJ=(wbits kvbits kvdim)
 # COMP_OBJ_VAL=(3 3.25 102)
@@ -147,6 +160,8 @@ if [ -n "${QUANTILE_SAMPLE}" ]; then
     done
     SAVE+="_qs${QS_TEXT}"
 fi
+# ε-band tag, only when on so strict-front dirs stay byte-identical/comparable.
+[ "$(echo "${FRONT_EPS_REL} > 0" | bc -l)" -eq 1 ] && SAVE+="_eps${FRONT_EPS_REL}"
 case "${SAMPLING_METHOD}" in
     random)                  SAVE+="_r" ;;
     coverage_nsga2_joint)    SAVE+="_j${COVERAGE_COORD:0:1}" ;;
@@ -179,6 +194,7 @@ ARGS="--mode sample \
 --coverage_coord ${COVERAGE_COORD} \
 --coverage_per_axis_agg ${COVERAGE_PER_AXIS_AGG} \
 --coverage_pareto_select ${COVERAGE_PARETO_SELECT} \
+--front_eps_rel ${FRONT_EPS_REL} \
 --expr_front"
 
 if [ -n "${QUANTILE_SAMPLE}" ]; then

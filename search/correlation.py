@@ -8,7 +8,10 @@ Two stages, both invoked via this single file:
     `--n_archs` architectures (optionally inside `--comp_obj_min/--comp_obj_max`)
     and write each architecture as a single row to `<save>/archs.csv`. Pareto-
     near sampling is achieved upstream: pass `--expr_front` to keep only the
-    per-axis Pareto frontier of each archive (matches scripts/sample_surrogate.sh).
+    per-axis Pareto frontier of each archive (matches scripts/sample_surrogate.sh),
+    or `--front_eps_rel R` to keep the ε-BAND around that frontier instead —
+    metric ≤ front(comp)·(1+R), the same near-front shell second_search.py
+    builds its block pools from (R=0 → strict front, unchanged).
 
     `--grid_sample` switches to a PAIRED FACTORIAL design instead: draw
     `--grid_n` blocks per axis from each axis's Pareto front (random, or
@@ -112,9 +115,12 @@ def cmd_sample(args):
     expr_map = build_expr_map(args, ctx)
     nd = build_nd(args, ctx, expr_map)
     expr_keys, _esm, _efm = nd.expr_keys, nd.esm, nd.efm
-    print(f"[correlation/sample] expr_front={args.expr_front} → "
+    _pool_desc = (f"ε-band(rel={args.front_eps_rel})" if args.front_eps_rel > 0
+                  else f"expr_front={args.expr_front}")
+    print(f"[correlation/sample] pool={_pool_desc} → "
           f"{'lazy comp_obj-pruned' if getattr(nd, 'lazy', False) else 'dense'} path  "
-          f"(n_total={nd.n_total:.3e}, expr_keys={expr_keys})")
+          f"(per-axis {dict(zip(expr_keys, nd.nd_shape))}, "
+          f"n_total={nd.n_total:.3e}, expr_keys={expr_keys})")
 
     # ── Factorial grid mode (--grid_sample): random/stratified per-axis
     # Pareto-front blocks → FULL cartesian product. Bypasses the quantile /
@@ -362,7 +368,8 @@ def _write_sample_outputs(args, ctx, nd, expr_keys, valid_nd_idx, samp_desc,
         'config': args.config, 'expr_keys': list(expr_keys),
         'w_expr': args.w_expr, 'kv_expr': args.kv_expr,
         'kvdim_expr': args.kvdim_expr, 'eff_kv_expr': args.eff_kv_expr,
-        'expr_front': args.expr_front, 'n_token': args.n_token,
+        'expr_front': args.expr_front, 'front_eps_rel': args.front_eps_rel,
+        'n_token': args.n_token,
         'attn_sink': args.attn_sink,
         'comp_obj': args.comp_obj, 'comp_obj_min': args.comp_obj_min,
         'comp_obj_max': args.comp_obj_max,
@@ -1316,6 +1323,17 @@ def build_parser():
     p.add_argument('--kvdim_expr', type=str, default='')
     p.add_argument('--eff_kv_expr', type=str, default='')
     p.add_argument('--expr_front', action='store_true')
+    # ε-band (near-front shell) instead of the strict per-axis Pareto front —
+    # same envelope rule as second_search.py --front_eps_rel
+    # (utils/second_stage.select_eps_band): keep metric <= front(comp)*(1+rel).
+    # >0 implies front filtering (--expr_front not required). The per-axis pools
+    # grow ~8x at rel=0.05, so the combo product grows ~64x — check the printed
+    # n_total before adding a comp_obj-free wide band.
+    p.add_argument('--front_eps_rel', type=float, default=0.0,
+                   help='(sample) relative ε-band around each per-axis front: '
+                        'keep archs with metric <= front(comp)*(1+rel). '
+                        'Scale-free (wider in the high-loss corner). '
+                        '0 = strict front (--expr_front), unchanged behaviour.')
     p.add_argument('--sqrt', action='store_true')
     p.add_argument('--w_scale', type=float, default=1.0)
     p.add_argument('--kv_scale', type=float, default=1.0)

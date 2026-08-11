@@ -1,0 +1,463 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem formulation}
+\label{sec:problem}
+
+Let $\mathcal{X}=\mathcal{X}_W\times\mathcal{X}_{KV}$ be a finite configuration
+space.  A weight configuration $w\in\mathcal{X}_W$ assigns a bit-width to every
+linear module.  A cache configuration $k\in\mathcal{X}_{KV}$ assigns, per layer,
+K/V bit-widths and group sizes and K/V channel-pruning dimensions.  We use
+$a=(w,k)$ for a joint architecture.
+
+For quantization method $M$, quality loss is the Jensen--Shannon divergence
+between the output distributions of the full-precision teacher and the
+compressed model,
+\begin{equation}
+  y_M(a)=\frac{1}{|\mathcal{D}|}
+  \sum_{(x,t)\in\mathcal{D}}
+  \jsd\!\left(p_{\mathrm{FP}}(\cdot\mid x,t),
+              p_{M,a}(\cdot\mid x,t)\right),
+  \label{eq:jsd}
+\end{equation}
+where lower is better.  The calibration protocol is held fixed across all
+comparisons.  Our current search protocol uses 128 WikiText-2 samples of length
+2048, evaluates the final 512 tokens through the real cache path, and advances
+with stride 128.  These details are part of the objective definition: changing
+the context or cache path can change the measured W--KV exchange rate.
+
+The two cost coordinates are
+\begin{equation}
+  c(a)=\big(c_W(w),c_{KV}(k;T)\big),
+  \label{eq:cost}
+\end{equation}
+where $c_W$ is a parameter-count-weighted average weight precision and $c_{KV}$
+is either effective KV precision or exact cache memory at context length $T$,
+depending on the reporting target.  Exact memory accounting includes
+quantization metadata, retained channel dimension,
+the full-precision residual window, and any fixed attention-sink window.  By
+construction, $c_W$ depends only on $w$ and $c_{KV}$ only on $k$.  This exact cost
+separability will matter; we make no analogous assumption about $y_M$.
+
+The deployment objective is the three-objective minimization
+\begin{equation}
+  \min_{(w,k)\in\mathcal{X}}
+  \left(y_{\deploy}(w,k),c_W(w),c_{KV}(k;T)\right).
+  \label{eq:moo}
+\end{equation}
+Equivalently, a deployment can choose the measured architecture with minimum
+$y_{\deploy}$ under upper bounds on the two cost coordinates.
+
+\subsection{Two-stage search overview}
+\label{sec:overview}
+
+Directly optimizing Eq.~\eqref{eq:moo} is both combinatorial and build-bound.
+\method{} decomposes it as follows.
+
+\paragraph{Stage 1: per-axis order.}
+Choose high-precision reference partners $r_W$ and $r_{KV}$.  With the cheap
+proxy method $P=\proxy$, define
+\begin{equation}
+  z_W(w)=y_P(w,r_{KV}),\qquad
+  z_{KV}(k)=y_P(r_W,k).
+  \label{eq:axis_scores}
+\end{equation}
+We independently search $(z_W,c_W)$ and $(z_{KV},c_{KV})$ using an initial
+design, an iteratively refit surrogate, and NSGA-II candidate generation.  Each
+search returns an archive and an $\eta_i$-Pareto band rather than only one point
+per cost.  The band is structurally diversified so that nearly tied allocations
+are not collapsed to a single layer pattern.
+
+\paragraph{Stage 2: joint values.}
+We form a candidate space from the Cartesian product of weight and KV blocks in
+the two bands.  Axis-block crossover retains coherent structures found in
+Stage~1.  Mutation resamples values preferentially at positions whose Stage~1
+front blocks disagree; positions on which at least 95\% of the blocks agree can
+be frozen.  This product-plus-mutation space is optimized for
+$(y_{\deploy},c_W,c_{KV})$ with NSGA-III.  A surrogate proposes candidates, but
+only measured AWQ values enter the final archive and final budgeted selection.
+
+At each iteration, Stage~2 performs the following operations:
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+    \item fit the AWQ-loss surrogate on the current archive using the
+    proxy-supervised embedding in Sec.~\ref{sec:pls};
+    \item generate product, crossover, and mutation candidates with NSGA-III;
+    \item select weight anchors that cover the current
+    $(c_W,c_{KV})$ Pareto geometry, then attach $K-1$ diverse KV companions to
+    each anchor;
+    \item build AWQ weights once per distinct weight anchor, evaluate all of its
+    KV companions, and append every successful measurement to the archive.
+\end{enumerate}
+
+This design gives Stage~1 an ordinal role---identify useful blocks---and Stage~2
+a cardinal role---learn the loss surface and resolve allocations under a joint
+budget.
+
+\subsection{Why the product of per-axis fronts is enough}
+\label{sec:coverage}
+
+We next formalize the weakest quantity required by the restriction.  The
+statement is method-aware: Stage~1 ordering may come from HQQ while the joint
+loss in the conclusion is measured by AWQ.
+
+\begin{definition}[$\eta$-front coverage]
+A set $\widehat{\mathcal{P}}_i\subseteq\mathcal{X}_i$ is an $\eta_i$-cover of
+axis $i$ if, for every $x_i\in\mathcal{X}_i$, there exists
+$p_i\in\widehat{\mathcal{P}}_i$ such that
+\begin{equation}
+  c_i(p_i)\le c_i(x_i),\qquad
+  z_i(p_i)\le z_i(x_i)+\eta_i.
+  \label{eq:eta_cover}
+\end{equation}
+For an exact finite-space Pareto set, $\eta_i=0$.  For a discovered archive,
+Eq.~\eqref{eq:eta_cover} is an empirical adequacy condition.
+\end{definition}
+
+For a replacement on axis $i$, define the conditional ordering-violation
+margin
+\begin{equation}
+ V_i(\eta_i)=
+ \sup\!\left\{
+ \left[y_D(u,x_{-i})-y_D(u',x_{-i})\right]_+:
+ \begin{array}{l}
+ c_i(u)\le c_i(u'),\\[-2pt]
+ z_i(u)\le z_i(u')+\eta_i,\\[-2pt]
+ x_{-i}\in\mathcal{X}_{-i}
+ \end{array}\right\},
+ \label{eq:violation}
+\end{equation}
+where $D=\deploy$ and $[q]_+=\max(q,0)$.  This is the largest amount by which a
+replacement that Stage~1 regards as no worse can hurt deployment quality under
+an arbitrary partner configuration.
+
+\begin{theorem}[Front-product coverage]
+\label{thm:coverage}
+Assume the cost map is separable as in Eq.~\eqref{eq:cost}, and each
+$\widehat{\mathcal{P}}_i$ is an $\eta_i$-cover.  For every
+$a\in\mathcal{X}$ there exists
+$b\in\mathcal{C}=\widehat{\mathcal{P}}_W\times
+\widehat{\mathcal{P}}_{KV}$ such that
+\begin{equation}
+  c(b)\le c(a)\quad\text{componentwise},\qquad
+  y_D(b)\le y_D(a)+V_W(\eta_W)+V_{KV}(\eta_{KV}).
+  \label{eq:coverage_bound}
+\end{equation}
+Consequently, the product set weakly cost-dominates and
+$\epsilon$-quality-dominates the joint Pareto set for
+$\epsilon=V_W+V_{KV}$.
+\end{theorem}
+
+\begin{proof}
+Let $p_W$ and $p_{KV}$ be the covering points from
+Eq.~\eqref{eq:eta_cover}, and set $b=(p_W,p_{KV})$.  Cost separability gives
+$c(b)\le c(a)$.  Replace one axis at a time.  By
+Eq.~\eqref{eq:violation},
+\[
+ y_D(p_W,p_{KV})
+ \le y_D(a_W,p_{KV})+V_W(\eta_W)
+ \le y_D(a_W,a_{KV})+V_W(\eta_W)+V_{KV}(\eta_{KV}).
+\]
+\end{proof}
+
+The theorem does not say that W and KV losses are additive, nor that interaction
+is small.  It only charges interaction components that reverse a Stage~1 order.
+A saturation effect can change absolute values substantially while leaving
+$V_i$ small.  Moreover, mutations do not invalidate the result if the searched
+space retains $\mathcal{C}$: they expand the candidate set and can only improve
+its best attainable point.
+
+A more interpretable, but stronger, sufficient condition connects the theorem
+to approximate sufficient dimension reduction.
+
+\begin{corollary}[Monotone sufficient summaries]
+\label{cor:sufficiency}
+Suppose there is a componentwise nondecreasing function $F$ such that
+\begin{equation}
+ \left|y_D(w,k)-F(z_W(w),z_{KV}(k))\right|\le\epsilon_0
+ \quad\text{for all }(w,k)\in\mathcal{X},
+ \label{eq:sufficiency}
+\end{equation}
+and $F$ is coordinate-wise Lipschitz with constants $L_W,L_{KV}$.  Then the
+point $b$ in Theorem~\ref{thm:coverage} satisfies
+\begin{equation}
+ y_D(b)\le y_D(a)+2\epsilon_0+L_W\eta_W+L_{KV}\eta_{KV}.
+ \label{eq:sufficient_bound}
+\end{equation}
+\end{corollary}
+
+\begin{proof}
+Apply Eq.~\eqref{eq:sufficiency} at $a$ and $b$, monotonicity to the covering
+relations, and the Lipschitz bounds to the $\eta_i$ slack.  The residual is paid
+only at the two endpoints, giving $2\epsilon_0$ rather than one term per axis.
+\end{proof}
+
+\paragraph{Empirical audit.}
+We stratified 20 weight blocks and 20 effective-KV blocks from the Stage~1
+fronts and measured all 400 combinations with AWQ.  At the current stride-128
+protocol, partner-conditioned rankings have minimum Kendall $\tau=0.942$; the
+corresponding empirical margins are
+$\widehat V_W=0.0103$ and $\widehat V_{KV}=0.0034$, totaling 0.0137 (2.6\% of
+the observed JSD range).  These values are stronger evidence than correlation
+alone because Eq.~\eqref{eq:coverage_bound} depends on the largest harmful
+reversal, not the average order.
+
+\IfFileExists{../tests/docs/fig/fig6_order_vs_values.png}{
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{fig6_order_vs_values.png}
+  \caption{Preliminary order--value audit on the paired $20\times20$ grid.
+  A completion fitted from axis measurements preserves most of the joint order
+  (left), although its values deviate in the aggressive corner (right).  This is
+  the empirical distinction between the roles of the two stages.}
+  \label{fig:order-values}
+\end{figure}}{}
+
+The scope is important.  The 400 cells audit on-front blocks.  A mutation can
+create an off-front block that plays both the replaced and partner roles in
+Eq.~\eqref{eq:violation}; those roles have not yet been exhaustively audited.
+Similarly, archive-front adequacy in Eq.~\eqref{eq:eta_cover} is not guaranteed
+by a single search run.  We therefore treat the current numbers as an empirical
+instance on the audited block product.  Section~\ref{sec:analysis_protocol}
+specifies the additional falsification tests needed for a broader claim.
+
+\subsection{Where can we use a quantization proxy?}
+\label{sec:proxy}
+
+Let $y_P$ and $y_D$ be proxy (HQQ) and deployment (AWQ) losses under identical
+cost accounting.  AMQ's proxy theorem can be written as follows.
+
+\begin{theorem}[Pareto invariance under order equivalence]
+\label{thm:proxy_invariance}
+If, for all $a,b\in\mathcal{X}$,
+\begin{equation}
+  y_P(a)<y_P(b)\quad\Longleftrightarrow\quad y_D(a)<y_D(b),
+  \label{eq:order_equiv}
+\end{equation}
+then $\pf(y_P,c)=\pf(y_D,c)$.  A sufficient condition is
+$y_D=T\!\circ y_P$ for a strictly increasing $T$.
+\end{theorem}
+
+\begin{proof}
+If $b$ dominates $a$ under $(y_P,c)$, Eq.~\eqref{eq:order_equiv} makes the same
+quality comparison under $y_D$, and conversely.  Thus the dominance relations,
+and hence the nondominated sets, coincide.
+\end{proof}
+
+The condition is global.  High global Spearman correlation, or monotone transfer
+on each isolated axis, does not establish it in the joint interior.  The next
+proposition gives a local certificate of failure.
+
+\begin{proposition}[Equal-budget reversal certificate]
+\label{prop:reversal}
+Let $a,b$ be two configurations with $c(a)=c(b)$.  If
+\begin{equation}
+ y_P(a)<y_P(b)\quad\text{and}\quad y_D(a)>y_D(b),
+ \label{eq:reversal}
+\end{equation}
+then proxy selection over the feasible pair $\{a,b\}$ incurs deployment regret
+$y_D(a)-y_D(b)>0$.  Furthermore, if $a$ is proxy-nondominated in the full space,
+the proxy and deployment Pareto sets differ because $b$ deployment-dominates
+$a$.
+\end{proposition}
+
+This elementary certificate is operationally useful: it says exactly which
+correlation must be audited.  Cross-budget correlation is dominated by the
+large effect of changing the total number of bits.  Final selection instead
+depends on rank inside a narrow cost cell, where two architectures spend the
+same resources at different layers.
+
+Our preliminary measurements reveal two regimes.  On the Stage~1 weight and KV
+axes, HQQ-to-AWQ transfer is monotone over the audited front blocks (Spearman
+$\rho=1.000$ for both axes); fitted transfer slopes are 0.705 for weights and
+0.970 for KV.  Hence HQQ is a useful source of per-axis order, although it does
+not reproduce AWQ values.  On W-placement slices with matched average weight and
+effective-KV costs, however, the mean within-cell correlation falls to 0.40 and
+the pairwise discordance rate is 29\%.  Thus one scalar increasing transfer
+$T$ cannot explain the joint space, and Theorem~\ref{thm:proxy_invariance}
+cannot justify proxy-only Stage~2 selection.
+
+\IfFileExists{../visualize/hqq_awq/fig/discordance_why_not_stage2.png}{
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{discordance_why_not_stage2.png}
+  \caption{Proxy agreement must be measured at the resolution used for final
+  selection.  Agreement is strong on isolated axes and coarse budget changes,
+  but degrades among equal-budget layer allocations.  Values are preliminary
+  and specific to the current Llama-3.1-8B audit.}
+  \label{fig:proxy-boundary}
+\end{figure}}{}
+
+This leads to a precise division of labor.  HQQ is used (i) to search the two
+axes, (ii) to choose front blocks, and (iii) to learn a low-dimensional
+representation.  AWQ labels are used to fit the joint surrogate, update the
+Stage~2 archive, and select the final architecture.  This does not imply that
+every joint candidate needs an independent AWQ build: a small amount of AWQ
+information can train a correction model, and Sec.~\ref{sec:multi_kv} amortizes
+one build across multiple candidates.  The defensible claim is that
+\emph{deployment-method information} is required in the joint interior, not
+that exhaustive deployment-method search is required.
+
+\subsection{Proxy-supervised surrogate embedding}
+\label{sec:pls}
+
+The current discrete genome has 352 cells: 224 weight cells and 128 KV bit/group
+and pruning cells.  A direct ordinal encoding imposes an artificial linear
+geometry---for example, the error jump from 3 to 2 bits need not equal the jump
+from 4 to 3 bits.  A full one-hot encoding removes this artifact but expands the
+weight and KV halves to 672 and 896 coordinates, respectively.  Either input is
+high-dimensional relative to an AWQ initial design of roughly 100 builds.
+
+We use the large Stage~1 HQQ archives to learn a supervised representation.
+Let $h_W(w)$ and $h_{KV}(k)$ be per-cell one-hot encodings.  Separately for each
+axis, PLS finds a projection whose coordinates have high covariance with the
+square root of the Stage~1 JSD:
+\begin{align}
+ R_W &= \operatorname{PLS}_8\!\left(h_W(w),\sqrt{z_W(w)}\right),\\
+ R_{KV} &= \operatorname{PLS}_8\!\left(h_{KV}(k),\sqrt{z_{KV}(k)}\right).
+ \label{eq:pls}
+\end{align}
+The joint surrogate input is
+\begin{equation}
+ \phi(w,k)=\left[R_W^\top h_W(w),
+                   R_{KV}^\top h_{KV}(k),
+                   c_W(w),c_{KV}(k)\right]\in\R^{18}.
+ \label{eq:embedding}
+\end{equation}
+An ARD Gaussian process with a Mat\'ern-$3/2$ kernel predicts
+$\sqrt{y_D}$ from $\phi$.  HQQ therefore supplies the representation, while the
+regression head and every value used for selection are learned from AWQ.
+
+Eight components per axis are the current default.  On held-out Stage~1 data,
+the proxy-supervision $R^2$ reaches 0.983 for weights and 0.992 for KV at eight
+components; the KV score decreases slightly at 12--16 components.  On the
+current AWQ archive, the production 18-dimensional pipeline obtains mean
+within-cell Spearman correlation $0.640\pm0.054$ with 100 training samples and
+$0.700\pm0.008$ with 430, while budget-band correlation is 0.955 and 0.970.
+These are sanity checks, not yet a clean causal demonstration that PLS improves
+sample efficiency: the final comparison must hold the test set, training size,
+and surrogate head fixed.
+
+Our planned ablation therefore compares raw ordinal, one-hot, PCA, PLS with
+$d\in\{2,4,8,16\}$, and archive-only self-PLS inputs under the same head and
+fixed held-out candidates.  Training sizes are
+$N\in\{25,50,100,200,400\}$, with splits grouped by weight allocation to prevent
+KV companions from leaking the same AWQ build across train and test.  We report
+global and within-budget Spearman correlation, RMSE, top-1 budgeted regret, and
+Pareto hypervolume.  This design tests the actual claim---more useful AWQ
+decisions per label---rather than only reconstruction quality of the PLS space.
+
+\subsection{Multi-KV configuration evaluation}
+\label{sec:multi_kv}
+
+AWQ calibration and weight construction depend on $w$ but not on the selected
+KV-cache configuration.  After building $M_{\deploy,w}$ once, we can replace the
+cache implementation and evaluate
+\begin{equation}
+ (w,k_1),(w,k_2),\ldots,(w,k_K)
+ \label{eq:kv_bundle}
+\end{equation}
+without rebuilding the weights.  If a weight build costs $t_W$ and one KV swap
+and loss evaluation costs $t_E$, $B$ weight anchors cost
+\begin{equation}
+ T_{\mathrm{bundle}}=B(t_W+Kt_E),
+ \quad\text{versus}\quad
+ T_{\mathrm{naive}}=BK(t_W+t_E).
+ \label{eq:amortization}
+\end{equation}
+The saving is $B(K-1)t_W$.  A GPU correctness test on the current implementation
+measured identical JSD for a KV-swapped model and an independently rebuilt model;
+the first member took about 492 seconds and the reused member completed below the
+one-second logging resolution.
+
+For each selected weight anchor, we choose KV companions from the Stage~1 KV
+pool.  Candidates are first filtered by the predicted three-objective Pareto set
+and then selected to cover the $(c_W,c_{KV})$ plane relative to the measured
+archive.  We force the low- and high-KV endpoints when necessary because a flat
+surrogate tail can otherwise remove the high-capacity endpoint through
+dominance, leaving the surrogate uncalibrated exactly at a budget boundary.
+
+Multi-KV evaluation increases label count per build but creates clustered data.
+Large $K$ densely resolves the KV response for a few weight allocations; small
+$K$ explores more independent weight allocations if total labels or wall time
+is fixed.  Consequently, reporting only ``architectures evaluated'' exaggerates
+the effective sample size.  We define $K$ as the \emph{total} configurations per
+weight build ($K=1$ means no companion) and propose a three-view ablation:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+    \item \textbf{Fixed build budget:} hold the number of AWQ weight anchors
+    $B$ constant and sweep $K\in\{1,5,10,20,40\}$.  This measures the marginal
+    value of cheap KV labels per expensive build.
+    \item \textbf{Fixed label budget:} hold $BK$ constant.  This exposes the
+    trade-off between independent W coverage and within-W KV resolution.
+    \item \textbf{Fixed wall clock:} allocate the same GPU-hours using measured
+    $t_W$ and $t_E$.  This is the deployment-relevant comparison when KV
+    evaluation is no longer negligible at longer contexts.
+\end{enumerate}
+
+At checkpoints of 25, 50, 100, and 200 distinct weight builds, we measure
+hypervolume and inverted generational distance to the pooled union front,
+coverage of an $8\times8$ budget grid, within-cell surrogate rank correlation,
+final budgeted top-1 regret, number of distinct W families, and maximum KV gap
+within each family.  All metrics are averaged over at least three search seeds,
+and predictor validation is grouped by W family.  The current implementation
+uses $K=11$ in this notation (one anchor plus ten companions); we treat it as a
+working default, not an optimum, until this ablation is complete.
+
+\subsection{Assumption audits and falsification protocol}
+\label{sec:analysis_protocol}
+
+The theoretical claims above are conditional, so the empirical section should
+be organized as an assumption audit rather than a collection of global
+correlations.  We propose the following minimum protocol.
+
+\paragraph{Paired $20\times20$ rank grid.}
+Stratify 20 blocks from each per-axis $\eta$-front by cost, evaluate all 400
+cross-products with both HQQ and AWQ, and report partner-conditioned Kendall
+$\tau$, Spearman $\rho$, pairwise discordance, and the worst violation margins
+$\widehat V_W,\widehat V_{KV}$.  The maximum margin is the statistic connected
+to Theorem~\ref{thm:coverage}; $\tau$ alone can hide one harmful reversal.
+
+\paragraph{Off-front swap chains.}
+Sample at least 30 off-front or mutated joint architectures $a$.  For each one,
+construct its per-axis front projections and measure the three points needed by
+the sequential proof: $(a_W,a_{KV})$, $(a_W,p_{KV})$, and
+$(p_W,p_{KV})$.  This requires roughly 60 new evaluations because the projected
+corner can be reused.  It directly tests the roles that the existing on-front
+grid does not cover.
+
+\paragraph{Stage~1 adequacy.}
+Repeat each per-axis search with independent seeds and measure mutual domination,
+hypervolume gap, and the fraction of one run's front $\eta$-covered by the other.
+This estimates the Stage~1 term hidden inside Eq.~\eqref{eq:eta_cover}.  Without
+this audit, Theorem~\ref{thm:coverage} applies to the true fronts but not
+necessarily to the fronts found by the algorithm.
+
+\paragraph{Proxy boundary.}
+Report HQQ--AWQ agreement at four resolutions: per-axis, cross-budget, fixed
+$(c_W,c_{KV})$ cells, and structurally distant pairs within a cell.  For each
+budget, measure the AWQ regret of the HQQ-best architecture and the recall of the
+AWQ best under an HQQ top-$q$ shortlist.  Pareto overlap and dominated
+hypervolume should accompany correlation; neither global $R^2$ nor a visually
+similar frontier establishes Eq.~\eqref{eq:order_equiv}.
+
+\paragraph{Generalization.}
+The full audit should be repeated on at least one architecture with a different
+attention design (e.g., Qwen2.5-7B) and on a long-context dataset.  The primary
+metric remains answer-phase JSD for search efficiency, but final architectures
+must be evaluated with perplexity and long-context tasks such as LongBench or
+RULER.  A search-metric Pareto improvement is not by itself evidence of a
+deployment-quality improvement.
+
+\subsection{Limitations of the current guarantee}
+\label{sec:limitations}
+
+Theorem~\ref{thm:coverage} is an existence statement, not a convergence theorem
+for NSGA-III or the surrogate.  End-to-end regret additionally contains (i)
+Stage~1 front error, (ii) the audited ordering-violation margins, (iii) Stage~2
+search error relative to the product optimum, and (iv) measurement noise among
+near ties.  These terms should be reported separately.  The current evidence is
+also concentrated on one model and one JSD protocol.  Finally, a lower-cost
+point in the product may fall below the lower edge of a two-sided memory band;
+the literal corollary is for upper-bound budgets.  In a two-sided reporting bin,
+the theorem guarantees a no-more-expensive approximate replacement, not
+necessarily a replacement that remains inside the bin.
