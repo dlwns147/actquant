@@ -674,7 +674,21 @@ def _first_list_len(s):
     return None
 
 
-def load_expr(expr_path, comp_obj_key, config, group_size, n_block, expr_front):
+def load_expr(expr_path, comp_obj_key, config, group_size, n_block, expr_front,
+              front_eps_rel=0.0):
+    """Load one per-axis archive → (subnets, F=(metric, comp)), metric-ascending.
+
+    Pool filter (mutually exclusive, in precedence order):
+      front_eps_rel>0 → **ε-band**: keep every arch with
+          metric ≤ front(comp)·(1+front_eps_rel), i.e. the near-front shell,
+          NOT just the front. Same helper (and therefore the same semantics)
+          as second_search.py --front_eps_rel
+          (utils/second_stage.select_eps_band). Implies front filtering, so
+          --expr_front is not required (but harmless) alongside it.
+      expr_front → the strict Pareto front (ε=0 special case; kept on the
+          original NonDominatedSorting path so existing runs are bit-identical).
+      neither → the full archive (comp column is a zero placeholder).
+    """
     from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
     with open(expr_path, 'r') as f:
         result_json = json.load(f)
@@ -696,7 +710,8 @@ def load_expr(expr_path, comp_obj_key, config, group_size, n_block, expr_front):
     # --expr_front is off. So skip the per-subnet get_net_info (≈17k calls,
     # each computing every net_info key incl. compute_memory — the dominant
     # load_expr cost) unless it's actually needed.
-    if expr_front:
+    use_eps = front_eps_rel > 0.0
+    if expr_front or use_eps:
         comp_vals = [get_net_info(n, config, group_size)[comp_obj_key]
                      for n in subnets_arr]
     else:
@@ -704,7 +719,19 @@ def load_expr(expr_path, comp_obj_key, config, group_size, n_block, expr_front):
     sort_idx = np.argsort(metric_vals)
     F = np.column_stack((metric_vals, comp_vals))[sort_idx]
     subnets_arr = subnets_arr[sort_idx]
-    if expr_front:
+    if use_eps:
+        # ε-band (near-front shell) — identical helper to second_search's pools.
+        # Applied to the metric-sorted F so the returned rows stay ascending in
+        # metric (coverage/quantile selection upstream relies on that order).
+        from utils.second_stage import select_eps_band
+        keep = np.sort(select_eps_band(F[:, 0], F[:, 1], 0.0, front_eps_rel))
+        n_front = len(NonDominatedSorting().do(F, only_non_dominated_front=True))
+        print(f"[load_expr] {os.path.basename(os.path.dirname(expr_path))[:40]} "
+              f"[{comp_obj_key}]: archive {len(F)} → front {n_front} → "
+              f"ε-band {len(keep)}  (eps_rel={front_eps_rel})")
+        F = F[keep]
+        subnets_arr = subnets_arr[keep]
+    elif expr_front:
         front = NonDominatedSorting().do(F, only_non_dominated_front=True)
         F = F[front]
         subnets_arr = subnets_arr[front]
@@ -721,7 +748,8 @@ def build_expr_map(args, ctx):
     for key, path, comp_key in spec:
         if path:
             expr_map[key] = load_expr(path, comp_key, ctx.config, ctx.group_size,
-                                      ctx.n_block, args.expr_front)
+                                      ctx.n_block, args.expr_front,
+                                      front_eps_rel=getattr(args, 'front_eps_rel', 0.0))
     assert len(expr_map) >= 1, ("At least one of --w_expr, --kv_expr, "
                                 "--kvdim_expr, --eff_kv_expr must be provided")
     return expr_map

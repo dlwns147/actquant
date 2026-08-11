@@ -1,0 +1,79 @@
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Weight-only quantization.}
+GPTQ uses approximate second-order information for accurate post-training
+weight quantization~\citep{frantar2023gptq}.  AWQ instead identifies salient
+weight channels from activation statistics and searches per-channel scaling,
+providing strong low-bit accuracy and hardware-friendly inference
+kernels~\citep{lin2024awq}.  Both are calibration-dependent in the sense relevant
+to mixed-precision search: changing a layer-wise allocation can require an
+expensive reconstruction or calibration pass.  HQQ uses half-quadratic splitting
+to quantize weights without activation calibration~\citep{badri2023hqq}.  Its
+calibration-free construction makes it possible to precompute a bank for each
+bit-width and assemble arbitrary layer-wise configurations cheaply, which is why
+we use HQQ as a search proxy rather than as the final deployment objective.
+
+Mixed-precision weight methods allocate additional precision to sensitive
+layers, channels, or outliers.  These methods can achieve better quality at a
+fractional average bit-width, but fine-grained formats may introduce irregular
+memory access or specialized-kernel requirements.  Our search uses one precision
+per linear layer, following the hardware-compatible granularity emphasized by
+AMQ~\citep{lee2025amq}.  The contribution here is not a new scalar weight
+quantizer; it is the joint allocation of a deployment quantizer across weights
+and a separately growing KV-cache budget.
+
+\paragraph{Automated mixed-precision search.}
+AMQ is the closest weight-side predecessor~\citep{lee2025amq}.  It prunes a
+layer-wise search space with sensitivity, uses HQQ as a proxy for AWQ/GPTQ,
+predicts Jensen--Shannon divergence with an RBF model, and iteratively updates an
+NSGA-II archive.  AMQ also proves that global order equivalence between proxy and
+deployment scores gives identical Pareto frontiers.  We retain the useful
+per-axis search machinery but address a setting in which global order equivalence
+does not hold in the joint interior.  Our theory therefore weakens the required
+condition for \emph{coverage} to small conditional ordering violations, and our
+algorithm reserves deployment-method measurements for the decisions that the
+proxy cannot resolve.
+
+Surrogate-assisted neural architecture search replaces many costly evaluations
+with learned performance predictors~\citep{baker2017nas,white2021predictors}.
+Multi-objective evolutionary algorithms such as NSGA-II and NSGA-III maintain a
+set of accuracy--efficiency trade-offs rather than optimizing one fixed
+budget~\citep{deb2002nsga2,deb2014nsga3}.  In contrast to a predictor trained
+directly on hundreds of discrete layer variables, we use supervised dimension
+reduction learned from the much larger proxy archives.  PLS is particularly
+appropriate because it chooses latent directions according to covariance with
+the target rather than input variance alone~\citep{wold2001pls}.  The deployment
+labels still fit the final surrogate, preventing proxy values from being treated
+as deployment ground truth.
+
+\paragraph{KV-cache compression.}
+KIVI observes different distributions for keys and values and applies
+per-channel key quantization and per-token value quantization, together with a
+full-precision residual window~\citep{liu2024kivi}.  KVQuant likewise studies
+outliers, sensitivity-aware datatypes, and low-bit KV-cache
+representations~\citep{hooper2024kvquant}.  ThinK compresses the channel dimension
+by query-driven pruning and can be composed with KIVI~\citep{xu2025think}.  These
+works supply the quantization and pruning primitives in our effective-KV axis.
+They do not decide how a shared memory budget should be exchanged against
+layer-wise weight precision.
+
+KVTuner searches hardware-friendly layer-wise K/V precision pairs after
+sensitivity-based pruning and clustering~\citep{li2025kvtuner}.  It is closely
+related to our Stage~1 effective-KV search.  Our setting additionally couples
+K/V bit-width and group size with retained channel dimension, and then combines
+that axis with a layer-wise weight allocation.  This creates two new issues: the
+Cartesian product of the axes is enormous, and the quality ordering within that
+product depends on whether the weight quantizer is activation-independent or
+activation-aware.  Our front-product theorem and proxy-boundary analysis target
+these cross-axis issues.
+
+\paragraph{Positioning.}
+Prior work commonly uses sensitivity or Pareto pruning \emph{within} a
+quantization axis.  Our result concerns a different intermediate regime: the
+resource accounting is separable across weight and KV components, but the
+quality objective is not assumed to be separable.  The product-front restriction
+is justified by an audited conditional order, not by assuming that weight and KV
+losses add.  This distinction is essential because the observed joint loss is
+nearly additive in the deployable region yet exhibits substantial saturation in
+the aggressive low-weight/low-KV corner.

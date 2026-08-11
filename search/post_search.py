@@ -310,7 +310,9 @@ def select_joint(args, ctx):
         assumption about the stored comp-column order / which objectives the
         search optimized), so the budget box can be ANY comp_obj;
       * keep the archs inside [comp_obj_min, comp_obj_max];
-      * rank by the ALREADY-MEASURED loss (ascending) and take the best -n.
+      * rank by the ALREADY-MEASURED loss (ascending) and take the best -n;
+      * optionally apply the guarded benchmark-regret correction to loss
+        near-ties, with an automatic measured-loss fallback.
     Returns (ps, I, pf, sel_mode) shaped for run_final (pf is (n,1) = loss;
     benchmarks run with K=0 → the per-axis-metric print is empty).
     """
@@ -318,15 +320,30 @@ def select_joint(args, ctx):
         sf = json.load(f)
     archive = sf['archive']
     if args.second_include_candidates:
-        archive = archive + sf.get('candidates', [])
+        # second_search currently stores ``candidates`` as archive[-n_added:],
+        # i.e. the just-measured rows are already in archive.  Keep support for
+        # older/future files where candidates are separate, but never duplicate
+        # rows and thereby bias stable tie ordering or the diagnostic counts.
+        seen = {json.dumps(e[0], sort_keys=True, separators=(',', ':'))
+                for e in archive}
+        extras = []
+        for e in sf.get('candidates', []):
+            key = json.dumps(e[0], sort_keys=True, separators=(',', ':'))
+            if key not in seen:
+                extras.append(e)
+                seen.add(key)
+        archive = archive + extras
     archs = [e[0] for e in archive]
     loss = np.array([float(e[1]) for e in archive], float)
     # recompute each comp_obj from the arch (no stored-column-order assumption)
+    net_info = [get_net_info(a, ctx.config, ctx.group_size,
+                             n_token=args.n_token,
+                             residual_length=args.residual_length,
+                             attn_sink=args.attn_sink)
+                for a in archs]
     if args.comp_obj:
         comp = np.array(
-            [[get_net_info(a, ctx.config, ctx.group_size, n_token=args.n_token,
-                           attn_sink=args.attn_sink)[o] for o in args.comp_obj]
-             for a in archs], float)
+            [[ni[o] for o in args.comp_obj] for ni in net_info], float)
     else:
         comp = np.zeros((len(archs), 0))
     # budget-box filter (each comp_obj independently)
@@ -347,6 +364,14 @@ def select_joint(args, ctx):
     feas &= np.isfinite(loss)
     idx = np.where(feas)[0]
     idx = idx[np.argsort(loss[idx], kind='stable')]      # measured-best first
+    benchmark_rank_mode = ''
+    if args.benchmark_calibration_csv:
+        measured_winner = int(idx[0])
+        idx = _guarded_benchmark_ranking(args, sf, archs, loss, idx, ctx)
+        benchmark_rank_mode = (
+            'joint-stats benchmark-guarded correction'
+            if int(idx[0]) != measured_winner else
+            'joint-stats benchmark-guarded abstain -> measured-best')
     n_keep = max(1, int(args.n))
     # with --select_measured_best, hand run_final the predicted-best top-k to
     # re-measure; otherwise the stored loss already IS the measurement → take -n.
@@ -367,7 +392,9 @@ def select_joint(args, ctx):
     pf = loss[sel].reshape(-1, 1)
     I = list(range(len(sel)))
     sel_mode = (f'joint-stats top-{len(sel)} → verify → best-{n_keep}'
-                if args.select_measured_best else f'joint-stats measured-best-{len(sel)}')
+                if args.select_measured_best else
+                (f'{benchmark_rank_mode}-{len(sel)}' if benchmark_rank_mode
+                 else f'joint-stats measured-best-{len(sel)}'))
     for i, o in enumerate(args.comp_obj):
         print(f"[post_search] {o}: in-box [{args.comp_obj_min[i]:.4g},"
               f"{args.comp_obj_max[i]:.4g}] → best arch {int(sel[0])} "
@@ -375,6 +402,175 @@ def select_joint(args, ctx):
     print(f"[post_search] --second_expr {args.second_expr}: {len(archive)} archs, "
           f"{int(feas.sum())} in-box → {sel_mode}")
     return ps, I, pf, sel_mode
+
+
+_BENCHMARK_FEATURES = (
+    'wbits', 'kvbits', 'kbits', 'vbits', 'kvdim', 'kdim', 'vdim',
+    'eff_kvbits', 'eff_kbits', 'eff_vbits', 'memory')
+
+
+def _benchmark_feature(loss, info):
+    """Small, transferable feature set for the guarded benchmark correction.
+
+    Deliberately excludes the hundreds of raw per-layer choices.  With only 200
+    benchmark labels those features improved random CV but failed structural
+    cluster holdouts; aggregate W/KV allocation features were substantially
+    more stable.
+    """
+    y = max(float(loss), 1e-12)
+    comp = [float(info[k]) / (1e9 if k == 'memory' else 1.0)
+            for k in _BENCHMARK_FEATURES]
+    return [np.sqrt(y), np.log(y), y, y * y, *comp]
+
+
+def _guarded_benchmark_ranking(args, stats, archs, loss, idx, ctx):
+    """Optionally let benchmark calibration change joint measured-loss top-1.
+
+    This is an abstaining correction, not an unrestricted benchmark surrogate:
+      1. only measured-loss near-ties within ``benchmark_loss_guard`` contend;
+      2. five low-dimensional model families vote on a balanced/minimax pick;
+      3. insufficient consensus falls back to the measured-loss winner.
+
+    The guard matters here: unconstrained fits to 200 labelled architectures can
+    confidently extrapolate to a much worse-loss point in a new search archive.
+    """
+    import csv
+    from sklearn.ensemble import (ExtraTreesRegressor,
+                                  HistGradientBoostingRegressor,
+                                  RandomForestRegressor)
+    from sklearn.linear_model import RidgeCV
+    from sklearn.multioutput import MultiOutputRegressor
+    from sklearn.neighbors import KNeighborsRegressor
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    if args.benchmark_loss_guard < 0:
+        raise SystemExit('[benchmark-ranker] --benchmark_loss_guard must be >= 0')
+    if not 0 < args.benchmark_min_consensus <= 1:
+        raise SystemExit('[benchmark-ranker] --benchmark_min_consensus must be '
+                         'in (0, 1]')
+
+    protocol = stats.get('protocol', {})
+    expected = {
+        'wt2_jsd_pp128_s32': dict(dataset='wikitext2', n_sample=128,
+                                  seqlen=2048, stride=32,
+                                  prefill_prompt=True, last_tokens=128),
+    }.get(args.benchmark_loss_col)
+    if expected:
+        mismatch = {k: (protocol.get(k), v) for k, v in expected.items()
+                    if protocol.get(k) != v}
+        if mismatch:
+            raise SystemExit(
+                '[benchmark-ranker] calibration loss column does not match the '
+                f'second-search protocol: {mismatch}')
+
+    required = [args.benchmark_loss_col, args.benchmark_longbench_col,
+                args.benchmark_ruler_col, *_BENCHMARK_FEATURES]
+    rows = []
+    with open(args.benchmark_calibration_csv, newline='') as f:
+        reader = csv.DictReader(f)
+        missing = [k for k in required if k not in (reader.fieldnames or [])]
+        if missing:
+            raise SystemExit(
+                f'[benchmark-ranker] missing calibration columns: {missing}')
+        for row in reader:
+            try:
+                vals = [float(row[k]) for k in required]
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(vals).all():
+                rows.append(row)
+    if len(rows) < 50:
+        raise SystemExit('[benchmark-ranker] need at least 50 complete benchmark '
+                         f'rows, found {len(rows)}')
+
+    X = []
+    Y = []
+    for row in rows:
+        info = {k: float(row[k]) for k in _BENCHMARK_FEATURES}
+        X.append(_benchmark_feature(float(row[args.benchmark_loss_col]), info))
+        Y.append([float(row[args.benchmark_longbench_col]),
+                  float(row[args.benchmark_ruler_col])])
+    X = np.asarray(X, float)
+    Y = np.asarray(Y, float)
+
+    # Existing correlation.csv files computed their memory column before the
+    # KIVI-residual accounting fix.  Keep that convention *only as a model
+    # feature*; the deployment band above uses the physical residual-aware bytes.
+    model_info = [get_net_info(
+        archs[j], ctx.config, ctx.group_size, n_token=args.n_token,
+        residual_length=args.benchmark_calibration_residual_length,
+        attn_sink=args.attn_sink) for j in idx]
+    XP = np.asarray([_benchmark_feature(loss[j], ni)
+                     for j, ni in zip(idx, model_info)], float)
+
+    contenders = np.where(
+        loss[idx] <= loss[idx[0]] + float(args.benchmark_loss_guard) + 1e-12)[0]
+    if len(contenders) == 1:
+        print('[benchmark-ranker] loss guard leaves one contender; measured-loss '
+              'top-1 retained')
+        return idx
+
+    models = {
+        'ridge': make_pipeline(
+            StandardScaler(),
+            RidgeCV(alphas=np.logspace(-3, 5, 41))),
+        'knn7': make_pipeline(
+            StandardScaler(),
+            KNeighborsRegressor(n_neighbors=7, weights='distance')),
+        'extra_trees': ExtraTreesRegressor(
+            n_estimators=500, min_samples_leaf=3, max_features=.8,
+            random_state=args.seed, n_jobs=-1),
+        'random_forest': RandomForestRegressor(
+            n_estimators=500, min_samples_leaf=3, max_features=.8,
+            random_state=args.seed, n_jobs=-1),
+        'hist_gbdt': MultiOutputRegressor(HistGradientBoostingRegressor(
+            max_iter=250, max_leaf_nodes=15, min_samples_leaf=10,
+            l2_regularization=3, random_state=args.seed)),
+    }
+    center = Y.mean(axis=0)
+    scale = np.maximum(Y.std(axis=0), 1e-12)
+    votes = []
+    predictions = {}
+    for name, model in models.items():
+        model.fit(X, Y)
+        pred = model.predict(XP)
+        predictions[name] = pred
+        z = (pred[contenders] - center) / scale
+        if args.benchmark_regret_mode == 'longbench':
+            local = int(np.argmax(z[:, 0]))
+        elif args.benchmark_regret_mode == 'ruler':
+            local = int(np.argmax(z[:, 1]))
+        elif args.benchmark_regret_mode == 'balanced':
+            local = int(np.argmax(z.mean(axis=1)))
+        else:
+            regret = np.max(z.max(axis=0) - z, axis=1)
+            local = int(np.argmin(regret))
+        votes.append(int(contenders[local]))
+
+    vote_idx, vote_count = np.unique(votes, return_counts=True)
+    winner = int(vote_idx[np.argmax(vote_count)])
+    consensus = int(vote_count.max()) / len(votes)
+    baseline = 0
+    accepted = winner != baseline and consensus >= args.benchmark_min_consensus
+    chosen = winner if accepted else baseline
+    chosen_global = int(idx[chosen])
+    vote_text = ', '.join(f'{name}=arch{int(idx[v])}'
+                          for name, v in zip(models, votes))
+    action = ('accepted correction' if accepted else
+              'abstained -> measured-loss top-1')
+    print(f'[benchmark-ranker] {len(rows)} labels, {len(contenders)} loss-guarded '
+          f'contenders (best+{args.benchmark_loss_guard:g}); {vote_text}')
+    print(f'[benchmark-ranker] vote winner arch{int(idx[winner])} '
+          f'consensus={consensus:.0%} (need {args.benchmark_min_consensus:.0%}) '
+          f'-> {action}: arch{chosen_global}')
+    for name, pred in predictions.items():
+        print(f'[benchmark-ranker] {name}: chosen-pred '
+              f'LB-E={pred[chosen, 0]:.4f} RULER={pred[chosen, 1]:.4f}')
+
+    if chosen == baseline:
+        return idx
+    return np.concatenate(([idx[chosen]], np.delete(idx, chosen)))
 
 
 def _has_data(args):
@@ -516,8 +712,9 @@ def run_final(args, ctx, ps, I, pf, K):
         # attn_sink is part of the KV memory accounting, so it must be passed
         # here too — select_joint() filters the budget box WITH it, and printing
         # a sink-less number next to a sink-aware selection is just misleading.
-        complexity = get_net_info(arch, ctx.config, ctx.group_size,
-                                  n_token=args.n_token, attn_sink=args.attn_sink)
+        complexity = get_net_info(
+            arch, ctx.config, ctx.group_size, n_token=args.n_token,
+            residual_length=args.residual_length, attn_sink=args.attn_sink)
         print(f'complexity: {list(complexity.keys())}')
         print(f'complexity: {list(complexity.values())}')
         ctx.accelerator.print(f'arch: {arch}')
@@ -593,7 +790,8 @@ def main(args):
 
     # ── second_search joint path: archive already holds assembled joint archs
     # with measured JSD → skip all per-axis combination/surrogate machinery,
-    # just filter by the comp_obj budget box and benchmark the measured-best.
+    # filter by the comp_obj budget box, then use measured-best or the explicitly
+    # requested guarded benchmark correction.
     if args.second_expr:
         ps, I, pf, sel_mode = select_joint(args, ctx)
         print(f'[selection] mode={sel_mode}  |I|={len(I)}  |candidates|={len(ps)}')
@@ -903,13 +1101,43 @@ def build_parser():
     # second_search joint path: benchmark a 2nd-stage iter_<it>.stats directly.
     # When set, ALL per-axis combination/surrogate flags (--w_expr/--kv_expr/...
     # /--sample_path/--surrogate) are ignored — the archive already holds joint
-    # archs with measured JSD; selection = comp_obj budget box → measured-best -n.
+    # archs with measured JSD; default selection = comp_obj budget box →
+    # measured-best -n (the benchmark-calibration flags optionally guard-correct
+    # near-ties).
     p.add_argument('--second_expr', type=str, default='',
                    help='second_search iter_<it>.stats: select+benchmark its '
                         'assembled joint archs directly (no per-axis combine).')
     p.add_argument('--second_include_candidates', action='store_true',
                    help="(with --second_expr) also include the stats' "
                         "'candidates' list, not just 'archive'.")
+    bg = p.add_argument_group(
+        'guarded benchmark-regret correction (joint second-search only)')
+    bg.add_argument('--benchmark_calibration_csv', type=str, default='',
+                    help='correlation.csv with measured joint loss, LongBench-E, '
+                         'RULER, and aggregate architecture features. Empty '
+                         '(default) keeps pure measured-loss ranking.')
+    bg.add_argument('--benchmark_loss_col', type=str,
+                    default='wt2_jsd_pp128_s32')
+    bg.add_argument('--benchmark_longbench_col', type=str,
+                    default='longbench_e__avg')
+    bg.add_argument('--benchmark_ruler_col', type=str,
+                    default='ruler__avg')
+    bg.add_argument('--benchmark_regret_mode',
+                    choices=['longbench', 'ruler', 'minimax', 'balanced'],
+                    default='minimax',
+                    help='longbench/ruler optimize that endpoint independently; '
+                         'minimax equalizes standardized endpoint regret; '
+                         'balanced maximizes their equal-weight z-score mean.')
+    bg.add_argument('--benchmark_loss_guard', type=float, default=0.001,
+                    help='benchmark correction may only choose measured losses '
+                         'within this absolute margin of the band best.')
+    bg.add_argument('--benchmark_min_consensus', type=float, default=0.8,
+                    help='fraction of five model families required to override '
+                         'the measured-loss winner; otherwise abstain.')
+    bg.add_argument('--benchmark_calibration_residual_length', type=int,
+                    default=0,
+                    help='residual length used when the calibration CSV memory '
+                         'column was made (legacy correlation.csv files used 0).')
     p.add_argument('--sample_path', type=str, default='',
                    help='results.csv from sample_surrogate.py (surrogate '
                         'training data). If omitted, additive metric is used.')

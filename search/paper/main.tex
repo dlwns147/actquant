@@ -1,0 +1,71 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,allcolors=blue]{hyperref}
+
+\graphicspath{{../tests/docs/fig/}{../visualize/hqq_awq/fig/}}
+
+\newcommand{\method}{\textsc{ActQuant}}
+\newcommand{\proxy}{\mathrm{HQQ}}
+\newcommand{\deploy}{\mathrm{AWQ}}
+\newcommand{\pf}{\operatorname{PF}}
+\newcommand{\jsd}{\operatorname{JSD}}
+\newcommand{\R}{\mathbb{R}}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\newtheorem{remark}{Remark}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+
+\title{Stage 1 Supplies the Order, Stage 2 Supplies the Values:\\
+Efficient Joint Search for Weight and KV-Cache Compression}
+\author{Anonymous Authors}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Deploying large language models under a memory budget requires allocating
+precision jointly between model weights and the key--value (KV) cache.  The
+resulting layer-wise space is too large for direct black-box optimization, and
+activation-aware weight quantizers make every new weight allocation expensive
+to build.  We present \method, a two-stage search framework that separates the
+question of \emph{where to search} from the question of \emph{what to select}.
+Stage~1 searches weight and effective-KV axes independently with a cheap
+quantization proxy.  Stage~2 searches the product of their $\epsilon$-Pareto
+sets, augmented by structure-aware mutations, and obtains labels with the
+deployment quantizer.  A front-product coverage theorem shows that this
+restriction approximately covers the joint Pareto set whenever partner-induced
+ordering violations are small; importantly, the result does not require an
+additive loss.  We then characterize the boundary of quantization proxies:
+monotone proxy-to-deployment transfer is sufficient for per-axis frontier
+preservation, whereas a same-budget rank reversal certifies that proxy-only
+joint selection can incur deployment regret.  To make the expensive second
+stage sample-efficient, we learn a low-dimensional, proxy-supervised partial
+least-squares embedding and amortize each activation-aware weight build over
+multiple KV configurations.  Preliminary audits on Llama-3.1-8B support the
+ordering assumptions on a paired $20\times20$ grid, while also revealing a
+substantial proxy rank collapse among fine-grained allocations at the same
+budget.  These findings motivate a principled division of labor: use the proxy
+to construct and represent the search space, but use the deployment quantizer
+to resolve its joint interior.
+\end{abstract}
+
+\input{sections/1_introduction}
+\input{sections/2_related_work}
+\input{sections/3_method}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

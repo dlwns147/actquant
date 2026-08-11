@@ -1,0 +1,118 @@
+\section{Introduction}
+\label{sec:intro}
+
+Large language model (LLM) inference is increasingly constrained by two
+different forms of memory.  Model weights constitute a large, static footprint,
+whereas the key--value (KV) cache grows with the batch size and context length.
+Weight-only quantization reduces the former and can accelerate memory-bound
+linear layers~\citep{frantar2023gptq,lin2024awq}; KV-cache quantization and
+channel pruning reduce the latter and are especially important for long-context
+serving~\citep{liu2024kivi,xu2025think}.  Treating these components separately,
+however, leaves a central deployment question unanswered: given one end-to-end
+memory budget, how should precision be distributed across weight modules, KV
+layers, K/V quantization parameters, and retained KV channels?
+
+This is a combinatorial, multi-objective problem.  In the current search space
+for Llama-3.1-8B, each of 224 weight matrices chooses among 2-, 3-, and 4-bit
+formats.  Each layer additionally chooses K and V bit/group-size pairs and K/V
+retained dimensions.  The resulting space contains approximately
+$3^{224}7^{64}5^{64}\approx 5\times10^{205}$ configurations.  Evaluating even a
+small fraction is impossible.  More importantly, the cost of a configuration is
+heterogeneous.  An activation-independent quantizer such as HQQ can assemble a
+mixed-precision model from precomputed weight banks~\citep{badri2023hqq}, but an
+activation-aware method such as AWQ depends on calibration activations and must
+rebuild the quantized weights for a new layer-wise allocation~\citep{lin2024awq}.
+In our implementation, a fresh Llama-3.1-8B AWQ build and evaluation takes about
+eight minutes on one GPU, which makes the initial design size---and therefore
+surrogate quality---a first-order concern.
+
+AMQ recently made layer-wise mixed-precision \emph{weight-only} search practical
+through search-space pruning, an HQQ quantization proxy, a learned quality
+predictor, and iterative multi-objective search~\citep{lee2025amq}.  Its proxy
+argument is deliberately strong: if the proxy and deployment quantizers induce
+the same total order over configurations, their Pareto frontiers coincide.  The
+joint weight--KV setting exposes a boundary of this argument.  A proxy can
+preserve the coarse order of weight configurations when the KV cache is fixed,
+yet disagree with the deployment method about which \emph{weight placement} is
+best after the KV configuration changes.  Thus, ``the proxy correlates with the
+deployment method'' is not a sufficient statement.  We must distinguish
+cross-budget order, which is useful for restricting the space, from
+within-budget order, which determines the final architecture.
+
+Our key observation is that the joint problem naturally separates into these
+two questions:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+    \item \textbf{Where should the search look?}  If per-axis order is stable
+    under changes to the partner axis, the Cartesian product of per-axis Pareto
+    sets covers the useful part of the joint space.
+    \item \textbf{Which configuration should it select?}  Per-axis observations
+    do not identify the values, exchange rate, or local ordering in the interior
+    of that product.  These must be learned from joint measurements under the
+    deployment quantizer.
+\end{enumerate}
+
+This order--value distinction motivates \method.  Stage~1 fixes the partner axes
+at high precision and independently searches (i) layer-wise weight precision and
+(ii) effective KV precision, where the latter combines K/V bit-width, group size,
+and channel pruning.  It uses HQQ weight banks, output-distribution divergence,
+and iterative surrogate-assisted multi-objective search.  Stage~2 constructs
+candidate architectures from $\epsilon$-Pareto blocks returned by Stage~1,
+allows limited mutations at contested layer/module positions, and performs a
+joint search using AWQ measurements.  The search therefore spends expensive
+activation-aware builds only in a much smaller, structured region.
+
+The restriction is supported by a simple but load-bearing theorem.  For each
+axis, we directly define the largest deployment-loss increase caused by replacing
+a configuration with one that Stage~1 ranks no worse.  If these audited violation
+margins are $V_W$ and $V_{KV}$, every joint architecture is cost-dominated by an
+architecture in the product of the two fronts with at most
+$V_W+V_{KV}$ additional loss.  The theorem needs cost separability and adequate
+per-axis fronts, but not loss additivity.  Limited mutations only enlarge the
+candidate set, so the coverage statement is retained.
+
+The theorem also clarifies where a proxy can be used.  A monotone transfer from
+HQQ loss to AWQ loss preserves a per-axis Pareto set.  In contrast, a rank
+reversal between two equal-cost joint configurations is a direct certificate
+that proxy selection can incur positive AWQ regret.  Preliminary measurements
+exhibit exactly this split: HQQ-to-AWQ Spearman correlation is 1.00 on the two
+individual axes, but falls to 0.40 among fine-grained candidates in the same
+budget cells, with 29\% pairwise discordance.  Proxy information is therefore
+well suited to Stage~1 and to feature learning, but not to the final Stage~2
+labels.
+
+Two mechanisms make AWQ-labeled search affordable.  First, we fit
+proxy-supervised partial least-squares (PLS) projections separately to one-hot
+weight and KV genomes, reducing the current discrete encoding to 16 latent
+coordinates plus two exact cost coordinates.  An AWQ-trained surrogate operates
+in this 18-dimensional space.  Second, the AWQ build depends only on the weight
+allocation.  For each selected weight anchor we evaluate several diverse KV
+companions by swapping only the KV configuration, amortizing one weight build
+over many joint labels.
+
+Our contributions are as follows:
+
+\begin{itemize}[leftmargin=*]
+    \item We formulate joint weight--KV compression as a two-stage,
+    three-objective search and separate the ordinal role of per-axis search from
+    the cardinal role of joint measurement.
+    \item We give an auditable front-product coverage theorem for exact and
+    $\epsilon$-Pareto per-axis sets, together with a sufficient approximate
+    sufficiency condition and an explicit statement of its empirical scope.
+    \item We establish a proxy-safety criterion: monotone transfer preserves a
+    frontier, while equal-budget rank reversals can change the selected
+    architecture.  This explains why HQQ can guide Stage~1 but AWQ information
+    is required in Stage~2.
+    \item We introduce proxy-supervised PLS reduction and weight-amortized
+    multi-KV evaluation to improve the number and usefulness of AWQ labels per
+    expensive build.
+    \item We provide paired-grid and within-budget audit protocols that measure
+    the assumptions required by the theory rather than relying only on global
+    correlation.
+\end{itemize}
+
+The present draft intentionally limits claims to the audited configuration
+domain.  In particular, the current $20\times20$ audit uses blocks sampled from
+the discovered fronts; off-front mutations, Stage~1 front error, cross-model
+transfer, and the optimal number of KV companions remain explicit experimental
+questions rather than hidden assumptions.

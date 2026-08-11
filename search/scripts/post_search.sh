@@ -20,10 +20,12 @@ CONFIG=config/llama.json
 
 USE_KEY_TOKEN=False
 
-W_METHOD=hqq
-W_METHOD_TEXT=hqq
-# W_METHOD=awq
-# W_METHOD_TEXT=awq
+# The joint archive below was measured with AWQ.  These must not be switched to
+# HQQ: post_search rebuilds the selected architecture before benchmarking.
+W_METHOD=awq
+W_METHOD_TEXT=awq
+# W_METHOD=hqq
+# W_METHOD_TEXT=hqq
 # ── AWQ-based QEFT (searchable per-layer FP16 outlier columns) ──
 # Needs --outlier_path = the multi-rank dict from extract_outidx.py; its
 # ranks must cover every n_outlier the arch selects (0/32/64/96/128). The
@@ -58,9 +60,10 @@ QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 SEED=0
 
 # ── COMP_OBJ range (the deployment budget) ──
-# NOTE (second_expr): the pool is DISCRETE (10500 archs), so a tiny ±band can
+# NOTE (second_expr): the pool is DISCRETE (4090 archs), so a tiny ±band can
 # match 0 archs (the per-axis path enumerates a continuous space, so it doesn't).
-# At target 5.316e9, n_token 16384: ×0.00001→0 archs, ×0.001→55, ×0.005→234.
+# For the archive below at target 5.316e9, n_token 16384, residual 128, sink 8:
+# ×0.005 → 108 archs (95 under the old, residual-omitting accounting).
 COMP_OBJ=(memory)
 COMP_OBJ_VAL=(5315764224)
 
@@ -73,6 +76,10 @@ COMP_OBJ_VAL=(5315764224)
 # COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.05)" | bc))
 COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.005)" | bc))
 # COMP_OBJ_THRESHOLD_LIST=($(echo "scale=3; (${COMP_OBJ_VAL[0]} * 0.00001)" | bc))
+# IMPORTANT: this makes a symmetric iso-memory band and permits memory above
+# COMP_OBJ_VAL.  If COMP_OBJ_VAL is a hard deployment cap, set MAX_COMP_OBJ to
+# COMP_OBJ_VAL after the loop below (the hard-cap winner for this run is arch4035,
+# not the symmetric-band winner arch4041).
 
 # COMP_OBJ=(wbits kvbits kvdim)
 # COMP_OBJ_VAL=(3 3.25 102)
@@ -182,7 +189,16 @@ BETA=-2
 # SAMPLE_PATH=save/result/260513/2605132157_Llama-3.1-8B-Instruct__0_0_awq_kivi_wikitext2_1_kv_scale_0seed_w_expr_kv_expr_kvdim_expr_qs_metric_w05595_metric_kv05595_metric_kvdim05595_rs23/results.csv
 
 # ── 2nd-stage JOINT search (second_search.py) ──
-SECOND_EXPR=save/second_search/2606202032_Llama-3.1-8B-Instruct_joint_hqq_rbf_doe500_it200n50_sk8_s0/iter_200.stats
+SECOND_EXPR=save/second_search/2608090529_Llama-3.1-8B-Instruct_joint_awq_kivi_think_sqrty_ard_gpplstypmatern32_doe25_it15n5p200_subset-st-ckv402d_eps0.05_dk0_st32_pp128_sk8_mwt2j_n128q2048_s0/iter_15.stats
+
+# Optional one-shot LongBench-E/RULER regret correction learned from the 200
+# labelled architectures.  It is intentionally conservative: only JSD near-ties
+# (best +0.001) may replace the measured winner and 4/5 model families must agree.
+# Otherwise post_search prints the disagreement and falls back to measured loss.
+BENCHMARK_CALIBRATION_CSV=save/correlation/2607301912_Llama-3.1-8B-Instruct_awq_kivi_think_w234k234v234_g128r128_sk8_t16384_n200_s0_qs_metric_w01599_metric_eff_kv01599_r/correlation.csv
+BENCHMARK_REGRET_MODE=minimax  # longbench | ruler | minimax | balanced
+BENCHMARK_LOSS_GUARD=0.001
+BENCHMARK_MIN_CONSENSUS=0.8
 
 for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR SAMPLE_PATH SECOND_EXPR; do
     VAR_VALUE="${!VAR_NAME}"
@@ -298,6 +314,9 @@ if [ -n "${SECOND_EXPR}" ]; then
     # joint path: archive already holds assembled joint archs with measured JSD,
     # so the per-axis expr archives + surrogate are skipped entirely.
     ARGS+=" --second_expr ${SECOND_EXPR}"
+    if [ -n "${BENCHMARK_CALIBRATION_CSV}" ]; then
+        ARGS+=" --benchmark_calibration_csv ${BENCHMARK_CALIBRATION_CSV} --benchmark_regret_mode ${BENCHMARK_REGRET_MODE} --benchmark_loss_guard ${BENCHMARK_LOSS_GUARD} --benchmark_min_consensus ${BENCHMARK_MIN_CONSENSUS}"
+    fi
 else
     [ -n "${W_EXPR}" ]      && ARGS+=" --w_expr ${W_EXPR}"
     [ -n "${KV_EXPR}" ]     && ARGS+=" --kv_expr ${KV_EXPR}"
