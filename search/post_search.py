@@ -12,6 +12,7 @@ same as the old post_search_split.py) is used instead of a fitted surrogate.
 import os
 import json
 import csv
+import hashlib
 import argparse
 import warnings
 from time import time
@@ -27,15 +28,18 @@ from evaluator import LlamaEvaluator
 from predictor.factory import get_predictor
 from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
                         evaluate_metric, configure_model_cache, get_net_info,
-                        clean_up, metric_protocol, _LazyComp)
+                        clean_up, metric_protocol, _LazyComp, bench_stamp,
+                        stamp_artifact_dir, stamp_artifact_file, per_arch_path,
+                        arch_sha8, RUN_ID)
 from utils.select import (LazyPs, build_arch, assemble_F, select_valid_nd_idx,
                           per_axis_metric)
 from utils.eval import eval_zeroshot
 from utils.metric_specs import (METRIC_KEYS, resolve_tasks, groups_for,
-                                precompute_groups, apply_group, run_task)
+                                precompute_groups, apply_group, run_task,
+                                spec_sha8, protocol_dict)
 from utils.longbench import pred_longbench, eval_longbench_preds
 from utils.data import get_tokenizer
-from utils.ruler import eval_ruler
+from utils.ruler import eval_ruler, default_per_example_path
 from utils.longeval import eval_longeval_lines, generate_lines_testcases
 from utils.minilongbench import pred_minilongbench, eval_minilongbench_preds
 
@@ -167,9 +171,34 @@ def maybe_generate_testcases(args):
 
 
 # ───────────────────────── benchmarks ─────────────────────────
-def run_benchmarks(args, model, model_id):
+def _quant_meta(args):
+    """Identity half of a benchmark artefact's meta.json — the quantization
+    configuration the generations were produced under."""
+    return dict(model=args.model_name, w_method=args.w_method,
+                kv_method=args.kv_method, w_bits=args.w_bits,
+                k_bits=args.k_bits, v_bits=args.v_bits,
+                w_group_size=args.w_group_size,
+                residual_length=args.residual_length, attn_sink=args.attn_sink,
+                k_quant_scheme=args.k_quant_scheme,
+                v_quant_scheme=args.v_quant_scheme, seed=args.seed,
+                save_dir=args.save)
+
+
+def run_benchmarks(args, model, model_id, arch=None, idx=None, n_archs=1):
     """passkey / zeroshot / longbench / minilongbench / ruler / longeval for
-    one (already sampled) architecture. Each block needs the KV cache on."""
+    one (already sampled) architecture. Each block needs the KV cache on.
+
+    `arch`/`idx` are provenance only: every per-example row is stamped with
+    run_id / arch_sha8 / idx, and each artefact directory gets a meta.json that
+    ROTATES the directory when it already holds a different configuration —
+    which is what keeps a second architecture (-n > 1) from silently
+    overwriting the first one's generations in the shared result path — and with
+    n_archs > 1 the paths themselves get an `_arch<idx>` suffix so the runs do
+    not even land in the same place."""
+    stamp = bench_stamp(arch, idx)
+    lb_path = per_arch_path(args.longbench_result_path, idx, n_archs)
+    mlb_path = per_arch_path(args.minilongbench_result_path, idx, n_archs)
+    ruler_path = per_arch_path(args.ruler_result_path, idx, n_archs)
     if args.pass_key_file:
         clean_up()
         configure_model_cache(args, model, use_cache=True)
@@ -222,18 +251,22 @@ def run_benchmarks(args, model, model_id):
         clean_up()
         configure_model_cache(args, model, use_cache=True)
         t0 = time()
+        stamp_artifact_dir(lb_path,
+                           dict(benchmark='longbench_e' if args.longbench_e
+                                else 'longbench', **_quant_meta(args),
+                                **{k: v for k, v in stamp.items() if k != 'run_id'}))
         preds = pred_longbench(model, tokenizer=get_tokenizer(model_id),
-                               save_path=args.longbench_result_path,
+                               save_path=lb_path,
                                longbench_config=args.longbench_config,
-                               e=args.longbench_e, model_name=args.model_name)
+                               e=args.longbench_e, model_name=args.model_name,
+                               stamp=stamp)
         # Score the just-produced predictions in memory (still writes
         # result.json); avoids re-reading the dir, which could mix in stale
         # .jsonl files from a previous run.
-        eval_longbench_preds(preds, args.longbench_e,
-                             save_path=args.longbench_result_path)
+        eval_longbench_preds(preds, args.longbench_e, save_path=lb_path)
         sentences = [f"{k}: {v}\n" for k, v in vars(args).items()]
         sentences += [f'Longbench Time: {time() - t0:.2f}s', "\n"]
-        with open(os.path.join(args.longbench_result_path,
+        with open(os.path.join(lb_path,
                                "pred_e" if args.longbench_e else "pred",
                                'result.txt'), 'w') as f:
             f.writelines(sentences)
@@ -244,32 +277,44 @@ def run_benchmarks(args, model, model_id):
         t0 = time()
         mlb_preds = pred_minilongbench(
             model, tokenizer=get_tokenizer(model_id),
-            save_path=args.minilongbench_result_path,
+            save_path=mlb_path,
             longbench_config=args.longbench_config,
             data_dir=args.minilongbench_data_dir or None,
             model_name=args.model_name)
         # Score the just-produced predictions in memory (still writes
         # result.json); avoids re-reading the dir, which could mix in stale
         # .jsonl files from a previous run.
-        eval_minilongbench_preds(mlb_preds,
-                                 save_path=args.minilongbench_result_path)
+        eval_minilongbench_preds(mlb_preds, save_path=mlb_path)
         mlb_time = time() - t0
         print(f'MiniLongBench Time: {mlb_time:.2f}s')
         sentences = [f"{k}: {v}\n" for k, v in vars(args).items()]
         sentences.append(f'MiniLongBench Time: {mlb_time:.2f}s\n')
-        with open(os.path.join(args.minilongbench_result_path, "pred",
-                               "result.txt"), 'w') as f:
+        with open(os.path.join(mlb_path, "pred", "result.txt"), 'w') as f:
             f.writelines(sentences)
 
     if args.ruler:
         clean_up()
         configure_model_cache(args, model, use_cache=True)
         t0 = time()
+        # RULER writes FILES (<path> scores + <path>_per_example_s<seed>.jsonl)
+        # into a shared folder, so the file family is what gets stamped/rotated.
+        stamp_artifact_file(ruler_path,
+                            dict(benchmark='ruler',
+                                 ruler_task=list(args.ruler_task or []),
+                                 length=list(args.ruler_length or []),
+                                 nsample=args.ruler_sample,
+                                 batch_size=args.ruler_batch_size,
+                                 **_quant_meta(args),
+                                 **{k: v for k, v in stamp.items() if k != 'run_id'}))
         eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id,
                    tasks=args.ruler_task, yaml_path=args.ruler_yaml_path,
                    batch_size=args.ruler_batch_size, length=args.ruler_length,
                    nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks,
-                   result_path=args.ruler_result_path, seed=args.seed,
+                   result_path=ruler_path,
+                   per_example_path=(args.ruler_per_example_path or
+                                     default_per_example_path(ruler_path,
+                                                              args.seed)),
+                   stamp=stamp, seed=args.seed,
                    use_chat_template=args.ruler_chat_template)
         print(f'RULER Time: {time() - t0:.2f}s')
 
@@ -310,9 +355,7 @@ def select_joint(args, ctx):
         assumption about the stored comp-column order / which objectives the
         search optimized), so the budget box can be ANY comp_obj;
       * keep the archs inside [comp_obj_min, comp_obj_max];
-      * rank by the ALREADY-MEASURED loss (ascending) and take the best -n;
-      * optionally apply the guarded benchmark-regret correction to loss
-        near-ties, with an automatic measured-loss fallback.
+      * rank by the ALREADY-MEASURED loss (ascending) and take the best -n.
     Returns (ps, I, pf, sel_mode) shaped for run_final (pf is (n,1) = loss;
     benchmarks run with K=0 → the per-axis-metric print is empty).
     """
@@ -364,37 +407,13 @@ def select_joint(args, ctx):
     feas &= np.isfinite(loss)
     idx = np.where(feas)[0]
     idx = idx[np.argsort(loss[idx], kind='stable')]      # measured-best first
-    benchmark_rank_mode = ''
-    if args.benchmark_calibration_csv:
-        measured_winner = int(idx[0])
-        idx = _guarded_benchmark_ranking(args, sf, archs, loss, idx, ctx)
-        benchmark_rank_mode = (
-            'joint-stats benchmark-guarded correction'
-            if int(idx[0]) != measured_winner else
-            'joint-stats benchmark-guarded abstain -> measured-best')
     n_keep = max(1, int(args.n))
-    # with --select_measured_best, hand run_final the predicted-best top-k to
-    # re-measure; otherwise the stored loss already IS the measurement → take -n.
-    if args.select_measured_best and getattr(args, 'verify_adaptive', False):
-        # adaptive racing: race every in-box CONTENDER within --verify_margin of the
-        # box-best, clamped to [n_keep, verify_topk]. Sizes the race to the tie density.
-        from utils.acquisition import contender_verify_set
-        cset = contender_verify_set(loss[idx], float(args.verify_margin),
-                                    k_min=n_keep, k_max=int(args.verify_topk))
-        n_sel = len(cset)
-        print(f"[post_search] verify_adaptive: {n_sel} contender(s) within "
-              f"{args.verify_margin:g} JSD of best (topk cap {args.verify_topk})")
-    else:
-        n_sel = (max(n_keep, int(args.verify_topk)) if args.select_measured_best
-                 else n_keep)
-    sel = idx[:n_sel]
+    # the stored loss already IS the measurement → take the measured-best -n.
+    sel = idx[:n_keep]
     ps = [archs[j] for j in sel]
     pf = loss[sel].reshape(-1, 1)
     I = list(range(len(sel)))
-    sel_mode = (f'joint-stats top-{len(sel)} → verify → best-{n_keep}'
-                if args.select_measured_best else
-                (f'{benchmark_rank_mode}-{len(sel)}' if benchmark_rank_mode
-                 else f'joint-stats measured-best-{len(sel)}'))
+    sel_mode = f'joint-stats measured-best-{len(sel)}'
     for i, o in enumerate(args.comp_obj):
         print(f"[post_search] {o}: in-box [{args.comp_obj_min[i]:.4g},"
               f"{args.comp_obj_max[i]:.4g}] → best arch {int(sel[0])} "
@@ -402,175 +421,6 @@ def select_joint(args, ctx):
     print(f"[post_search] --second_expr {args.second_expr}: {len(archive)} archs, "
           f"{int(feas.sum())} in-box → {sel_mode}")
     return ps, I, pf, sel_mode
-
-
-_BENCHMARK_FEATURES = (
-    'wbits', 'kvbits', 'kbits', 'vbits', 'kvdim', 'kdim', 'vdim',
-    'eff_kvbits', 'eff_kbits', 'eff_vbits', 'memory')
-
-
-def _benchmark_feature(loss, info):
-    """Small, transferable feature set for the guarded benchmark correction.
-
-    Deliberately excludes the hundreds of raw per-layer choices.  With only 200
-    benchmark labels those features improved random CV but failed structural
-    cluster holdouts; aggregate W/KV allocation features were substantially
-    more stable.
-    """
-    y = max(float(loss), 1e-12)
-    comp = [float(info[k]) / (1e9 if k == 'memory' else 1.0)
-            for k in _BENCHMARK_FEATURES]
-    return [np.sqrt(y), np.log(y), y, y * y, *comp]
-
-
-def _guarded_benchmark_ranking(args, stats, archs, loss, idx, ctx):
-    """Optionally let benchmark calibration change joint measured-loss top-1.
-
-    This is an abstaining correction, not an unrestricted benchmark surrogate:
-      1. only measured-loss near-ties within ``benchmark_loss_guard`` contend;
-      2. five low-dimensional model families vote on a balanced/minimax pick;
-      3. insufficient consensus falls back to the measured-loss winner.
-
-    The guard matters here: unconstrained fits to 200 labelled architectures can
-    confidently extrapolate to a much worse-loss point in a new search archive.
-    """
-    import csv
-    from sklearn.ensemble import (ExtraTreesRegressor,
-                                  HistGradientBoostingRegressor,
-                                  RandomForestRegressor)
-    from sklearn.linear_model import RidgeCV
-    from sklearn.multioutput import MultiOutputRegressor
-    from sklearn.neighbors import KNeighborsRegressor
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import StandardScaler
-
-    if args.benchmark_loss_guard < 0:
-        raise SystemExit('[benchmark-ranker] --benchmark_loss_guard must be >= 0')
-    if not 0 < args.benchmark_min_consensus <= 1:
-        raise SystemExit('[benchmark-ranker] --benchmark_min_consensus must be '
-                         'in (0, 1]')
-
-    protocol = stats.get('protocol', {})
-    expected = {
-        'wt2_jsd_pp128_s32': dict(dataset='wikitext2', n_sample=128,
-                                  seqlen=2048, stride=32,
-                                  prefill_prompt=True, last_tokens=128),
-    }.get(args.benchmark_loss_col)
-    if expected:
-        mismatch = {k: (protocol.get(k), v) for k, v in expected.items()
-                    if protocol.get(k) != v}
-        if mismatch:
-            raise SystemExit(
-                '[benchmark-ranker] calibration loss column does not match the '
-                f'second-search protocol: {mismatch}')
-
-    required = [args.benchmark_loss_col, args.benchmark_longbench_col,
-                args.benchmark_ruler_col, *_BENCHMARK_FEATURES]
-    rows = []
-    with open(args.benchmark_calibration_csv, newline='') as f:
-        reader = csv.DictReader(f)
-        missing = [k for k in required if k not in (reader.fieldnames or [])]
-        if missing:
-            raise SystemExit(
-                f'[benchmark-ranker] missing calibration columns: {missing}')
-        for row in reader:
-            try:
-                vals = [float(row[k]) for k in required]
-            except (TypeError, ValueError):
-                continue
-            if np.isfinite(vals).all():
-                rows.append(row)
-    if len(rows) < 50:
-        raise SystemExit('[benchmark-ranker] need at least 50 complete benchmark '
-                         f'rows, found {len(rows)}')
-
-    X = []
-    Y = []
-    for row in rows:
-        info = {k: float(row[k]) for k in _BENCHMARK_FEATURES}
-        X.append(_benchmark_feature(float(row[args.benchmark_loss_col]), info))
-        Y.append([float(row[args.benchmark_longbench_col]),
-                  float(row[args.benchmark_ruler_col])])
-    X = np.asarray(X, float)
-    Y = np.asarray(Y, float)
-
-    # Existing correlation.csv files computed their memory column before the
-    # KIVI-residual accounting fix.  Keep that convention *only as a model
-    # feature*; the deployment band above uses the physical residual-aware bytes.
-    model_info = [get_net_info(
-        archs[j], ctx.config, ctx.group_size, n_token=args.n_token,
-        residual_length=args.benchmark_calibration_residual_length,
-        attn_sink=args.attn_sink) for j in idx]
-    XP = np.asarray([_benchmark_feature(loss[j], ni)
-                     for j, ni in zip(idx, model_info)], float)
-
-    contenders = np.where(
-        loss[idx] <= loss[idx[0]] + float(args.benchmark_loss_guard) + 1e-12)[0]
-    if len(contenders) == 1:
-        print('[benchmark-ranker] loss guard leaves one contender; measured-loss '
-              'top-1 retained')
-        return idx
-
-    models = {
-        'ridge': make_pipeline(
-            StandardScaler(),
-            RidgeCV(alphas=np.logspace(-3, 5, 41))),
-        'knn7': make_pipeline(
-            StandardScaler(),
-            KNeighborsRegressor(n_neighbors=7, weights='distance')),
-        'extra_trees': ExtraTreesRegressor(
-            n_estimators=500, min_samples_leaf=3, max_features=.8,
-            random_state=args.seed, n_jobs=-1),
-        'random_forest': RandomForestRegressor(
-            n_estimators=500, min_samples_leaf=3, max_features=.8,
-            random_state=args.seed, n_jobs=-1),
-        'hist_gbdt': MultiOutputRegressor(HistGradientBoostingRegressor(
-            max_iter=250, max_leaf_nodes=15, min_samples_leaf=10,
-            l2_regularization=3, random_state=args.seed)),
-    }
-    center = Y.mean(axis=0)
-    scale = np.maximum(Y.std(axis=0), 1e-12)
-    votes = []
-    predictions = {}
-    for name, model in models.items():
-        model.fit(X, Y)
-        pred = model.predict(XP)
-        predictions[name] = pred
-        z = (pred[contenders] - center) / scale
-        if args.benchmark_regret_mode == 'longbench':
-            local = int(np.argmax(z[:, 0]))
-        elif args.benchmark_regret_mode == 'ruler':
-            local = int(np.argmax(z[:, 1]))
-        elif args.benchmark_regret_mode == 'balanced':
-            local = int(np.argmax(z.mean(axis=1)))
-        else:
-            regret = np.max(z.max(axis=0) - z, axis=1)
-            local = int(np.argmin(regret))
-        votes.append(int(contenders[local]))
-
-    vote_idx, vote_count = np.unique(votes, return_counts=True)
-    winner = int(vote_idx[np.argmax(vote_count)])
-    consensus = int(vote_count.max()) / len(votes)
-    baseline = 0
-    accepted = winner != baseline and consensus >= args.benchmark_min_consensus
-    chosen = winner if accepted else baseline
-    chosen_global = int(idx[chosen])
-    vote_text = ', '.join(f'{name}=arch{int(idx[v])}'
-                          for name, v in zip(models, votes))
-    action = ('accepted correction' if accepted else
-              'abstained -> measured-loss top-1')
-    print(f'[benchmark-ranker] {len(rows)} labels, {len(contenders)} loss-guarded '
-          f'contenders (best+{args.benchmark_loss_guard:g}); {vote_text}')
-    print(f'[benchmark-ranker] vote winner arch{int(idx[winner])} '
-          f'consensus={consensus:.0%} (need {args.benchmark_min_consensus:.0%}) '
-          f'-> {action}: arch{chosen_global}')
-    for name, pred in predictions.items():
-        print(f'[benchmark-ranker] {name}: chosen-pred '
-              f'LB-E={pred[chosen, 0]:.4f} RULER={pred[chosen, 1]:.4f}')
-
-    if chosen == baseline:
-        return idx
-    return np.concatenate(([idx[chosen]], np.delete(idx, chosen)))
 
 
 def _has_data(args):
@@ -598,10 +448,10 @@ def check_metric_data(args):
 
 
 def run_final(args, ctx, ps, I, pf, K):
-    """Shared backend: build the evaluator, optionally top-k verify, then
-    evaluate + benchmark the selected archs. `ps[idx]` yields an arch dict,
-    `pf[idx, 0]` its predicted/measured metric. K = number of per-axis metric
-    pairs in pf (0 for the joint-stats path → no per-axis print)."""
+    """Shared backend: build the evaluator, then evaluate + benchmark the
+    selected archs. `ps[idx]` yields an arch dict, `pf[idx, 0]` its
+    predicted/measured metric. K = number of per-axis metric pairs in pf
+    (0 for the joint-stats path → no per-axis print)."""
     model_id = f'{args.model_path}/{args.model_name}'
     if 'hqq' not in args.w_method:
         args.quant_model_paths = []
@@ -659,54 +509,18 @@ def run_final(args, ctx, ps, I, pf, K):
         precomputed_dense_logits=inj.get('dense_logits'),
         precomputed_key_token_list=inj.get('key_token_list'))
 
-    # ── top-k verify (racing-lite): cheaply MEASURE the predicted top-k JSD
-    # (k = --verify_topk), then benchmark only the measured-best `-n`. Within a
-    # narrow COMP_OBJ band the surrogate's in-band τ is ~0.5-0.7 (near-tie y),
-    # so argmin-pred top-1 finds the true best only ~50-73% of the time; the
-    # measured-best of the predicted top-5 recovers it 96-100% with worst-band
-    # regret ≈ 0 (band-val-1000 study). Costs (k − n) extra metric evals.
-    if args.select_measured_best and len(I) > 1:
-        if not _has_data(args):
-            raise SystemExit('--select_measured_best needs --datasets '
-                             '(or --loss_datasets/--ppl_datasets/--metric_tasks) '
-                             '— the verification metric.')
-        # With named tasks the FIRST task is the verify objective: point the
-        # evaluator at its group first, otherwise the anonymous --loss_* protocol
-        # would be run against another group's pre-masked teacher logits.
-        if tasks:
-            v_key, v_group, v_ds, v_kw = tasks[0]
-            apply_group(evaluator, precomp[v_group])
-            print(f'[verify] objective = {v_key} (first --metric_tasks entry)')
-        measured = {}
-        for idx in tqdm(I, desc=f'verify top-{len(I)}'):
-            arch = ps[idx]
-            model = evaluator.sample(arch)
-            if tasks:
-                v = run_task(args, ctx.accelerator, evaluator, v_ds, v_kw)
-                metric = {v_ds: float(v.item() if hasattr(v, 'item') else v)}
-            else:
-                # rank by the FIRST --metric (the surrogate objective)
-                metric = evaluate_metric(args, arch, model, evaluator,
-                                         ctx.accelerator, metric=args.metric[0],
-                                         loss_func=args.loss_func)
-            measured[idx] = float(list(metric.values())[0])
-            print(f'[verify] idx={idx} measured={measured[idx]:.6f} '
-                  f'pred={pf[idx, 0]:.6f}')
-            if any(m in args.w_method
-                   for m in ('awq', 'gptq', 'qeft', 'awq_qeft')):
-                del model, evaluator.model
-                clean_up()
-        # keep the measured-best `-n` (original meaning of -n = #archs desired)
-        ranked_by_meas = sorted(measured, key=measured.get)
-        I = ranked_by_meas[:max(1, int(args.n))]
-        print(f'[verify] measured-best-{len(I)} of top-{len(measured)}: '
-              + ', '.join(f'idx={i}(y={measured[i]:.6f},'
-                          f'pred-rank={ranked_by_meas.index(i)})' for i in I)
-              + ' — benchmarks run on these only')
-
     # long-format rows persisted to --save/--results_csv_file: one row per
     # (arch, metric, dataset) so ALL metrics land in a file, not just stdout.
-    metric_rows = [('idx', 'metric', 'dataset', 'value')]
+    # `spec` = definition fingerprint of the number in that row. These rows ARE
+    # the final table, and the comparison made with them is ACROSS runs (ours vs
+    # baseline vs ablation) — so each value has to carry what produced it, or a
+    # registry/protocol edit between two runs silently puts incomparable numbers
+    # side by side. Named tasks hash their registry spec; the anonymous
+    # --loss_*/--ppl_* path hashes its protocol knobs.
+    _knob_spec = hashlib.sha256(
+        json.dumps(protocol_dict(args), sort_keys=True, default=str).encode()
+    ).hexdigest()[:8]
+    metric_rows = [('idx', 'metric', 'dataset', 'value', 'spec')]
     for idx in tqdm(I):
         arch = ps[idx]
         # attn_sink is part of the KV memory accounting, so it must be passed
@@ -738,7 +552,7 @@ def run_final(args, ctx, ps, I, pf, K):
                           f'seqlen={spec["seqlen"]} n={spec["n_sample"]} '
                           f'lt={spec["last_tokens"]} | stride={kw.get("stride") or 0} '
                           f'prefill={bool(kw.get("prefill_prompt"))}) {time() - t0:.1f}s')
-                    metric_rows.append((idx, key, ds, v))
+                    metric_rows.append((idx, key, ds, v, spec_sha8(key)))
 
         elif _has_data(args):
             # anonymous protocol (--loss_*/--ppl_*): one loss task + one ppl task
@@ -754,14 +568,15 @@ def run_final(args, ctx, ps, I, pf, K):
                 print(f'[{idx}] {label}: {list(res.values())}  '
                       f'(stride={_st} prefill={_pp} last_tokens={_lt})')
                 for ds, v in res.items():
-                    metric_rows.append((idx, label, ds, float(v)))
+                    metric_rows.append((idx, label, ds, float(v), _knob_spec))
 
         if tasks or _has_data(args):
-            metric_rows.append((idx, 'pred_metric', '', float(pf[idx, 0])))
+            metric_rows.append((idx, 'pred_metric', '', float(pf[idx, 0]), ''))
             print(f'[{idx}] pred_metric: {pf[idx, 0]}, per_axis_metric: '
                   f'{pf[idx, [1 + 2 * i for i in range(K)]].tolist()}')
 
-        run_benchmarks(args, model, model_id)
+        run_benchmarks(args, model, model_id, arch=arch, idx=int(idx),
+                       n_archs=len(I))
 
         if any(m in args.w_method
                for m in ('awq', 'gptq', 'qeft', 'awq_qeft')):
@@ -776,6 +591,25 @@ def run_final(args, ctx, ps, I, pf, K):
             csv.writer(f).writerows(metric_rows)
         print(f'[post_search] wrote {len(metric_rows) - 1} metric row(s) '
               f'({len(args.metric)} metric(s) × final arch(s)) to {out_path}')
+        # results.txt is a vars(args) dump for humans; this is the machine
+        # -comparable twin, and it names the benchmark artefact trees so a run
+        # and its generations can be matched later without timestamp guesswork.
+        with open(os.path.join(args.save, 'meta.json'), 'w') as f:
+            json.dump(dict(kind='post_search', run_id=RUN_ID,
+                           **_quant_meta(args),
+                           metric_tasks=list(args.metric_tasks or []),
+                           metric=list(args.metric or []),
+                           loss_func=args.loss_func,
+                           knob_protocol=protocol_dict(args),
+                           specs={k: spec_sha8(k)
+                                  for k in (args.metric_tasks or [])
+                                  if k in METRIC_KEYS},
+                           archs=[arch_sha8(ps[i]) for i in I],
+                           artifacts=dict(
+                               longbench=args.longbench_result_path,
+                               minilongbench=args.minilongbench_result_path,
+                               ruler=args.ruler_result_path)),
+                      f, indent=2, ensure_ascii=False)
 
 
 def main(args):
@@ -790,8 +624,7 @@ def main(args):
 
     # ── second_search joint path: archive already holds assembled joint archs
     # with measured JSD → skip all per-axis combination/surrogate machinery,
-    # filter by the comp_obj budget box, then use measured-best or the explicitly
-    # requested guarded benchmark correction.
+    # filter by the comp_obj budget box, then take the measured-best.
     if args.second_expr:
         ps, I, pf, sel_mode = select_joint(args, ctx)
         print(f'[selection] mode={sel_mode}  |I|={len(I)}  |candidates|={len(ps)}')
@@ -831,13 +664,6 @@ def main(args):
     separable = (not args.sample_path and bool(args.comp_obj)
                  and all(p is not None for p in _pa))
 
-    # top-k verify: materialise the predicted top-`n_verify` so the cheap-JSD
-    # screen has a pool, then keep the measured-best `-n` for the (expensive)
-    # benchmarks. Without --select_measured_best, n_verify == args.n (the final
-    # arch count keeps its original meaning).
-    n_verify = (max(int(args.n), int(args.verify_topk))
-                if args.select_measured_best else int(args.n))
-
     if separable:
         ranked = {}                       # axis -> subnet idx, best→worst JSD
         for i, o in enumerate(args.comp_obj):
@@ -855,7 +681,7 @@ def main(args):
         for a, k in enumerate(expr_keys):             # uncovered axis: global
             if a not in ranked:                       # lowest JSD, no window
                 ranked[a] = np.argsort(_efm[k][:, 0], kind='stable')
-        n_sel = min(n_verify, min(len(v) for v in ranked.values()))
+        n_sel = min(int(args.n), min(len(v) for v in ranked.values()))
         valid_nd_idx = np.empty((n_sel, K), np.int64)
         for a in range(K):
             valid_nd_idx[:, a] = ranked[a][:n_sel]
@@ -874,10 +700,7 @@ def main(args):
                   f"JSD={_efm[expr_keys[ax]][valid_nd_idx[0, ax], 0]:.5f}")
         print(f"[post_search] no --sample_path + separable comp_obj "
               f"{args.comp_obj} → per-axis lowest-JSD combination "
-              f"(NO Σ; -n={args.n}"
-              + (f", verify_topk={args.verify_topk}" if args.select_measured_best
-                 else "")
-              + f" → {n_sel} combo(s))")
+              f"(NO Σ; -n={args.n} → {n_sel} combo(s))")
     else:
         valid_nd_idx = select_valid_nd_idx(
             nd.nd_shape, nd.new_metric_nd, nd.comp_nd_list,
@@ -951,9 +774,8 @@ def main(args):
         pf = F
         ps = LazyPs(lambda row: build_arch(ctx.default_arch, expr_keys,
                                            _esm, row), valid_nd_idx)
-        I = list(range(min(n_verify, len(valid_nd_idx))))
-        sel_mode = (f'verify top-{len(I)} → best-{args.n}'
-                    if args.select_measured_best else f'top-{args.n}')
+        I = list(range(min(int(args.n), len(valid_nd_idx))))
+        sel_mode = f'top-{args.n}'
 
     # ─────────────────────── final architecture selection ───────────────────────
     # NOTE: --prefer (ASF) and --high_tradeoff (NonDominatedSorting) final
@@ -1102,42 +924,13 @@ def build_parser():
     # When set, ALL per-axis combination/surrogate flags (--w_expr/--kv_expr/...
     # /--sample_path/--surrogate) are ignored — the archive already holds joint
     # archs with measured JSD; default selection = comp_obj budget box →
-    # measured-best -n (the benchmark-calibration flags optionally guard-correct
-    # near-ties).
+    # measured-best -n.
     p.add_argument('--second_expr', type=str, default='',
                    help='second_search iter_<it>.stats: select+benchmark its '
                         'assembled joint archs directly (no per-axis combine).')
     p.add_argument('--second_include_candidates', action='store_true',
                    help="(with --second_expr) also include the stats' "
                         "'candidates' list, not just 'archive'.")
-    bg = p.add_argument_group(
-        'guarded benchmark-regret correction (joint second-search only)')
-    bg.add_argument('--benchmark_calibration_csv', type=str, default='',
-                    help='correlation.csv with measured joint loss, LongBench-E, '
-                         'RULER, and aggregate architecture features. Empty '
-                         '(default) keeps pure measured-loss ranking.')
-    bg.add_argument('--benchmark_loss_col', type=str,
-                    default='wt2_jsd_pp128_s32')
-    bg.add_argument('--benchmark_longbench_col', type=str,
-                    default='longbench_e__avg')
-    bg.add_argument('--benchmark_ruler_col', type=str,
-                    default='ruler__avg')
-    bg.add_argument('--benchmark_regret_mode',
-                    choices=['longbench', 'ruler', 'minimax', 'balanced'],
-                    default='minimax',
-                    help='longbench/ruler optimize that endpoint independently; '
-                         'minimax equalizes standardized endpoint regret; '
-                         'balanced maximizes their equal-weight z-score mean.')
-    bg.add_argument('--benchmark_loss_guard', type=float, default=0.001,
-                    help='benchmark correction may only choose measured losses '
-                         'within this absolute margin of the band best.')
-    bg.add_argument('--benchmark_min_consensus', type=float, default=0.8,
-                    help='fraction of five model families required to override '
-                         'the measured-loss winner; otherwise abstain.')
-    bg.add_argument('--benchmark_calibration_residual_length', type=int,
-                    default=0,
-                    help='residual length used when the calibration CSV memory '
-                         'column was made (legacy correlation.csv files used 0).')
     p.add_argument('--sample_path', type=str, default='',
                    help='results.csv from sample_surrogate.py (surrogate '
                         'training data). If omitted, additive metric is used.')
@@ -1165,29 +958,6 @@ def build_parser():
     p.add_argument('--high_tradeoff', type=str, nargs='+', default=[])
     p.add_argument('-n', type=int, default=1,
                    help='number of architectures desired')
-    p.add_argument('--select_measured_best', action='store_true',
-                   help='top-k verify: cheaply measure the predicted top-'
-                        '`--verify_topk` archs (--datasets metric), then keep '
-                        'the measured-best `-n` for the expensive benchmarks. '
-                        'verify_topk=5 recovers the true band-best 96-100%% '
-                        '(vs 50-73%% for argmin-pred top-1) at (k-n) extra '
-                        'metric evals. -n keeps its meaning = #archs output.')
-    p.add_argument('--verify_topk', type=int, default=5,
-                   help='(with --select_measured_best) how many predicted-best '
-                        'archs to JSD-screen before keeping the measured-best '
-                        '-n. Clamped up to >= -n.')
-    # adaptive racing (opt-in): verify every in-box contender within --verify_margin
-    # JSD of the box-best instead of a fixed --verify_topk. See DECISIONS.md Phase 4.
-    p.add_argument('--verify_adaptive', action='store_true',
-                   help='(with --select_measured_best) race the CONTENDER set — every '
-                        'in-box arch whose stored JSD is within --verify_margin of the '
-                        'best — instead of a fixed --verify_topk. Fixed top-k over-verifies '
-                        'clear winners and under-verifies dense ties; adaptive sizes the '
-                        'race to the tie density. Clamped to [-n, --verify_topk].')
-    p.add_argument('--verify_margin', type=float, default=0.002,
-                   help='(with --verify_adaptive) JSD band around the box-best that defines '
-                        'a contender. Set to the Phase-0 draw-noise σ once calibrated; '
-                        'default 0.002 ≈ the alloc-flip tie threshold.')
     # long-ppl key-token options (consumed by the evaluator)
     p.add_argument('--use_key_token', action='store_true')
     p.add_argument('--trunc_len', type=int, default=512)
@@ -1226,6 +996,10 @@ def build_parser():
     p.add_argument('--ruler_gen_toks', type=int, default=None)
     p.add_argument('--ruler_batch_size', type=int, default=1)
     p.add_argument('--ruler_result_path', type=str, default='')
+    p.add_argument('--ruler_per_example_path', type=str, default='',
+                   help='JSONL path for sample-level RULER generations (default: '
+                        '<ruler_result_path>_per_example_s<seed>.jsonl; always '
+                        'written, keyed by seed)')
     p.add_argument('--ruler_chat_template', action=argparse.BooleanOptionalAction,
                    default=True,
                    help='Apply the model chat template to RULER prompts (default on; '

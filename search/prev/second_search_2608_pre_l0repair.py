@@ -597,8 +597,7 @@ class SecondSearch:
                                   comp=self._comp)
         mut = KnowledgeMutation(self.w, self.xu, self.Wg, self.KVg, self.nw, self.segments,
                                 p_val=self.args.mut_p_val, p_mod=self.args.mut_p_mod,
-                                band_table=self.band_table, comp=self._comp, comp_obj=self.comp_obj,
-                                l0_repair=self.args.l0_repair)
+                                band_table=self.band_table, comp=self._comp, comp_obj=self.comp_obj)
         algo = NSGA3(pop_size=self.ga_pop_size, ref_dirs=self.ref_dirs,
                      sampling=FrontierProductSampling(self.Wg, self.KVg),
                      crossover=AxisBlockCrossover(self.nw, self.n_var),
@@ -1051,14 +1050,6 @@ def build_parser():
     p.add_argument('--w_front_eps', type=float, default=0.0); p.add_argument('--kv_front_eps', type=float, default=0.0)
     p.add_argument('--front_eps_rel', type=float, default=0.0, help='relative ε band = front_jsd·(1+rel); scale-free, auto-wider in the high-loss corner')
     p.add_argument('--div_k', type=int, default=0, help='keep div_k structurally-diverse blocks per axis (maximin; 0=off)')
-    p.add_argument('--l0_repair', type=int, default=0,
-                   help='L0-ball repair (0 = off): cap how far a child may sit from the '
-                        'BandTable staircase of its own joint budget band; the excess '
-                        'deviations with the lowest band probability are reverted to the '
-                        'staircase. Screened value 16-24 (tests/space_reduction/joint_screen.py: '
-                        'regret max 0.0003 JSD, best-of-B -0.0009..-0.0022 on 14-16/16 budget '
-                        'cells). Unlike --agree_frac this budgets the NUMBER of deviations '
-                        'rather than freezing particular cells, which measured WORSE.')
     p.add_argument('--agree_frac', type=float, default=0.95, help='L2 freeze: cells where ≥ this fraction of 1st-stage blocks agree are frozen at consensus (mutation skips them); >1.0 disables. 0.95 is loss-free per tests/joint_reabsorption.py')
     # per-iter down-select = subset selector over union(archive front, picks): std-of-gaps GA,
     # hole-filling, keeps edge candidates (baseline_search 2607100451/0638 post-mortem).

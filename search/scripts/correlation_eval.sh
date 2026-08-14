@@ -12,10 +12,47 @@
 #                  wt2_jsd_lt128 needle_nll needle_nll_s512 needle_nll_pp512_s128
 #                  gsm8k_jsd gov_jsd gov_jsd_s512 gov_jsd_pp512_s128 gov_jsd_lt128
 #                  gsm8k_jsd_pp_s128 gov_jsd_kt gov_jsd_kt_s512
+#              Decode-tight answer window (stride 8 over the last 32 tokens):
+#                  wt2_jsd_pp32_s8 gov_jsd_pp32_s8
+#                  needle_nll_pp32_s8 needle_jsd_pp32_s8
+#              Longer-context PPL (own groups, no FP-teacher pass):
+#                  wt2_ppl_sl4096 c4_ppl_sl4096 wt2_ppl_sl8192 c4_ppl_sl8192
+#                  wt2_ppl_sl8192_s512   (8k windows through the real KV cache)
+#              Long-DOCUMENT PPL — 128 docs, selection seed pinned to 0, each
+#              corpus on the full 2048 / 4096 / 8192 ladder:
+#                  gov_ppl_sl2048 gov_ppl_sl4096 gov_ppl (+ _s512 _pp512_s128)
+#                  nqa_ppl_sl2048 nqa_ppl_sl4096 nqa_ppl (+ _s512)  narrativeqa
+#                  qmsum_ppl_sl2048 qmsum_ppl_sl4096 qmsum_ppl (+ _s512)
+#              (LongBench grades qmsum → qmsum_ppl* are REPORTING metrics; the
+#               correlation is still measured, just listed in
+#               correlation_contamination.txt as not-a-prediction-claim)
+#              Answer-phase PPL: EVERY corpus above also has <base>_pp512_s32
+#              and <base>_pp128_s32 (e.g. nqa_ppl_pp128_s32,
+#              wt2_ppl_sl8192_pp512_s32) — prefill + 32-token-chunk scoring.
+#              Long-doc JSD at the 128-doc default: gov_jsd_pp128_s32_n128_sl8192
+#              COST per long-doc task = n_sample x seqlen forward tokens
+#              (0.26M @2048 … 1.05M @8192); an answer-phase variant costs the
+#              same as its base (the prefill dominates). For reference the
+#              benchmarks this harness correlates against measure, per idx:
+#              RULER 28.6 min / LongBench 150.1 min / LongBench-E 282.7 min.
+#              The authoritative list is utils/metric_specs.py::METRIC_TASKS;
+#              `--metrics all` runs every one of them.
 #
 # Run this once per IDX (parallelise across GPUs by launching multiple
-# instances). result_<IDX>.json is written into SAVE_DIR; bash
-# scripts/correlation_aggregate.sh merges everything into correlation.csv.
+# instances). Results go to SAVE_DIR/m_<config sha8>/result_<IDX>.json — ONE
+# FOLDER PER MEASUREMENT CONFIG (model + w/kv method + bits + group sizes +
+# residual + sink + quant schemes + seed), with the full config in that
+# folder's meta.json. archs.csv stays at SAVE_DIR and is shared, so the same
+# arch pool can be measured under several configs without them ever mixing:
+# aggregate reads ONE folder, and rows inside it are comparable by
+# construction. Benchmark artefact paths follow into the same folder.
+# A SAVE_DIR that already holds result_*.json at its root keeps using the root
+# (existing runs are untouched). bash scripts/correlation_aggregate.sh merges
+# one folder into correlation.csv.
+#
+# Each measured value also stores a spec hash of its DEFINITION (the registry
+# group+task): edit a group and the affected metric is re-measured on the next
+# run instead of keeping a number that no longer means the same thing.
 
 DEVICES=${1:-0}
 IDX=${2:?"need IDX (row index in archs.csv)"}
@@ -79,8 +116,26 @@ for B in ${W_BITS}; do
 done
 QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 
+# The bank directory name ends in DTYPE. On this box Llama-3.1-8B-Instruct is
+# stored as _bfloat16 ONLY (Llama-2 has _float16), so a DTYPE/bank mismatch used
+# to surface deep inside the HQQ loader; fail here with the path instead.
+if [ "${W_METHOD}" = "hqq" ]; then
+    for P in "${QMODEL_PATHS_LIST[@]}"; do
+        if [ ! -d "${P}" ]; then
+            echo "ERROR: HQQ bank not found: ${P}"
+            echo "       DTYPE=${DTYPE} decides the suffix; available banks:"
+            ls -d /SSD/hqq/${MODEL_NAME}_* 2>/dev/null | sed 's/^/         /'
+            exit 1
+        fi
+    done
+fi
+
 SEED=0
 N_TOKEN=16384
+
+# Optional: aggregate/evaluate a SPECIFIC measurement folder instead of the one
+# derived from the config below (see the header). Leave empty for the default.
+MEASURE_DIR=""
 
 # ── gov_jsd_kt key-token archive (set to '' to skip gov_jsd_kt) ──
 KEY_TOKEN_PATH=key_token/Qwen2.5-72B-Instruct_gov_report_test_8sample_8192seqlen_8192min_256trunc_64sw_1alpha_-1beta
@@ -100,10 +155,17 @@ LONGBENCH_E_RESULT_PATH=${SAVE}/longbench_e_${IDX}
 
 RULER_TASK="niah_single_1"
 RULER_YAML_PATH=utils/ruler_utils
-RULER_LENGTH=${N_TOKEN}
+# RULER context length(s) — INDEPENDENT of N_TOKEN (which is only the
+# memory-accounting token count for get_net_info). Space-separated values run
+# one full RULER_SAMPLE sweep per length; scores are then reported per length
+# as <task>_len<L> and raw artefacts go to <RULER_RESULT_PATH>/len<L>/.
+#   e.g. RULER_LENGTH="4096 8192 16384"   (cost scales linearly with lengths)
+RULER_LENGTH="16384"
 RULER_SAMPLE=5
 RULER_BATCH_SIZE=1
-RULER_RESULT_PATH=${SAVE}/ruler_${IDX}_len${RULER_LENGTH}_s${RULER_SAMPLE}
+# Compact tag for the result dir: "4096 8192" → "4096-8192".
+RULER_LEN_TAG=$(echo "${RULER_LENGTH}" | tr -s ' ' '-')
+RULER_RESULT_PATH=${SAVE}/ruler_${IDX}_len${RULER_LEN_TAG}_s${RULER_SAMPLE}
 
 ARGS="--mode eval \
 --gpu_id ${DEVICES} \
@@ -130,6 +192,8 @@ ARGS="--mode eval \
 --needle_n_sample ${NEEDLE_N_SAMPLE} \
 --needle_seqlen ${NEEDLE_SEQLEN}"
 
+[ -n "${MEASURE_DIR}" ] && ARGS+=" --measure_dir ${MEASURE_DIR}"
+
 for g in "${K_GROUP_SIZE[@]}"; do ARGS+=" --k_group_size ${g} "; done
 for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 
@@ -146,6 +210,19 @@ for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 RUN_RULER=0
 RUN_LONGBENCH=0
 RUN_LONGBENCH_E=0
+
+# Per-example GENERATIONS are always written (no knob):
+#   RULER     → <RULER_RESULT_PATH>[/len<L>]/per_example_s${SEED}.jsonl
+#               (per seed — the seed decides which samples are generated)
+#   LongBench → <LONGBENCH_RESULT_PATH>/pred[_e]/<dataset>.jsonl
+# Each row carries the generation, the references, the per-example score, token
+# counts, input_sha256 AND provenance (run_id / arch_sha8 / idx) so a row can
+# never be misattributed even if files are merged later. The prompts themselves
+# are NOT stored: they are regenerable from (dataset, _id) / (seed, task,
+# sample_index) and the hash proves the regenerated prompt matches.
+# Each artefact directory also gets a meta.json (config it was produced under);
+# re-running the SAME config refreshes it in place, a DIFFERENT config moves the
+# old directory to <parent>/archive/<ts>/ instead of interleaving files.
 
 # LongBench / LongBench-E params (always passed; only used if toggled on)
 ARGS+=" --longbench_config ${LONGBENCH_CONFIG} --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_e_result_path ${LONGBENCH_E_RESULT_PATH}"

@@ -1,5 +1,6 @@
 import os
 import torch
+import hashlib
 from datasets import load_dataset
 import json
 from tqdm import tqdm
@@ -19,6 +20,18 @@ from .metrics import (
     count_score,
     code_sim_score,
 )
+
+# The dataset lists pred_longbench actually scores. Module-level (not inlined in
+# pred_longbench) so other code can ask "is this corpus also a benchmark target?"
+# without duplicating the list — see correlation.py's contamination check: a
+# calibration corpus that the benchmark ALSO scores makes their correlation
+# circular.
+LONGBENCH_DATASETS = ["triviaqa", "qasper", "trec", "samsum", "lcc",
+                      "repobench-p", "qmsum", "multi_news"]
+LONGBENCH_E_DATASETS = ["qasper", "multifieldqa_en", "hotpotqa", "2wikimqa",
+                        "gov_report", "multi_news", "trec", "triviaqa", "samsum",
+                        "passage_count", "passage_retrieval_en", "lcc",
+                        "repobench-p"]
 
 dataset2metric = {
     "narrativeqa": qa_f1_score,
@@ -95,7 +108,7 @@ def _prepare_prompt(tokenizer, json_obj, max_length, prompt_format, dataset,
 
 
 def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
-             dataset, device, model_name):
+             dataset, device, model_name, stamp=None):
     """Per-sample (batch_size=1) generation, legacy KIVI/ThinK path.
 
     Length-bucket batched generation was investigated and removed —
@@ -145,16 +158,36 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
         pred = tokenizer.decode(output[context_length:],
                                 skip_special_tokens=True)
         pred = post_process(pred, model_name)
-        preds.append({"pred": pred,
+        # The first four keys are the upstream LongBench record (_score_preds
+        # and every offline reader depend on them). The rest identifies the
+        # generation: `_id` + `dataset` point back at the source example (the
+        # split is fixed, so the prompt is regenerable from them — no reason to
+        # store ~80 MB of prompt text per pass), and input_sha256 over the FINAL
+        # prompt (post truncate-in-middle, post chat template) proves a
+        # regenerated prompt is the one the model actually saw.
+        # `score` is filled in later by eval_longbench_preds.
+        preds.append({**(stamp or {}),
+                      "pred": pred,
                       "answers": json_obj["answers"],
                       "all_classes": json_obj["all_classes"],
-                      "length": json_obj["length"]})
+                      "length": json_obj["length"],
+                      "dataset": dataset,
+                      "_id": json_obj.get("_id"),
+                      "context_tokens": int(context_length),
+                      "generated_tokens": int(output.shape[-1] - context_length),
+                      "input_sha256": hashlib.sha256(
+                          prompt.encode("utf-8")).hexdigest()})
     return preds
 
 
 def pred_longbench(model, tokenizer, save_path, longbench_config, e,
-                   model_name=None):
-    """LongBench / LongBench-E predictor (per-sample, batch_size=1)."""
+                   model_name=None, stamp=None):
+    """LongBench / LongBench-E predictor (per-sample, batch_size=1).
+
+    Writes <save_path>/pred[_e]/<dataset>.jsonl — one JSON per example with the
+    GENERATION, the references, and the fields that identify it (dataset / _id /
+    context_tokens / generated_tokens / input_sha256). Prompts are not stored:
+    they are regenerable from (dataset, _id)."""
     model2maxlen = json.load(
         open(os.path.join(longbench_config, "model2maxlen.json"), "r"))
 
@@ -171,14 +204,7 @@ def pred_longbench(model, tokenizer, save_path, longbench_config, e,
     max_length = model2maxlen[model_name]
     device = model.device
 
-    if e:
-        datasets = ["qasper", "multifieldqa_en", "hotpotqa", "2wikimqa",
-                    "gov_report", "multi_news", "trec", "triviaqa", "samsum",
-                    "passage_count", "passage_retrieval_en", "lcc",
-                    "repobench-p"]
-    else:
-        datasets = ["triviaqa", "qasper", "trec", "samsum", "lcc",
-                    "repobench-p", "qmsum", "multi_news"]
+    datasets = LONGBENCH_E_DATASETS if e else LONGBENCH_DATASETS
 
     dataset2prompt = json.load(
         open(os.path.join(longbench_config, "dataset2prompt.json"), "r"))
@@ -202,7 +228,8 @@ def pred_longbench(model, tokenizer, save_path, longbench_config, e,
         prompt_format = dataset2prompt[dataset]
         max_gen = dataset2maxlen[dataset]
         preds = get_pred(model, tokenizer, data, max_length, max_gen,
-                         prompt_format, dataset, device, model_name)
+                         prompt_format, dataset, device, model_name,
+                         stamp=stamp)
         with open(out_path, "w", encoding="utf-8") as f:
             for pred in preds:
                 json.dump(pred, f, ensure_ascii=False)
@@ -214,16 +241,25 @@ def pred_longbench(model, tokenizer, save_path, longbench_config, e,
     return all_preds
 
 
+def score_one(dataset, prediction, ground_truths, all_classes):
+    """Score ONE prediction against its reference list — the single definition
+    of a LongBench per-sample score. scorer / scorer_e aggregate it, and
+    _score_preds writes it back per example, so a per-example score can never
+    drift from the reported average."""
+    score = 0.
+    if dataset in ["trec", "triviaqa", "samsum", "lsht"]:
+        prediction = prediction.lstrip('\n').split('\n')[0]
+    for ground_truth in ground_truths:
+        score = max(score, dataset2metric[dataset](
+            prediction, ground_truth, all_classes=all_classes))
+    return score
+
+
 def scorer_e(dataset, predictions, answers, lengths, all_classes):
     scores = {"0-4k": [], "4-8k": [], "8k+": []}
     for (prediction, ground_truths, length) in zip(predictions, answers,
                                                    lengths):
-        score = 0.
-        if dataset in ["trec", "triviaqa", "samsum", "lsht"]:
-            prediction = prediction.lstrip('\n').split('\n')[0]
-        for ground_truth in ground_truths:
-            score = max(score, dataset2metric[dataset](
-                prediction, ground_truth, all_classes=all_classes))
+        score = score_one(dataset, prediction, ground_truths, all_classes)
         if length < 4000:
             scores["0-4k"].append(score)
         elif length < 8000:
@@ -240,39 +276,43 @@ def scorer_e(dataset, predictions, answers, lengths, all_classes):
 def scorer(dataset, predictions, answers, all_classes):
     total_score = 0.
     for (prediction, ground_truths) in zip(predictions, answers):
-        score = 0.
-        if dataset in ["trec", "triviaqa", "samsum", "lsht"]:
-            prediction = prediction.lstrip('\n').split('\n')[0]
-        for ground_truth in ground_truths:
-            score = max(score, dataset2metric[dataset](
-                prediction, ground_truth, all_classes=all_classes))
-        total_score += score
+        total_score += score_one(dataset, prediction, ground_truths, all_classes)
     return round(100 * total_score / len(predictions), 2)
 
 
-def _score_preds(dataset, preds, e):
+def _score_preds(dataset, preds, e, annotate=False):
     """Score one dataset's prediction list (in-memory, the dicts produced by
     get_pred). Shared by eval_longbench_preds (in-memory) and eval_longbench
-    (file-based) so both compute identical scores."""
+    (file-based) so both compute identical scores.
+
+    annotate=True also stamps each pred dict with its own `score` (same
+    score_one call the aggregate uses)."""
     predictions = [d["pred"] for d in preds]
     answers = [d["answers"] for d in preds]
     all_classes = preds[0]["all_classes"] if preds else None
+    if annotate:
+        for d in preds:
+            d["score"] = float(score_one(dataset, d["pred"], d["answers"],
+                                         all_classes))
     if e:
         lengths = [d["length"] for d in preds]
         return scorer_e(dataset, predictions, answers, lengths, all_classes)
     return scorer(dataset, predictions, answers, all_classes)
 
 
-def eval_longbench_preds(preds_by_dataset, e, save_path=None):
+def eval_longbench_preds(preds_by_dataset, e, save_path=None,
+                         rewrite_preds=True):
     """Score the predictions returned by pred_longbench DIRECTLY (in memory),
     with no re-read of the prediction dir. This is the corruption-safe path:
     it scores exactly the datasets produced in THIS run, never stale or
     other-config .jsonl files lying in the directory.
 
-    When save_path is given, the score summary is still written to
-    <save_path>/pred[_e]/result.json (predictions themselves were already
-    written by pred_longbench), so the on-disk artifacts are unchanged."""
-    scores = {dataset: _score_preds(dataset, preds, e)
+    When save_path is given, the score summary is written to
+    <save_path>/pred[_e]/result.json AND each <dataset>.jsonl is rewritten with
+    the per-example `score` stamped in (pred_longbench had to write the
+    predictions before scoring, so this is the point where the two meet). Set
+    rewrite_preds=False to leave the prediction files byte-identical."""
+    scores = {dataset: _score_preds(dataset, preds, e, annotate=bool(save_path))
               for dataset, preds in preds_by_dataset.items()}
     print(f'task: {list(scores.keys())}')
     print(f'score: {list(scores.values())}')
@@ -281,6 +321,15 @@ def eval_longbench_preds(preds_by_dataset, e, save_path=None):
         os.makedirs(out_dir, exist_ok=True)
         with open(os.path.join(out_dir, 'result.json'), "w") as f:
             json.dump(scores, f, ensure_ascii=False, indent=4)
+        if rewrite_preds:
+            for dataset, preds in preds_by_dataset.items():
+                path = os.path.join(out_dir, f'{dataset}.jsonl')
+                tmp = path + '.tmp'
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    for p in preds:
+                        json.dump(p, f, ensure_ascii=False)
+                        f.write('\n')
+                os.replace(tmp, path)
     return scores
 
 

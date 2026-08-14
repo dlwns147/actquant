@@ -393,13 +393,11 @@ class KnowledgeMutation(Mutation):
     instead of the pool-global column (+0.4–0.6 bits/cell on front values, removes mode
     collapse; tests/p1p2_band_table.py). band_table=None → legacy global draw."""
     def __init__(self, w, xu, Wg, KVg, nw, segments, base=0.06, p_val=0.5, p_mod=0.15,
-                 band_table=None, comp=None, comp_obj=('wbits', 'eff_kvbits'), l0_repair=0):
+                 band_table=None, comp=None, comp_obj=('wbits', 'eff_kvbits')):
         super().__init__()
         self.w, self.xu, self.nw, self.base, self.p_val, self.p_mod = w, xu, nw, base, p_val, p_mod
         self.Wg, self.KVg, self.segments = Wg, KVg, segments
         self.bt, self.comp, self.comp_obj = band_table, comp, list(comp_obj)
-        self.l0_repair = int(l0_repair)
-        self._L0_PASSES = 4          # fixed-point iterations for the band-shift feedback
 
     def _do(self, problem, X, **kw):
         X = X.copy(); nv = len(self.xu)
@@ -422,48 +420,6 @@ class KnowledgeMutation(Mutation):
                         X[i, g] = col[np.random.randint(len(col))]
                 else:                                                # local ±1 (direction-free)
                     X[i, g] = min(max(X[i, g] + (1 if np.random.random() < 0.5 else -1), 0), self.xu[g])
-        return self._repair_l0(X) if (self.l0_repair and self.bt is not None
-                                      and self.comp is not None) else X
-
-    def _repair_l0(self, X):
-        """L0-ball repair (`--l0_repair k`, OFF by default): no child may sit more than k cells
-        away from the staircase of its OWN joint budget band; the excess deviations with the
-        LOWEST band probability are reverted to the staircase value.
-
-        Measured basis (tests/space_reduction/joint_screen.py, 2nd-stage joint HQQ archive,
-        20964 archs, production BandTable, converged tail only): the L0 ball at k=16-24 keeps
-        62-80% of the archive, never loses the per-budget-cell best arch (regret max 0.0003
-        JSD) and improves best-of-B by 0.0009-0.0022 JSD at B=10-50 on 14-16 of 16 budget
-        cells. The same ball on the PER-AXIS 1st stage buys nothing (density_payoff.py) —
-        the effect is specific to the joint stage, where axis-block crossover pastes a block
-        from one budget band into an individual sitting in another. Per-cell consensus
-        freezing (the `agree_frac` L2 family) is measurably WORSE than no reduction here, so
-        this is deliberately an L0 budget on the NUMBER of deviations, not a freeze of
-        particular cells.
-
-        Reverting a cell moves the individual's comp, which can move it into a NEIGHBOURING
-        band whose staircase differs — so the repair is iterated to a fixed point (few passes;
-        capped, since a genome oscillating between two band staircases is possible in
-        principle)."""
-        for _ in range(self._L0_PASSES):
-            Xi = np.clip(np.round(X), 0, self.xu).astype(int)
-            C = self.comp.batch(Xi, self.comp_obj)                   # re-read AFTER mutation
-            bw = self.bt.band(C[:, 0], 'w'); bk = self.bt.band(C[:, 1], 'kv')
-            S = np.concatenate([self.bt.Sw[bw], self.bt.Sk[bk]], axis=1)
-            dev = Xi != S
-            over = np.where(dev.sum(1) > self.l0_repair)[0]
-            if not len(over):
-                break
-            for i in over:
-                idx = np.where(dev[i])[0]
-                p = np.empty(len(idx))                               # own-half band probability
-                wm = idx < self.nw
-                if wm.any():
-                    p[wm] = self.bt.Pw[bw[i], idx[wm], Xi[i, idx[wm]]]
-                if (~wm).any():
-                    p[~wm] = self.bt.Pk[bk[i], idx[~wm] - self.nw, Xi[i, idx[~wm]]]
-                drop = idx[np.argsort(p)[:len(idx) - self.l0_repair]]  # least plausible first
-                X[i, drop] = S[i, drop]
         return X
 
 

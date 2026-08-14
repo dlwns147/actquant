@@ -15,9 +15,9 @@ Procedure (exact MCKP under measured additive rate-distortion):
      (exact, recovers non-convex frontier points).
   4. write the DP product front to iter_mckp.stats (same layout as search.py,
      post_search-consumable). DEFAULT --front_eval predict stores the UN-THINNED
-     front with loss = ADDITIVE PREDICTION (0 extra evals; consume via post_search
-     --second_expr + --select_measured_best --verify_topk K so the final pick is
-     measured — in-band the additive RANKING is measured-faithful).
+     front with loss = ADDITIVE PREDICTION (0 extra evals; post_search
+     --second_expr then picks the top-1 by this column — in-band the additive
+     RANKING is measured-faithful).
      --front_eval measure = legacy: re-measure each (thinned) frontier arch and
      report the measured-vs-additive gap.
 
@@ -336,8 +336,7 @@ def main():
         additivity = {'rmse': float(rmse), 'rho': float(rho), 'tau': float(tau)}
     else:
         # loss column = ADDITIVE PREDICTION (NOT 0/empty: post_search::select_joint ranks
-        # by this column, and in-band the additive RANKING is measured-faithful — pair
-        # with --select_measured_best --verify_topk K so the final pick is measured).
+        # by this column, and in-band the additive RANKING is measured-faithful).
         accelerator.print(f"[search_mckp] front_eval=predict: storing {len(front_archs)} un-thinned "
                           f"product-front archs with PREDICTED loss (0 frontier evals)")
         fmetrics, fcomp = pred, comps
@@ -448,9 +447,8 @@ def build_parser():
     p.add_argument('--front_eval', type=str, default='predict', choices=['predict', 'measure'],
                    help="'predict' (default): NO frontier measurement — the archive stores the "
                         "un-thinned DP product front with loss = ADDITIVE PREDICTION (in-band "
-                        "ranking is measured-faithful; consume via post_search --second_expr "
-                        "with --select_measured_best --verify_topk K so the final pick is "
-                        "measured). 'measure': legacy — re-measure each (thinned) frontier arch "
+                        "ranking is measured-faithful; consume via post_search --second_expr). "
+                        "'measure': legacy — re-measure each (thinned) frontier arch "
                         "and report the additivity gap.")
     p.add_argument('--mckp_front_points', type=int, default=0,
                    help='frontier budgets kept per axis; <=0 = ENTIRE frontier (predict mode; '

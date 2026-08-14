@@ -7,7 +7,13 @@ optional typesetting and comparison version.
 
 ## Files
 
-- `main.md`: complete Korean paper draft in one Markdown file.
+- `main.md`: Korean paper draft (main text). Proofs, extended empirical
+  details, the assumption-audit/falsification protocols, ablation designs,
+  and the full limitations text live in `appendix.md`.
+- `appendix.md`: appendix for `main.md` (부록 A proofs / B extra empirical
+  detail / C verification & falsification protocols + ablation designs /
+  D full limitations / E related-work detail). Equation and reference
+  numbers follow `main.md`.
 - `main.tex`: optional LaTeX version with section assembly.
 - `sections/1_introduction.tex`: motivation, order--value framing, and contributions.
 - `sections/2_related_work.tex`: weight PTQ, AMQ/AutoML, KV compression, and positioning.
@@ -15,6 +21,10 @@ optional typesetting and comparison version.
   PLS embedding, multi-KV evaluation, and assumption-audit protocol.
 - `references.bib`: references used by the current draft.
 - `EXPERIMENT_PLAN.md`: critical evidence audit and prioritized experiments.
+- `THEORY_AXIS_FIRST.md`: theory-restructuring proposal centered on the
+  matched-design identification theorem (main.md 정리 2) and the sufficiency
+  dimension-reduction proposition (명제 2), with the pre-search analysis
+  battery and its integration status into `main.md`.
 - `scripts/proxy_pareto_audit.py`: read-only reproduction of the
   proxy-front overlap, dominance-certificate, and within-budget regret numbers.
 
@@ -44,6 +54,10 @@ Only the newest implementation and 2026-07/08 analyses were treated as current.
 Older `analysis/v3--v5` results were used only as background.  Numerical claims in
 the Method section are marked as preliminary and correspond to the current
 Llama-3.1-8B, WikiText-2, stride-128, answer-phase-JSD protocol unless noted.
+The dimension and surrogate sample-complexity results are literature-grounded,
+conditional rate statements rather than measurements of the current system.
+They separate raw genome size from metric/effective dimension and Stage-1
+screening cost from Stage-2 AWQ search cost.
 
 The current evidence supports these scoped statements:
 
@@ -73,8 +87,15 @@ The draft deliberately does **not** yet claim:
 - that PLS is conclusively better than all raw/one-hot inputs under a clean,
   fixed-test causal ablation;
 - that the current companion count is optimal;
-- cross-model or downstream-task generality.
+- cross-model or downstream-task generality;
 - universal superiority of Strided JSD beyond the audited model, configuration
-  pool, and long-context benchmarks.
+  pool, and long-context benchmarks;
+- that the current 352 discrete positions realize a 352-dimensional Lipschitz
+  worst case, or that observed search cost follows the minimax exponent;
+- a universal or already measured minimum AWQ sample count for the PLS--GP
+  surrogate---this requires grouped held-out learning curves under a fixed
+  operational success criterion;
+- unconditional superiority of axis-first search when cross-axis interactions
+  are strong or when the Cartesian front product dominates Stage-2 cost.
 
 Those gaps are the first items in `EXPERIMENT_PLAN.md`.

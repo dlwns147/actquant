@@ -211,6 +211,73 @@ def get_gov_report(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, split='
     return DataLoader(TensorDataset(input_ids_dataset, attention_mask_dataset, labels_dataset), batch_size=batch_size)
 
 
+# LongBench subsets usable as a LONG-DOCUMENT PPL corpus. Only subsets whose
+# `context` is ONE coherent document qualify: the point of a long window is
+# long-range DEPENDENCY, and a context built by concatenating unrelated
+# passages (hotpotqa / 2wikimqa / musique / passage_*) or few-shot examples
+# (trec / triviaqa / samsum) gives length without dependency — i.e. the same
+# defect as the c4 document-join, so it measures nothing wikitext2 doesn't.
+# Measured context lengths (Llama-3.1 tokenizer, first 80 test docs):
+#   narrativeqa  median 31,284 tok, 77/80 >= 8192, 56/80 >= 16384  (books/scripts)
+#   qmsum        median 12,934 tok, 67/80 >= 8192                  (meeting transcripts)
+# Registering a subset here as a metric corpus is fine even when LongBench
+# GRADES it (qmsum): nothing is fit to the text, so it serves as a long-context
+# REPORTING metric beside benchmark accuracy. It just cannot double as evidence
+# that the metric PREDICTS that benchmark — correlation.py flags those cells.
+# tests/audit_corpus_contamination.py prints which subsets are graded.
+LONGBENCH_PPL_SUBSETS = ('narrativeqa', 'qmsum', 'gov_report', 'multifieldqa_en',
+                         'qasper', 'multi_news', 'lcc', 'repobench-p')
+
+
+def get_longbench_ppl(subset, seed, n_sample, tokenizer, batch_size=1, seqlen=2048,
+                      min_seqlen=0, cache_dir=None):
+    """LongBench `context` documents as a fixed-length PPL/loss corpus.
+
+    Same contract as get_gov_report (shuffle by seed → keep docs of at least
+    max(min_seqlen, seqlen) tokens → truncate to seqlen → stack), so it drops
+    into get_loader / LlamaEvaluator unchanged.
+
+    The RAW `context` is used, NOT the LongBench prompt template: the template
+    wraps every document in identical instruction boilerplate, which is
+    near-zero-entropy filler that would dilute the PPL of the document itself.
+    (utils/longbench.py still uses the template for the BENCHMARK — that path
+    is unaffected.)
+    """
+    if subset not in LONGBENCH_PPL_SUBSETS:
+        raise ValueError(f"LongBench subset '{subset}' is not registered as a PPL "
+                         f"corpus. Registered: {list(LONGBENCH_PPL_SUBSETS)}.")
+    data = load_dataset('THUDM/LongBench', subset, split='test', cache_dir=cache_dir)
+    data = data.shuffle(seed=seed).flatten_indices()
+
+    tokenizer.pad_token = tokenizer.eos_token
+    length_floor = max(int(min_seqlen), int(seqlen))
+    data_list, scanned = [], 0
+    for row in data:
+        scanned += 1
+        document = row['context']
+        if len(tokenizer(document, add_special_tokens=False)['input_ids']) < length_floor:
+            continue
+        tokenized = tokenizer(document, add_special_tokens=False, padding=True,
+                              truncation=True, max_length=seqlen, return_tensors='pt')
+        data_list.append([tokenized['input_ids'], tokenized['attention_mask'],
+                          tokenized['input_ids']])
+        if len(data_list) >= n_sample:
+            break
+
+    if len(data_list) < n_sample:
+        raise ValueError(
+            f"LongBench/{subset}: only {len(data_list)} of {scanned} scanned documents "
+            f"reach {length_floor} tokens (= max(min_seqlen={min_seqlen}, "
+            f"seqlen={seqlen})), need n_sample={n_sample}. Lower the seqlen or "
+            f"n_sample, or pick a longer subset (narrativeqa is the longest).")
+
+    tokenizer.pad_token = None
+    return DataLoader(TensorDataset(
+        torch.concat([x[0] for x in data_list], dim=0),
+        torch.concat([x[1] for x in data_list], dim=0),
+        torch.concat([x[2] for x in data_list], dim=0)), batch_size=batch_size)
+
+
 # MiniLongBench (LongBench format): each example has input, context, answers (list), length, dataset, language, all_classes, _id.
 # Prompt templates from LongBench (dataset2prompt.json). See: https://github.com/MilkThink-Lab/MiniLongBench
 
@@ -349,6 +416,12 @@ def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0
         if 'gov_report' in name:
             # return get_gov_report(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, split='train', min_seqlen=min_seqlen, cache_dir=cache_dir)
             return get_gov_report(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, split='test', min_seqlen=min_seqlen, cache_dir=cache_dir)
+        # LongBench long-document corpora ('longbench:<subset>', e.g.
+        # 'longbench:narrativeqa'). Like gov_report there is only a test split,
+        # so both sides read it (the loss side is then a calibration probe on
+        # the same documents, not a held-out set).
+        if name.startswith('longbench:'):
+            return get_longbench_ppl(name.split(':', 1)[1], seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, min_seqlen=min_seqlen, cache_dir=cache_dir)
     else:
         if 'wikitext2' in name:
             return get_wikitext2(tokenizer=tokenizer, batch_size=batch_size, seqlen=seqlen, cache_dir=cache_dir)
@@ -358,3 +431,5 @@ def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0
             return None
         if 'gov_report' in name:
             return get_gov_report(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, split='test', min_seqlen=min_seqlen, cache_dir=cache_dir)
+        if name.startswith('longbench:'):
+            return get_longbench_ppl(name.split(':', 1)[1], seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, min_seqlen=min_seqlen, cache_dir=cache_dir)
