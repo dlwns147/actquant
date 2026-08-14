@@ -30,17 +30,17 @@ Two stages, both invoked via this single file:
 Calibration metrics (`--metrics`) — the full list is METRIC_TASKS in
 utils/metric_specs.py; a few landmarks:
     c4_ppl              C4 PPL (test split, n_sample=128, seqlen=2048)
-    wt2_ppl_sl4096      wikitext2 PPL at a 4096-token window (70 windows);
-    wt2_ppl_sl8192      … 8192 (35 windows). c4_ppl_sl4096 / c4_ppl_sl8192 too.
+    wt2_ppl_sl8192      wikitext2 PPL at an 8192-token window (35 windows);
+                        c4_ppl_sl8192 too. The ladder is 2048 and 8192 only.
     wt2_ppl_sl8192_s512 8192 windows through the REAL KV-cache path (stride)
     gov_ppl             gov_report PPL, 128 real documents @ 8192
-                        (+ gov_ppl_sl4096 / _sl2048, gov_ppl_s512, _pp512_s128)
+                        (+ gov_ppl_sl2048, gov_ppl_s512, gov_ppl_pp512_s128)
     nqa_ppl             LongBench narrativeqa (novels/scripts) PPL, 128 docs
-                        @ 8192 (+ nqa_ppl_sl4096 / _sl2048, nqa_ppl_s512)
+                        @ 8192 (+ nqa_ppl_sl2048, nqa_ppl_s512)
     qmsum_ppl           LongBench qmsum (meeting transcripts), 128 docs @ 8192
-                        (+ qmsum_ppl_sl4096 / _sl2048, qmsum_ppl_s512)
+                        (+ qmsum_ppl_sl2048, qmsum_ppl_s512)
 
-    All three long-document corpora span 2048 / 4096 / 8192, so DOMAIN is
+    All three long-document corpora span 2048 and 8192, so DOMAIN is
     separable from LENGTH: at 2048 they are directly comparable to wt2/c4_ppl
     (same window, different text), and within a corpus only the window changes.
     LongBench GRADES qmsum, so qmsum_ppl* are long-context REPORTING metrics —
@@ -49,9 +49,10 @@ utils/metric_specs.py; a few landmarks:
     but not evidence that they PREDICT that benchmark (correlation.py lists
     those cells in correlation_contamination.txt).
 
-    EVERY PPL corpus × window additionally has the two answer-phase protocols
-    `<base>_pp512_s32` and `<base>_pp128_s32` (prefill, then score the last
-    512 / 128 tokens in 32-token chunks — the PPL twins of wt2_jsd_pp512_s32).
+    EVERY PPL corpus × window additionally has the answer-phase protocol
+    `<base>_pp128_s32` (prefill, then score the last 128 tokens in 32-token
+    chunks — the PPL twin of gov_jsd_pp128_s32), alongside the full-sequence
+    base task.
     The long-document corpora (gov_report / longbench:*) SELECT documents, so
     their groups pin `data_seed=0`: the document set is a property of the metric
     name, not of --seed. Windows stop at 8192 by design.

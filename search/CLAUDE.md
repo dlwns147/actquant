@@ -115,8 +115,8 @@ on); a **task** owns
 the forward side (metric / loss_func / stride / prefill_prompt). Tasks sharing a
 group share one teacher pass. **PPL-only groups** (`loss_func='cross_entropy'` +
 `sides=('test',)`) therefore cost NO FP-teacher pass and no train-loader build —
-that is what makes the long-window PPL families cheap: `{wt2,c4}_ppl_sl{4096,8192}`,
-`gov_ppl`/`gov_ppl_sl{4096,2048}`, and the LongBench long-DOCUMENT corpora
+that is what makes the long-window PPL families cheap: `{wt2,c4}_ppl_sl8192`,
+`gov_ppl`/`gov_ppl_sl2048`, and the LongBench long-DOCUMENT corpora
 `nqa_ppl*` / `qmsum_ppl*` (`utils/data.get_longbench_ppl`, dataset key
 `longbench:<subset>`; raw `context`, not the prompt template — a subset
 qualifies when its context is ONE coherent document, so narrativeqa/qmsum yes,
@@ -127,17 +127,17 @@ at 8 because dense_logits scale with n — 268 GB at n=128 full-sequence — use
 opt-in `gov_jsd_pp128_s32_n128_sl8192` for a 128-doc long JSD) and
 `LONG_DOC_DATA_SEED = 0`, applied as a group-owned `data_seed` that overrides the
 run's `--seed` for document selection ONLY, so a metric name always means the
-same documents. Each long-doc corpus spans 2048/4096/8192 (domain is separable
-from length: at 2048 they line up with wt2/c4's own window); 16384 is
-deliberately absent (narrativeqa-only, and eval_ppl materialises 16384×vocab
+same documents. Each long-doc corpus spans 2048 and 8192 (domain is separable
+from length: at 2048 they line up with wt2/c4's own window; 4096 was a pure
+midpoint and was dropped); 16384 is deliberately absent (narrativeqa-only, and eval_ppl materialises 16384×vocab
 logits plus a `.contiguous()` copy). Cost per long-doc task = n_sample×seqlen
 forward tokens (0.26M @2048 … 1.05M @8192), and an answer-phase variant costs
 the same as its base since the prefill dominates — for scale, the benchmarks
 this correlates against measure 28.6 / 150.1 / 282.7 min per idx (RULER /
 LongBench / LongBench-E medians over 654/459/659 recorded runs).
-Every PPL corpus × window also carries the answer-phase pair
-`<base>_pp512_s32` / `<base>_pp128_s32` (generated from `_PPL_BASES`, not spelled
-out); the decode-tight loss window is `*_pp32_s8` (prefill + 32 tokens in 8-token
+Every PPL corpus × window also carries the answer-phase task
+`<base>_pp128_s32` (generated from `_PPL_BASES`, not spelled out) next to its
+full-sequence base; the decode-tight loss window is `*_pp32_s8` (prefill + 32 tokens in 8-token
 chunks). Helpers: `resolve_tasks` (names → tasks),
 `groups_for`, `precompute_groups` (ONE FP pass for every group, CPU-parked;
 `tasks=` restricts it to the (group, dataset) pairs actually consumed — a PPL-only
