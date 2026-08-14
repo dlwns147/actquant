@@ -1,6 +1,7 @@
 import os
 import torch
 import json
+import hashlib
 from time import time
 from copy import deepcopy
 from tqdm import tqdm
@@ -29,6 +30,22 @@ def prepare_generation_kwargs(task_config_map, task_name: str, yaml_path:str, ge
     return generation_kwargs, max_gen_toks
 
 
+def default_per_example_path(result_path, seed=0):
+    """`<ruler scores>.json` → `<ruler scores>_per_example_s<seed>.jsonl`.
+
+    The dump is keyed by SEED because the seed decides the samples: eval_ruler
+    re-seeds before dataset construction, so needle placement / shuffling — and
+    therefore every prompt and every generation — is a function of it. Two seeds
+    are two different sample sets and must not overwrite each other.
+
+    A few hundred rows, so callers write it by default; an explicit
+    --ruler_per_example_path overrides. '' in → '' out (no result path means
+    nowhere to put it)."""
+    if not result_path:
+        return ''
+    return f'{os.path.splitext(result_path)[0]}_per_example_s{int(seed)}.jsonl'
+
+
 def eval_ruler(model,
                tokenizer,
                model_id,
@@ -40,6 +57,9 @@ def eval_ruler(model,
                seed=0,
                gen_toks=128,
                result_path='',
+               per_example_path='',
+               stamp=None,
+               append_scores=False,
                use_chat_template=True):
     
     task_function = {
@@ -141,6 +161,8 @@ def eval_ruler(model,
         datasets[task] = dataset
 
     tot_scores = dict()
+    per_example = []
+    prompt_hashes = []      # every sample's input hash, dump or no dump
     start_time = time()
     device = model.device
 
@@ -157,6 +179,7 @@ def eval_ruler(model,
         scorer = (common_utils.process_results_part if task in PART_TASKS
                   else common_utils.process_results)
         task_scores = []
+        sample_index = 0
         
         for docs in tqdm(datasets[task], desc=f"Evaluating {task}"):
             # docs is a list of sample dicts (see collate_fn above).
@@ -199,11 +222,48 @@ def eval_ruler(model,
             for i, doc in enumerate(docs):
                 score = scorer(doc, [output[i]])[str(doc["max_length"])]
                 task_scores.append(score)
+                input_sha = hashlib.sha256(
+                    doc["input"].encode("utf-8")).hexdigest()
+                prompt_hashes.append(input_sha)
+                if per_example_path:
+                    refs = doc.get("outputs", [])
+                    if isinstance(refs, str):
+                        refs = [refs]
+                    # The GENERATION plus what identifies it. The prompt itself
+                    # is not stored: (seed, task, sample_index, max_length)
+                    # regenerates it exactly — eval_ruler re-seeds before
+                    # dataset construction — and input_sha256 proves the
+                    # regenerated prompt is the one the model saw.
+                    per_example.append({
+                        **(stamp or {}),
+                        "task": task,
+                        "sample_index": sample_index + i,
+                        "seed": int(seed),
+                        "requested_length": [int(x) for x in length],
+                        "sample_length": int(doc["max_length"]),
+                        "input_sha256": input_sha,
+                        "context_tokens": int(attn_masks[i].sum().item()),
+                        "generated_tokens": len(tokenizer.encode(
+                            output[i], add_special_tokens=False)),
+                        "prediction": output[i],
+                        "references": [str(x) for x in refs],
+                        "score": float(score),
+                    })
+            sample_index += len(docs)
 
         if len(task_scores) > 0:
             avg_score = sum(task_scores) / len(task_scores)
             tot_scores[task] = avg_score
             print(f"Average score for {task}: {avg_score}")
+
+    # The RULER samples are GENERATED at runtime from (seed, task, length), not
+    # loaded from a fixed file: a change in niah_utils / datasets / the tokenizer
+    # can silently redefine what "the same metric" measures. Fingerprint the
+    # prompt SET so two runs can be proven comparable (and a drift is visible
+    # even without the per-example dump).
+    prompt_set_sha = hashlib.sha256(
+        ''.join(sorted(prompt_hashes)).encode('utf-8')
+    ).hexdigest()[:16] if prompt_hashes else ''
 
     elapsed_time = (time() - start_time)
   
@@ -213,7 +273,15 @@ def eval_ruler(model,
             
     if result_path:
         tot_scores["time"] = elapsed_time
-        if os.path.exists(result_path):
+        # '_'-prefixed → correlation.py's aggregate skips it as a score column
+        if prompt_set_sha:
+            tot_scores["_prompt_set_sha"] = prompt_set_sha
+        # One file = ONE run. Merging with whatever a previous call left here
+        # (the old default) silently mixed two configurations' task scores in a
+        # single scores.json — the per-example dump is replaced wholesale, so
+        # the two artefacts then disagreed. append_scores=True restores the old
+        # accumulate-across-calls behaviour if a caller really wants it.
+        if append_scores and os.path.exists(result_path):
             with open(result_path, "r") as f:
                 existing_scores = json.load(f)
                 existing_scores.update(tot_scores)
@@ -226,3 +294,20 @@ def eval_ruler(model,
             json.dump(tot_scores, f, indent=2, ensure_ascii=False)
 
         print(f"Results saved to {result_path}")
+
+    if per_example_path:
+        save_dir = os.path.dirname(per_example_path)
+        os.makedirs(save_dir if save_dir else '.', exist_ok=True)
+        tmp_path = per_example_path + '.tmp'
+        with open(tmp_path, 'w') as f:
+            for row in per_example:
+                f.write(json.dumps(row, ensure_ascii=False) + '\n')
+        os.replace(tmp_path, per_example_path)
+        print(f"Per-example RULER results saved to {per_example_path} "
+              f"({len(per_example)} rows)")
+
+    # THIS call's scores (plus 'time' when result_path was written). Callers that
+    # loop over context lengths need the per-call dict: the on-disk scores.json is
+    # merged with whatever a previous run left there, so reading it back cannot
+    # tell this run's tasks from stale ones.
+    return tot_scores

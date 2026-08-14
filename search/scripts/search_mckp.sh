@@ -111,8 +111,8 @@ QEFT_TAG=""
 # MCKP knobs
 # FRONT_EVAL=predict (default): archive = UN-THINNED DP product front, loss column =
 #   additive PREDICTION, 0 frontier evals (rows auto-capped at 100k). Consume via
-#   post_search --second_expr ${SAVE}/iter_mckp.stats --select_measured_best --verify_topk K
-#   (in-band additive ranking is measured-faithful; the K verify evals make the pick real).
+#   post_search --second_expr ${SAVE}/iter_mckp.stats
+#   (in-band additive ranking is measured-faithful).
 # FRONT_EVAL=measure: legacy — re-measure each frontier arch (thin via MCKP_FRONT_POINTS,
 #   e.g. 16 for 2-axis / 6 for 3-axis) and report the measured-vs-additive gap.
 FRONT_EVAL=${FRONT_EVAL:-predict}

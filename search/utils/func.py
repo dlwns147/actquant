@@ -1,9 +1,11 @@
 import os
 import json
+import hashlib
 import numpy as np
 import scipy.stats as stats
 import torch
 from datetime import timedelta
+from time import strftime
 # NOTE: accelerate / transformers / hqq are imported lazily inside the few
 # functions that need them (init_accelerator / load_hqq_model / get_hfmodel).
 # func.py is imported by nearly every entry point, and eagerly importing
@@ -14,6 +16,138 @@ import gc
 from copy import deepcopy
 import random
 # from hqq.utils.patching_woo import prepare_for_inference
+
+# ── benchmark-artifact provenance ───────────────────────────────────────────
+# Benchmark dumps from different runs / architectures land in the same tree and
+# are read back long after the fact. Two independent guards, so an artifact can
+# never be silently misattributed:
+#   * ROW level  — bench_stamp() puts run_id / arch_sha8 / idx on every
+#                  per-example row, so even concatenated files stay attributable.
+#   * DIR level  — stamp_artifact_dir() writes meta.json and ROTATES a directory
+#                  whose meta disagrees, so one run's files never mix with
+#                  another's on disk.
+RUN_ID = f"{strftime('%y%m%d_%H%M%S')}_{os.getpid()}"
+
+
+def arch_sha8(arch):
+    """Short content hash of an architecture dict — stable across processes
+    (sorted keys, no whitespace), so the same arch always stamps the same."""
+    return hashlib.sha256(
+        json.dumps(arch, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    ).hexdigest()[:8]
+
+
+def bench_stamp(arch=None, idx=None, run_id=None, **extra):
+    """Provenance fields for a per-example benchmark row."""
+    st = {'run_id': run_id or RUN_ID}
+    if arch is not None:
+        st['arch_sha8'] = arch_sha8(arch)
+    if idx is not None:
+        st['idx'] = int(idx)
+    st.update(extra)
+    return st
+
+
+# meta.json keys that define WHAT a directory holds. Volatile fields (run_id,
+# timestamp) are recorded but not compared — re-running the identical config
+# should refresh a directory, not rotate it.
+_ARTIFACT_IDENTITY_SKIP = ('run_id', 'timestamp')
+
+
+def stamp_artifact_dir(path, meta, rotate=True):
+    """Mark a benchmark-artifact directory with what produced it.
+
+    If `path` already holds a meta.json describing a DIFFERENT configuration
+    (any identity key differs), the whole directory is moved to
+    `<parent>/archive/<timestamp>/<name>` before the new one is created — so a
+    second architecture, a different bit-width or another benchmark task can
+    never leave its files interleaved with the previous run's. Returns the
+    archive path when it rotated, else None.
+    """
+    import shutil
+
+    if not path:
+        return None
+    meta = dict(meta, run_id=meta.get('run_id', RUN_ID),
+                timestamp=strftime('%Y-%m-%d %H:%M:%S'))
+    meta_path = os.path.join(path, 'meta.json')
+    moved = None
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                old = json.load(f)
+        except (OSError, ValueError):
+            old = {}
+        ident = lambda m: {k: v for k, v in m.items()                    # noqa: E731
+                           if k not in _ARTIFACT_IDENTITY_SKIP}
+        if rotate and ident(old) != ident(meta):
+            parent = os.path.dirname(path.rstrip('/')) or '.'
+            dst = os.path.join(parent, 'archive', strftime('%y%m%d_%H%M%S'),
+                               os.path.basename(path.rstrip('/')))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(path, dst)
+            moved = dst
+            diff = sorted(k for k in set(ident(old)) | set(ident(meta))
+                          if old.get(k) != meta.get(k))
+            print(f"[artifact] {path} held a different config ({diff}) → moved "
+                  f"to {dst}")
+    os.makedirs(path, exist_ok=True)
+    with open(meta_path, 'w') as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+    return moved
+
+
+def stamp_artifact_file(path, meta, rotate=True):
+    """stamp_artifact_dir for artefacts that are FILES, not directories.
+
+    RULER writes `<path>` (scores) + `<path>_per_example_s<seed>.jsonl` straight
+    into a shared folder, so the unit to protect is the `<path>*` family, not
+    the folder. Writes `<path>_meta.json`; on an identity mismatch every
+    `<path>*` sibling is moved to `<dir>/archive/<ts>/` first.
+    """
+    import glob
+    import shutil
+
+    if not path:
+        return None
+    meta = dict(meta, run_id=meta.get('run_id', RUN_ID),
+                timestamp=strftime('%Y-%m-%d %H:%M:%S'))
+    meta_path = f'{path}_meta.json'
+    moved = None
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                old = json.load(f)
+        except (OSError, ValueError):
+            old = {}
+        ident = lambda m: {k: v for k, v in m.items()                    # noqa: E731
+                           if k not in _ARTIFACT_IDENTITY_SKIP}
+        if rotate and ident(old) != ident(meta):
+            dst_dir = os.path.join(os.path.dirname(path) or '.', 'archive',
+                                   strftime('%y%m%d_%H%M%S'))
+            os.makedirs(dst_dir, exist_ok=True)
+            for f in glob.glob(f'{path}*'):
+                shutil.move(f, os.path.join(dst_dir, os.path.basename(f)))
+            moved = dst_dir
+            print(f"[artifact] {path}* held a different config → moved to {dst_dir}")
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(meta_path, 'w') as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+    return moved
+
+
+def per_arch_path(path, idx, n_archs):
+    """`<path>` → `<path>_arch<idx>` when a run evaluates SEVERAL architectures.
+
+    post_search calls run_benchmarks once per selected arch with one shared
+    result path, so with -n > 1 the later architecture would overwrite the
+    earlier one's generations. Single-arch runs (the common case) keep their
+    directory names byte-identical to before.
+    """
+    if not path or idx is None or (n_archs or 1) <= 1:
+        return path
+    return f'{path.rstrip("/")}_arch{int(idx)}'
+
 
 def clean_up():
     torch.cuda.empty_cache()

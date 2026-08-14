@@ -44,6 +44,11 @@ K_GROUP_SIZE=("128" "128")
 V_BITS="2 4"
 V_BITS_TEXT="24"
 V_GROUP_SIZE=("128" "128")
+# Used in RULER_RESULT_PATH below. These were referenced but never assigned, so
+# the artefact directory name silently read "k_gs"/"v_gs" — the group size, part
+# of what identifies a measurement, was missing from the path.
+K_GROUP_SIZE_TEXT=$(IFS="-" ; echo "${K_GROUP_SIZE[*]}")
+V_GROUP_SIZE_TEXT=$(IFS="-" ; echo "${V_GROUP_SIZE[*]}")
 
 RESIDUAL_LENGTH=128
 # ATTN_SINK=0
@@ -108,13 +113,15 @@ MIN_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MIN_COMP_OBJ_LIST[*]}")
 MAX_COMP_OBJ_TEXT=$(IFS="_" ; echo "${MAX_COMP_OBJ_LIST[*]}")
 
 PREFER="metric#0.0"
-# RECIPE: top-k verify — JSD-screen the predicted top-VERIFY_TOPK in the band,
-# benchmark only the measured-best N. k=5 recovers the true band-best 96-100%
-# (top-1 alone 50-73%; in-band tau ~0.5-0.7 near-ties) at (k-N) extra JSD evals.
-# N keeps its original meaning = number of final architectures to benchmark.
+# N = number of final architectures to evaluate + benchmark.
+# 선택은 post_search.py::select_joint 이 아카이브에 저장된 loss(=second_search
+# 측정치)를 예산 박스 안에서 정렬해 top-N을 고르는 방식이다. METRIC_TASKS 는
+# 선택 이후에 재는 REPORTING 지표이지 선택 기준이 아니다.
+# (top-k verify 노브 SELECT_MEASURED_BEST/VERIFY_TOPK 는 해당 기계가 코드에서
+#  삭제되면서 아무 데도 안 쓰이는 죽은 값이 되어 제거했다.)
+# ⚠️ N>1 이면 arch 마다 벤치마크 산출물 경로에 _arch<idx> 접미가 붙는다
+#    (예전엔 같은 경로에 덮어써서 마지막 arch 것만 남았다). N=1 이면 이름 그대로.
 N=1
-SELECT_MEASURED_BEST=False   # second_expr: loss already measured → no re-screen
-VERIFY_TOPK=5
 
 # ── (A) 이름으로 재기 — utils/metric_specs.py 레지스트리 ──
 # 이름 하나가 데이터 프로토콜(dataset/seqlen/n_sample/답변창)과 포워드 프로토콜
@@ -191,15 +198,6 @@ BETA=-2
 # ── 2nd-stage JOINT search (second_search.py) ──
 SECOND_EXPR=save/second_search/2608090529_Llama-3.1-8B-Instruct_joint_awq_kivi_think_sqrty_ard_gpplstypmatern32_doe25_it15n5p200_subset-st-ckv402d_eps0.05_dk0_st32_pp128_sk8_mwt2j_n128q2048_s0/iter_15.stats
 
-# Optional one-shot LongBench-E/RULER regret correction learned from the 200
-# labelled architectures.  It is intentionally conservative: only JSD near-ties
-# (best +0.001) may replace the measured winner and 4/5 model families must agree.
-# Otherwise post_search prints the disagreement and falls back to measured loss.
-BENCHMARK_CALIBRATION_CSV=save/correlation/2607301912_Llama-3.1-8B-Instruct_awq_kivi_think_w234k234v234_g128r128_sk8_t16384_n200_s0_qs_metric_w01599_metric_eff_kv01599_r/correlation.csv
-BENCHMARK_REGRET_MODE=minimax  # longbench | ruler | minimax | balanced
-BENCHMARK_LOSS_GUARD=0.001
-BENCHMARK_MIN_CONSENSUS=0.8
-
 for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR SAMPLE_PATH SECOND_EXPR; do
     VAR_VALUE="${!VAR_NAME}"
     if [ -n "${VAR_VALUE}" ] && [[ "${VAR_VALUE}" != *"${MODEL_NAME}"* ]]; then
@@ -247,6 +245,9 @@ RULER_LENGTH=16384
 # RULER_SAMPLE=5
 RULER_SAMPLE=50
 RULER_BATCH_SIZE=1
+# ⚠️ post_search 는 correlation.py 와 달리 길이 루프를 돌지 않는다. RULER_LENGTH
+#    에 값을 여러 개 주면 eval_ruler 가 길이를 섞어 nsample 개만 뽑으므로 반드시
+#    한 개만 준다(여러 길이는 스크립트를 길이별로 실행).
 RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS_TEXT}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS_TEXT}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}${SINK_TAG}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs_${SEED}seed
 
 
@@ -265,6 +266,23 @@ else
 fi
 
 SAVE=save/post_search/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${SURROGATE}${SINK_TAG}${MTAG}
+
+# ── 산출물 (실행 폴더는 ${TODAY} 로 이미 실행당 하나라 correlation 처럼
+#    m_<hash> 로 또 쪼개지 않는다) ──
+#   ${SAVE}/results.csv  : (idx, metric, dataset, value, spec) — spec = 그 값의
+#                          정의 지문. 이름 태스크는 레지스트리 spec 해시, knob
+#                          방식은 protocol 해시. 실행 간(ours vs baseline) 표를
+#                          나란히 놓을 때 정의 불일치가 드러난다.
+#   ${SAVE}/meta.json    : results.txt(사람용 args 덤프)의 기계 비교용 쌍둥이.
+#                          설정 + metric spec 해시 + 선택된 arch 해시 +
+#                          벤치마크 산출물 경로(상호 링크).
+#   LongBench  → <LONGBENCH_RESULT_PATH>/pred[_e]/<dataset>.jsonl
+#                행마다 생성물 + 정답 + 예제별 score + 토큰수 + input_sha256 +
+#                run_id/arch_sha8/idx. 디렉터리에 meta.json(설정) 이 붙고,
+#                설정이 다르면 <parent>/archive/<ts>/ 로 통째 회전.
+#   RULER      → <RULER_RESULT_PATH>            (점수, 이번 실행분만)
+#                <RULER_RESULT_PATH>_per_example_s<SEED>.jsonl (생성물, seed별)
+#                <RULER_RESULT_PATH>_meta.json  (설정; 불일치 시 파일 일가 회전)
 
 ARGS="--gpu_id ${DEVICES} \
 --model_path ${MODEL_PATH} \
@@ -314,9 +332,6 @@ if [ -n "${SECOND_EXPR}" ]; then
     # joint path: archive already holds assembled joint archs with measured JSD,
     # so the per-axis expr archives + surrogate are skipped entirely.
     ARGS+=" --second_expr ${SECOND_EXPR}"
-    if [ -n "${BENCHMARK_CALIBRATION_CSV}" ]; then
-        ARGS+=" --benchmark_calibration_csv ${BENCHMARK_CALIBRATION_CSV} --benchmark_regret_mode ${BENCHMARK_REGRET_MODE} --benchmark_loss_guard ${BENCHMARK_LOSS_GUARD} --benchmark_min_consensus ${BENCHMARK_MIN_CONSENSUS}"
-    fi
 else
     [ -n "${W_EXPR}" ]      && ARGS+=" --w_expr ${W_EXPR}"
     [ -n "${KV_EXPR}" ]     && ARGS+=" --kv_expr ${KV_EXPR}"
@@ -324,8 +339,6 @@ else
     [ -n "${EFF_KV_EXPR}" ] && ARGS+=" --eff_kv_expr ${EFF_KV_EXPR}"
     [ -n "${SAMPLE_PATH}" ] && ARGS+=" --sample_path ${SAMPLE_PATH} --surrogate ${SURROGATE} --rbf_kernel ${RBF_KERNEL} --surrogate_device ${SURROGATE_DEVICE}"
 fi
-[ "${SELECT_MEASURED_BEST:-False}" = "True" ] && ARGS+=" --select_measured_best --verify_topk ${VERIFY_TOPK:-5}"
-
 [ -n "${LOGIT_DATASET}" ] && ARGS+=" --logit_dataset ${LOGIT_DATASET}"
 # (A) 이름 방식이 지정되면 그게 우선 — 아래 loss_*/ppl_* knob은 무시된다
 [ -n "${METRIC_TASKS}" ] && ARGS+=" --metric_tasks ${METRIC_TASKS}"

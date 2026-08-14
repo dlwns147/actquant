@@ -174,9 +174,23 @@ N_TOKEN=16384
 # RULER_SAMPLE=5
 RULER_SAMPLE=50
 RULER_BATCH_SIZE=1
-RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_our_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_${MIN_COMP_OBJ_TEXT}_${MAX_COMP_OBJ_TEXT}_k${K_BITS}bits_k${K_GROUP_SIZE_TEXT}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${V_GROUP_SIZE_TEXT}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}${SINK_TAG}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs
+# NOTE: this used to interpolate K_GROUP_SIZE_TEXT / V_GROUP_SIZE_TEXT and
+# MIN/MAX_COMP_OBJ_TEXT, none of which are assigned in this script (they belong
+# to post_search.sh) — the group size vanished from the name ("k_gs") and the
+# comp-obj slots collapsed to "__". This is a BASELINE run: there is no comp_obj
+# range, and the group size is a single KV_GROUP_SIZE.
+RULER_RESULT_PATH=save/ruler/${TODAY}_${MODEL_NAME}_base_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${COMP_OBJ_TEXT}_w${W_BITS}bits_k${K_BITS}bits_k${KV_GROUP_SIZE}gs_${K_QUANT_SCHEME}_v${V_BITS}bits_v${KV_GROUP_SIZE}gs_${V_QUANT_SCHEME}_r${RESIDUAL_LENGTH}${SINK_TAG}_ruler_${RULER_LENGTH}len_${RULER_SAMPLE}sample_${RULER_BATCH_SIZE}bs_${SEED}seed
 
 PASS_KEY_FILE=/NAS/SJ/actquant/search/passkey_examples.jsonl
+
+# ── 산출물 (베이스라인도 우리 결과와 같은 형식으로 남는다) ──
+#   RULER      → ${RULER_RESULT_PATH}                       점수(이번 실행분만)
+#                ${RULER_RESULT_PATH}_per_example_s${SEED}.jsonl  생성물(seed별)
+#                ${RULER_RESULT_PATH}_meta.json             설정(불일치 시 회전)
+#   LongBench  → ${LONGBENCH_RESULT_PATH}/pred[_e]/<dataset>.jsonl
+#   행마다: 생성물 + 정답 + 예제별 score + 토큰수 + input_sha256 +
+#           run_id/arch_sha8. 프롬프트 원문은 저장하지 않는다(재생성 가능).
+#   ⚠️ RULER_LENGTH 는 한 개만 — 여러 개를 주면 eval_ruler 가 길이를 섞는다.
 
 # TRUNC_LEN=4096
 # SLIDING_WINDOW=1024

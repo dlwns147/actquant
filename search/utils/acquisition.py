@@ -122,26 +122,6 @@ def decision_picks(cand_comp, cand_pred, arch_comp, arch_loss, box_min, box_max,
     return np.array(picks, int)
 
 
-def contender_verify_set(values, margin, k_min=1, k_max=16):
-    """Adaptive racing set for post_search (replaces a FIXED verify_topk). Given the
-    per-candidate scores `values` (measured/stored JSD, lower=better) already restricted
-    to a budget box, return the sorted indices of every candidate within `margin` of the
-    best — the archs a different (noisier) verify metric could reorder into first place —
-    clamped to [k_min, k_max]. margin should be the measurement/draw-noise band (Phase-0
-    σ; use a conservative constant until σ is calibrated). Fixed top-k over-verifies clear
-    winners and under-verifies dense ties; this races exactly the plausible contenders.
-
-    Returns indices into `values` (ascending by value)."""
-    v = np.asarray(values, float)
-    if len(v) == 0:
-        return np.array([], int)
-    order = np.argsort(v, kind='stable')
-    best = v[order[0]]
-    within = int(np.sum(v[order] <= best + max(0.0, margin)))
-    k = int(np.clip(within, k_min, min(k_max, len(v))))
-    return order[:k]
-
-
 def anchored_cells(arch_comp, box_min, box_max, g, k_anchor=1):
     """Set of g^d budget-cell ids that hold ≥ k_anchor measured archs (the cells a final
     pick is ALLOWED to come from — LCO guard for predicted/virtual candidates)."""

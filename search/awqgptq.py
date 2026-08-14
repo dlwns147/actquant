@@ -15,11 +15,12 @@ from tqdm import tqdm
 import csv
 from matplotlib import pyplot as plt
 from utils.func import (init_accelerator, clean_up, process_dtype, get_net_info,
-                        set_seed, configure_model_cache)
+                        set_seed, configure_model_cache, bench_stamp,
+                        stamp_artifact_dir, stamp_artifact_file)
 from utils.eval import measure_latency, eval_zeroshot
 from utils.longbench import pred_longbench, eval_longbench_preds
 from utils.data import get_tokenizer
-from utils.ruler import eval_ruler
+from utils.ruler import eval_ruler, default_per_example_path
 from utils.longeval import eval_longeval_lines
 from utils.minilongbench import pred_minilongbench, eval_minilongbench_preds
 import warnings
@@ -238,7 +239,17 @@ def main(args):
         configure_model_cache(args, model, use_cache=True)
         
         longbench_start = time()
-        preds = pred_longbench(model, tokenizer=get_tokenizer(model_id), save_path=args.longbench_result_path, longbench_config=args.longbench_config, e=args.longbench_e, model_name=args.model_name)
+        _stamp = bench_stamp(arch)
+        stamp_artifact_dir(args.longbench_result_path,
+                           dict(benchmark='longbench_e' if args.longbench_e else 'longbench',
+                                model=args.model_name, w_method=args.w_method,
+                                kv_method=args.kv_method, w_bits=args.w_bits,
+                                k_bits=args.k_bits, v_bits=args.v_bits,
+                                residual_length=args.residual_length,
+                                attn_sink=args.attn_sink, seed=args.seed,
+                                save_dir=getattr(args, 'save', ''),
+                                arch_sha8=_stamp['arch_sha8']))
+        preds = pred_longbench(model, tokenizer=get_tokenizer(model_id), save_path=args.longbench_result_path, longbench_config=args.longbench_config, e=args.longbench_e, model_name=args.model_name, stamp=_stamp)
         # Score this run's predictions in memory (still writes result.json);
         # avoids re-reading the dir, which could mix in stale .jsonl files.
         eval_longbench_preds(preds, args.longbench_e, save_path=args.longbench_result_path)
@@ -262,7 +273,23 @@ def main(args):
         # tokenizer.pad_token = tokenizer.eos_token
         
         ruler_start = time()
-        eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path, seed=args.seed)
+        # per_example_path defaults to <ruler_result_path>_per_example_s<seed>
+        # .jsonl so the baseline runs keep the same sample-level record as
+        # post_search / correlation (a few hundred rows, keyed by seed).
+        _stamp = bench_stamp(arch)
+        stamp_artifact_file(args.ruler_result_path,
+                            dict(benchmark='ruler',
+                                 ruler_task=list(args.ruler_task or []),
+                                 length=list(args.ruler_length or []),
+                                 nsample=args.ruler_sample,
+                                 model=args.model_name, w_method=args.w_method,
+                                 kv_method=args.kv_method, w_bits=args.w_bits,
+                                 k_bits=args.k_bits, v_bits=args.v_bits,
+                                 residual_length=args.residual_length,
+                                 attn_sink=args.attn_sink, seed=args.seed,
+                                 save_dir=getattr(args, 'save', ''),
+                                 arch_sha8=_stamp['arch_sha8']))
+        eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id, tasks=args.ruler_task, yaml_path=args.ruler_yaml_path, batch_size=args.ruler_batch_size, length=args.ruler_length, nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks, result_path=args.ruler_result_path, per_example_path=default_per_example_path(args.ruler_result_path, args.seed), stamp=_stamp, seed=args.seed)
         ruler_time = time() - ruler_start
         print(f'RULER Time: {ruler_time:.2f}s')
 

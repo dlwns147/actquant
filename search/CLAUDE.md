@@ -105,14 +105,40 @@ single joint search:
 rows (see `post_search.load_sample_csv`).
 
 **Named metrics (`utils/metric_specs.py`) — the ONE registry.** `GROUPS` +
-`METRIC_TASKS` (31 names: `wt2_jsd_pp512_s32`, `gov_jsd_pp128_s32`, `c4_ppl`, …)
+`METRIC_TASKS` (87 names: `wt2_jsd_pp512_s32`, `gov_jsd_pp128_s32`, `c4_ppl`, …)
 live here; `correlation.py` imports them under their original names and
 `post_search.py --metric_tasks <name>...` resolves the same ones, so a number
 reported by one script IS the number reported by the other. A **group** owns the
 data side (datasets / n_sample / seqlen / min_seqlen / last_tokens / use_key_token
-— everything the pre-masked FP-teacher `dense_logits` depend on); a **task** owns
+/ optional `sides` — everything the pre-masked FP-teacher `dense_logits` depend
+on); a **task** owns
 the forward side (metric / loss_func / stride / prefill_prompt). Tasks sharing a
-group share one teacher pass. Helpers: `resolve_tasks` (names → tasks),
+group share one teacher pass. **PPL-only groups** (`loss_func='cross_entropy'` +
+`sides=('test',)`) therefore cost NO FP-teacher pass and no train-loader build —
+that is what makes the long-window PPL families cheap: `{wt2,c4}_ppl_sl{4096,8192}`,
+`gov_ppl`/`gov_ppl_sl{4096,2048}`, and the LongBench long-DOCUMENT corpora
+`nqa_ppl*` / `qmsum_ppl*` (`utils/data.get_longbench_ppl`, dataset key
+`longbench:<subset>`; raw `context`, not the prompt template — a subset
+qualifies when its context is ONE coherent document, so narrativeqa/qmsum yes,
+multi-hop and passage_* no). **Long-document corpora SELECT documents** (shuffle → keep the
+first n that clear the window), so they are governed by two module constants:
+`LONG_DOC_N_SAMPLE = 128` (the default doc count; the JSD groups B/B_pp/C stay
+at 8 because dense_logits scale with n — 268 GB at n=128 full-sequence — use the
+opt-in `gov_jsd_pp128_s32_n128_sl8192` for a 128-doc long JSD) and
+`LONG_DOC_DATA_SEED = 0`, applied as a group-owned `data_seed` that overrides the
+run's `--seed` for document selection ONLY, so a metric name always means the
+same documents. Each long-doc corpus spans 2048/4096/8192 (domain is separable
+from length: at 2048 they line up with wt2/c4's own window); 16384 is
+deliberately absent (narrativeqa-only, and eval_ppl materialises 16384×vocab
+logits plus a `.contiguous()` copy). Cost per long-doc task = n_sample×seqlen
+forward tokens (0.26M @2048 … 1.05M @8192), and an answer-phase variant costs
+the same as its base since the prefill dominates — for scale, the benchmarks
+this correlates against measure 28.6 / 150.1 / 282.7 min per idx (RULER /
+LongBench / LongBench-E medians over 654/459/659 recorded runs).
+Every PPL corpus × window also carries the answer-phase pair
+`<base>_pp512_s32` / `<base>_pp128_s32` (generated from `_PPL_BASES`, not spelled
+out); the decode-tight loss window is `*_pp32_s8` (prefill + 32 tokens in 8-token
+chunks). Helpers: `resolve_tasks` (names → tasks),
 `groups_for`, `precompute_groups` (ONE FP pass for every group, CPU-parked;
 `tasks=` restricts it to the (group, dataset) pairs actually consumed — a PPL-only
 request on a jsd group would otherwise build a full-sequence 67 GB set nobody
@@ -159,6 +185,89 @@ evaluate thousands of archs against a small wikitext2 reference and should not p
 H2D copy per eval. `correlation.py` already offloads on its own (it converts after the
 teacher pass via `_move_all_dense_logits_to_cpu`); its `_LazyGpuList` is now an alias
 of `utils/eval.LazyGpuList`. New code just uses `store_device`.
+
+**Per-example benchmark dumps.** RULER and LongBench both persist the GENERATION
+of every sample, not just the aggregate: `utils/ruler.py` writes
+`per_example_s<seed>.jsonl` (task, sample_index, seed, requested/sample length,
+`input_sha256`, context/generated tokens, prediction, references, score) and
+`utils/longbench.py::get_pred` writes `pred[_e]/<dataset>.jsonl` (upstream
+`pred/answers/all_classes/length` **plus** dataset, `_id`, token counts,
+`input_sha256`), with the per-example `score` stamped in afterwards by
+`eval_longbench_preds` — it calls the same `score_one()` the aggregate averages,
+so the two can't drift. Always on, no knob (correlation.py puts the RULER file
+next to each length's scores.json; post_search/awqgptq use
+`utils/ruler.default_per_example_path`). The RULER dump is keyed by SEED because
+`eval_ruler` re-seeds before building the dataset — a different seed is a
+different sample set. **Prompts are never stored**: they are regenerable from
+(dataset, `_id`) / (seed, task, sample_index), and `input_sha256` proves a
+regenerated prompt is the one the model saw.
+
+**Artefact provenance (`utils/func.py`)** — two independent guards so a
+generation is never misattributed. ROW: `bench_stamp()` puts `run_id` /
+`arch_sha8` (content hash of the arch dict) / `idx` on every per-example row, so
+even concatenated dumps stay attributable. DIR/FILE: `stamp_artifact_dir()` (a
+LongBench pred dir, a RULER `len<L>/` dir) and `stamp_artifact_file()` (RULER's
+`<path>*` file family in post_search/awqgptq) write a `meta.json` of the config
+that produced the artefacts and ROTATE the old ones to `archive/<ts>/` when the
+config differs — same config refreshes in place. `eval_ruler(append_scores=False)`
+is the third piece: `scores.json` is now ONE run, not an accumulation across
+calls (the old merge let two configs' task scores share a file while the
+per-example dump held only the last). `per_arch_path()` additionally suffixes
+`_arch<idx>` when post_search benchmarks several architectures in one run
+(`-n > 1`), which previously overwrote each other; `-n 1` names are unchanged.
+Two more identity guards: `eval_ruler` records `_prompt_set_sha` (hash of every
+sample's input hash) in scores.json — RULER samples are GENERATED from
+(seed, task, length), so a niah_utils/tokenizer change would otherwise redefine
+a metric silently — and `--mode aggregate` verifies each `result_<idx>.json`'s
+stored arch against the archs.csv row (`idx` is a row number, not an identity:
+re-sampling archs.csv while old results linger would reattribute every
+measurement) and treats a mismatch as unmeasured with a loud warning.
+
+**Corpus/benchmark overlap (`correlation.py::contaminated_pairs`, audited by
+`tests/audit_corpus_contamination.py`) — INFORMATIONAL, not a gate.** Metrics
+here play two roles: **proxy candidates** (does this cheap number predict the
+benchmark?) and long-context **reporting metrics** (a final-table number beside
+benchmark accuracy). Overlap only matters for the first: nothing is fit to the
+text — the search objective is wikitext2 JSD and `post_search.select_joint`
+picks on the archive's stored loss, measuring `--metric_tasks` afterwards — and
+PPL over a document is a different target than accuracy over the answer
+generated from it, so same-corpus reporting is legitimate (and is the
+confound-free way to say "PPL barely moved, accuracy dropped X%"). What overlap
+does cost is the PREDICTIVE reading of that cell, which shares per-arch,
+per-document noise. Measured: **`longbench:qmsum` overlaps fully** (128/128 of
+its documents are graded by LongBench) → registered on purpose as a reporting
+metric and listed in `correlation_contamination.txt`.
+`gov_report` is **clean by split**: LongBench-E's gov_report is the GovReport
+*validation* split (192/200 match there, 4/200 in test) while the loader reads
+*test* → 0/128 selected docs overlap (recorded as `DISJOINT_BY_SPLIT`).
+narrativeqa / wikitext2 / c4 / gsm8k are in no benchmark list. `needle_*` shares
+RULER's generator+seed, so it is flagged against a RULER task of the same name.
+`--mode eval` warns BEFORE spending the 29-283 min a benchmark costs, and
+`--mode aggregate` writes `correlation_contamination.txt` (report-only; add
+`--corr_drop_contaminated` to also drop those pairs from the top-K ranking).
+`tests/test_bench_per_example.py` asserts that every registered corpus metric a
+benchmark grades IS detected (qmsum today), so the proxy/reporting distinction
+stays machine-visible instead of living in someone's head.
+
+**Measurement directory + spec hashes.** `correlation.py` writes to
+`<save>/m_<cfg_sha8>/` — **one folder per measurement CONFIG** (model, dtype,
+w/kv method, bits, group sizes, residual_length, attn_sink, quant schemes, seed;
+`measurement_config`/`measurement_dir`), with that config in the folder's
+`meta.json` and the benchmark artefact paths re-rooted into it (`reroot`).
+archs.csv stays at `<save>` and is SHARED, so one arch pool can be measured
+under several configs while `--mode aggregate` reads exactly one folder — rows
+in a table are comparable by construction rather than by convention (it prints
+the sibling configs it is NOT mixing in; `--measure_dir` picks another). A save
+dir that already holds root-level `result_*.json` keeps using the root, so the
+670 existing result files are untouched. Orthogonally, every measured value
+stores `utils/metric_specs.spec_sha8()` — a hash of the metric's DEFINITION
+(group + task) — in `result_<idx>.json['_specs']`: editing a group re-measures
+just the affected metric instead of silently keeping a number that no longer
+means the same thing, and aggregate reports any metric whose rows disagree.
+post_search does not need the folder split (its `${TODAY}_…` save dir is already
+one per launch) but carries the same identity: a `spec` column in results.csv,
+a machine-readable `meta.json` beside results.txt, and the benchmark artefact
+paths cross-linked in both directions (`save_dir` in the artefact meta).
 
 ### Correlation harness (`correlation.py`)
 

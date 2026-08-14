@@ -27,8 +27,36 @@ Two stages, both invoked via this single file:
     Idempotent: results are written to `<save>/result_<idx>.json`; re-running
     only fills in the metrics that are still missing (or in `--force`).
 
-Calibration metrics (`--metrics`):
+Calibration metrics (`--metrics`) — the full list is METRIC_TASKS in
+utils/metric_specs.py; a few landmarks:
     c4_ppl              C4 PPL (test split, n_sample=128, seqlen=2048)
+    wt2_ppl_sl4096      wikitext2 PPL at a 4096-token window (70 windows);
+    wt2_ppl_sl8192      … 8192 (35 windows). c4_ppl_sl4096 / c4_ppl_sl8192 too.
+    wt2_ppl_sl8192_s512 8192 windows through the REAL KV-cache path (stride)
+    gov_ppl             gov_report PPL, 128 real documents @ 8192
+                        (+ gov_ppl_sl4096 / _sl2048, gov_ppl_s512, _pp512_s128)
+    nqa_ppl             LongBench narrativeqa (novels/scripts) PPL, 128 docs
+                        @ 8192 (+ nqa_ppl_sl4096 / _sl2048, nqa_ppl_s512)
+    qmsum_ppl           LongBench qmsum (meeting transcripts), 128 docs @ 8192
+                        (+ qmsum_ppl_sl4096 / _sl2048, qmsum_ppl_s512)
+
+    All three long-document corpora span 2048 / 4096 / 8192, so DOMAIN is
+    separable from LENGTH: at 2048 they are directly comparable to wt2/c4_ppl
+    (same window, different text), and within a corpus only the window changes.
+    LongBench GRADES qmsum, so qmsum_ppl* are long-context REPORTING metrics —
+    measured next to benchmark accuracy on the same documents, which is exactly
+    what makes "PPL barely moved, accuracy dropped" a confound-free statement,
+    but not evidence that they PREDICT that benchmark (correlation.py lists
+    those cells in correlation_contamination.txt).
+
+    EVERY PPL corpus × window additionally has the two answer-phase protocols
+    `<base>_pp512_s32` and `<base>_pp128_s32` (prefill, then score the last
+    512 / 128 tokens in 32-token chunks — the PPL twins of wt2_jsd_pp512_s32).
+    The long-document corpora (gov_report / longbench:*) SELECT documents, so
+    their groups pin `data_seed=0`: the document set is a property of the metric
+    name, not of --seed. Windows stop at 8192 by design.
+    wt2_jsd_pp32_s8     tightest answer window: prefill, then 32 tokens in
+    gov_jsd_pp32_s8     8-token chunks (closest stand-in for decode)
     wt2_jsd             wikitext2 JSD, n_sample=128 seqlen=2048,
                         prefill_prompt=False, stride=None
     wt2_jsd_s512        wikitext2 JSD, … stride=512
@@ -40,6 +68,29 @@ Calibration metrics (`--metrics`):
 
 Long-context benchmarks:
     longbench / longbench_e / ruler  (same as post_search.py block)
+
+    Both persist the GENERATION of every example, not just the aggregate:
+      RULER     → <ruler_result_path>[/len<L>]/per_example_s<seed>.jsonl —
+                  task, sample_index, seed, requested/sample length,
+                  input_sha256, context/generated token counts, prediction,
+                  references, score. Keyed by seed because the seed decides
+                  which samples exist (eval_ruler re-seeds before building the
+                  dataset), so seeds never overwrite each other.
+      LongBench → <longbench_result_path>/pred[_e]/<dataset>.jsonl — pred,
+                  answers, all_classes, length + dataset, _id, context/generated
+                  tokens, input_sha256 and the per-example `score` (stamped in
+                  by eval_longbench_preds, so it is the same number the reported
+                  average is computed from)
+    Prompts are NOT stored: they are regenerable from (dataset, _id) /
+    (seed, task, sample_index), and input_sha256 proves a regenerated prompt is
+    the one the model saw.
+
+    `--ruler_length` takes one or MORE context lengths and is independent of
+    `--n_token` (memory accounting). Each length is run as its own full
+    `--ruler_sample` sweep — a single eval_ruler call with several lengths
+    would shuffle them together and keep only nsample samples in total — and
+    multi-length results are reported per length as `<task>_len<L>` with raw
+    artefacts under `<ruler_result_path>/len<L>/scores.json`.
 
 `--metrics all` (default) runs all calibration metrics (PPL/loss). Keys
 listed explicitly on --metrics are force-rerun; keys expanded by 'all'
@@ -66,6 +117,8 @@ run-pair looks like:
         --key_token_path key_token/Qwen2.5-72B-Instruct_gov_report_test_8sample_8192seqlen_8192min_256trunc_64sw_1alpha_-1beta
 """
 import os
+import glob
+import hashlib
 import json
 import csv
 import shutil
@@ -82,13 +135,16 @@ from tqdm import tqdm
 from evaluator import LlamaEvaluator
 from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
                         configure_model_cache, get_net_info, clean_up,
-                        set_seed, init_accelerator, process_dtype, RunCtx)
+                        set_seed, init_accelerator, process_dtype, RunCtx,
+                        arch_sha8, bench_stamp, stamp_artifact_dir)
+from utils.metric_specs import spec_sha8, TASKS_BY_NAME as _TASKS
 from utils.select import (build_arch, select_valid_nd_idx, assemble_F,
                           LazyPs, draw_random, quantile_select, axis_of_map,
                           coverage_subset_nsga2_extras, per_axis_metric)
 from utils.eval import eval_metric, eval_loss, LazyGpuList
 from utils.data import get_tokenizer
-from utils.longbench import pred_longbench, eval_longbench_preds
+from utils.longbench import (pred_longbench, eval_longbench_preds,
+                             LONGBENCH_DATASETS, LONGBENCH_E_DATASETS)
 from utils.ruler import eval_ruler
 
 warnings.simplefilter("ignore")
@@ -102,8 +158,188 @@ warnings.simplefilter("ignore")
 # thing when they are given the same name. Imported here under the original
 # names; this module's own code is unchanged.
 from utils.metric_specs import (GROUPS, METRIC_TASKS, METRIC_KEYS, BENCH_KEYS,
-                                ALL_KEYS, precompute_groups, move_dense_to_cpu,
-                                run_task)
+                                ALL_KEYS, TASKS_BY_NAME, precompute_groups,
+                                move_dense_to_cpu, run_task)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Overlap check — is a calibration corpus ALSO graded by the benchmark?
+# ════════════════════════════════════════════════════════════════════════════
+# INFORMATIONAL, not a gate. Some metrics here are long-context REPORTING
+# metrics (a final-table number next to benchmark accuracy) rather than proxy
+# candidates, and for those the overlap is intentional — nothing is fit to the
+# text (the search objective is wikitext2 JSD; post_search.select_joint picks on
+# the archive's stored loss and measures these afterwards), and PPL over a
+# document is a different target than accuracy over the answer generated from
+# it. Same-corpus is in fact the confound-free way to say "PPL barely moved,
+# accuracy dropped X%".
+# What the overlap DOES cost is the predictive reading of that one cell: an
+# overlapping (metric, benchmark) pair shares per-architecture, per-document
+# noise, so its correlation is optimistic as evidence that the metric PREDICTS
+# the benchmark. Hence: measure everything, report the overlap, and let the
+# reader (or --corr_drop_contaminated) decide. Measured on this box
+# (Llama-3.1 tokenizer):
+#   longbench:qmsum  → 128/128 calibration documents are ALSO graded by
+#                      LongBench (same THUDM/LongBench qmsum test split);
+#                      registered on purpose as a reporting metric
+#   gov_report       → CLEAN: LongBench's gov_report subset comes from the
+#                      GovReport *validation* split (192/200 match there,
+#                      4/200 in test), while the calibration loader reads
+#                      *test* → 0/128 selected docs appear in the benchmark
+#   longbench:narrativeqa, wikitext2, c4, gsm8k → not scored by either list
+# ════════════════════════════════════════════════════════════════════════════
+# Measurement directory — one folder per measurement CONFIGURATION
+# ════════════════════════════════════════════════════════════════════════════
+# archs.csv is the ARCH POOL and is shared; the numbers measured on that pool
+# are only comparable to each other when the model + quantization config that
+# produced them is the same. aggregate() puts every result_<idx>.json into ONE
+# table and correlates across rows, so a config change mid-sweep would silently
+# mix incomparable rows. Keying the directory by the config makes that
+# structurally impossible instead of something to detect afterwards:
+#
+#   <save>/archs.csv, sample_meta.json      the pool (one, shared)
+#   <save>/m_<cfg_sha8>/meta.json           the config, in full and readable
+#   <save>/m_<cfg_sha8>/result_<idx>.json   values + per-metric spec hashes
+#   <save>/m_<cfg_sha8>/longbench_<idx>/…   benchmark artefacts (P4-stamped)
+#
+# The name is a short hash, not the config spelled out: this repo has already
+# hit the 255-byte directory-name limit. What must NOT enter the key: which
+# metrics a run happened to measure (the harness fills metrics in incrementally,
+# one at a time) — that is handled per entry by spec_sha8.
+_CONFIG_KEYS = ('model_name', 'dtype', 'w_method', 'kv_method', 'w_bits',
+                'k_bits', 'v_bits', 'w_group_size', 'k_group_size',
+                'v_group_size', 'residual_length', 'attn_sink',
+                'k_quant_scheme', 'v_quant_scheme', 'seed')
+
+
+def measurement_config(args):
+    """The axes whose change invalidates EVERY number in a directory."""
+    return {k: getattr(args, k, None) for k in _CONFIG_KEYS}
+
+
+def measurement_dir(args, create=False):
+    """Resolve (and optionally create+stamp) this run's measurement directory.
+
+    Back-compat: a save dir that already holds result_*.json at its ROOT and no
+    m_* subdirectory keeps using the root — the 670 existing result files stay
+    exactly where they are and remain readable.
+    """
+    save = args.save or '.'
+    if getattr(args, 'measure_dir', ''):
+        mdir = args.measure_dir
+    else:
+        legacy = (glob.glob(os.path.join(save, 'result_*.json'))
+                  and not glob.glob(os.path.join(save, 'm_*')))
+        cfg = measurement_config(args)
+        sha = hashlib.sha256(
+            json.dumps(cfg, sort_keys=True, default=str).encode('utf-8')
+        ).hexdigest()[:8]
+        mdir = save if legacy else os.path.join(save, f'm_{sha}')
+    if create:
+        os.makedirs(mdir, exist_ok=True)
+        if mdir != save:
+            stamp_artifact_dir(mdir, dict(kind='measurement',
+                                          **measurement_config(args)))
+    return mdir
+
+
+def reroot(path, save, mdir):
+    """Move a benchmark artefact path from <save>/x into <mdir>/x.
+
+    The shell builds these paths from SAVE (it cannot know the config hash), so
+    correlation re-roots anything that sits directly under SAVE into the
+    measurement directory. Paths outside SAVE are left alone.
+    """
+    if not path or mdir == save:
+        return path
+    save_n = os.path.normpath(save)
+    path_n = os.path.normpath(path)
+    if path_n == save_n or not path_n.startswith(save_n + os.sep):
+        return path
+    return os.path.join(mdir, os.path.relpath(path_n, save_n))
+
+
+def _bench_spec(args, which):
+    """Definition fingerprint of a BENCHMARK entry — what would make two
+    stored scores incomparable (task list, context lengths, sample count)."""
+    if which == 'ruler':
+        cfg = dict(task=sorted(args.ruler_task or []),
+                   length=sorted(int(L) for L in (args.ruler_length or [])),
+                   nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks)
+    else:
+        from utils.longbench import LONGBENCH_DATASETS, LONGBENCH_E_DATASETS
+        cfg = dict(datasets=sorted(LONGBENCH_E_DATASETS if which == 'longbench_e'
+                                   else LONGBENCH_DATASETS))
+    return hashlib.sha256(
+        json.dumps(cfg, sort_keys=True, default=str).encode('utf-8')
+    ).hexdigest()[:8]
+
+
+def _metric_corpus(metric, needle_task=''):
+    """The corpus a calibration metric reads, as a comparable key."""
+    t = TASKS_BY_NAME.get(metric)
+    if t is None:
+        return None
+    _k, _g, ds, kw = t
+    if ds:
+        return ds.split(':')[-1]
+    if str(kw.get('kind', '')).startswith('needle'):
+        # needle_* prompts come from RULER's own niah generators, so they
+        # collide with a RULER task of the SAME name (and length/seed).
+        return f'ruler:{needle_task}' if needle_task else None
+    return None
+
+
+def _bench_col_corpora(col, all_bench_cols):
+    """Which corpora does one aggregate column score? `<bk>__avg` covers every
+    dataset of that benchmark, so an overlap in ONE dataset contaminates the
+    average too."""
+    bk, _, rest = col.partition('__')
+    name = rest.split('__')[0]              # strip the LongBench-E length bucket
+    if bk == 'longbench':
+        return set(LONGBENCH_DATASETS) if name == 'avg' else {name}
+    if bk == 'longbench_e':
+        return set(LONGBENCH_E_DATASETS) if name == 'avg' else {name}
+    if bk == 'ruler':
+        import re as _re
+        strip = lambda t: _re.sub(r'_len\d+$', '', t)   # noqa: E731
+        if name == 'avg':
+            return {f'ruler:{strip(c.split("__", 1)[1])}' for c in all_bench_cols
+                    if c.startswith('ruler__') and not c.endswith('__avg')}
+        return {f'ruler:{strip(name)}'}
+    return set()
+
+
+# Same dataset NAME, disjoint DOCUMENTS — measured, not assumed, so the
+# name-based rule below does not raise a false alarm on it.
+DISJOINT_BY_SPLIT = {
+    ('gov_report', 'longbench_e'):
+        "LongBench-E's gov_report is the GovReport VALIDATION split "
+        "(192/200 of its documents match launch/gov_report[validation] on a "
+        "120-char probe, only 4/200 match [test]); the calibration loader reads "
+        "split='test' → 0/128 selected documents are benchmark documents",
+}
+
+
+def contaminated_pairs(metric_cols, bench_cols, needle_task=''):
+    """[(metric, bench column)] measured over documents the benchmark grades.
+
+    NOT an error list — see the module comment: for a reporting metric the
+    overlap is intended, it only disqualifies that cell as evidence of
+    PREDICTION. Name-based, minus the measured DISJOINT_BY_SPLIT exemptions.
+    Over-flagging is the safe direction: for needle_* vs a RULER task of the
+    same name the prompts come from one generator and one seed, so they are
+    literally identical whenever the context length matches too, and drawn from
+    the same needle/haystack pool even when it does not."""
+    corpus = {m: _metric_corpus(m, needle_task) for m in metric_cols}
+    out = []
+    for b in bench_cols:
+        bk = b.partition('__')[0]
+        scored = _bench_col_corpora(b, bench_cols)
+        out += [(m, b) for m in metric_cols
+                if corpus[m] is not None and corpus[m] in scored
+                and (corpus[m], bk) not in DISJOINT_BY_SPLIT]
+    return out
 
 
 
@@ -454,7 +690,8 @@ def _archive_existing_results(args, result_path, results, rerunning_keys):
 def _resolve_metric_set(arg):
     """Return (keys, rerun_set) for CALIBRATION metrics only (PPL/loss).
 
-    `'all'` (or empty --metrics) expands to all METRIC_KEYS. Benchmarks
+    `'all'` (or empty --metrics) expands to all METRIC_KEYS; `'none'` requests
+    benchmark-only evaluation. Benchmarks
     (ruler/longbench/longbench_e) are rejected here with a redirect to
     `--benchmarks` — they are not metrics by this script's taxonomy.
 
@@ -466,6 +703,14 @@ def _resolve_metric_set(arg):
     """
     if not arg:
         return list(METRIC_KEYS), set()
+
+    tokens = [tok for x in arg
+              for tok in x.replace(',', ' ').split() if tok]
+    if 'none' in tokens:
+        if len(tokens) != 1:
+            raise SystemExit("--metrics none is exclusive; do not combine it "
+                             "with calibration metric names")
+        return [], set()
 
     expanded, rerun_set, seen = [], set(), set()
     for x in arg:
@@ -514,24 +759,37 @@ _LazyGpuList = LazyGpuList
 _move_all_dense_logits_to_cpu = move_dense_to_cpu
 
 
-def _precompute_group_data(args, ctx, model_id, group_items):
+def _precompute_group_data(args, ctx, model_id, group_items, tasks=None):
     """One FP-teacher pass for every group of this idx → the shared builder.
     store_device='cpu' also removes the transient GPU pile-up the old local
-    version had (it built on GPU, then moved)."""
+    version had (it built on GPU, then moved).
+
+    `tasks` (the pending calibration tasks) restricts the teacher pass to the
+    (group, dataset) pairs actually consumed. Without it every dataset of a
+    divergence group is materialised even when nothing reads it — e.g. asking
+    only for c4_ppl used to build BOTH wikitext2 and c4 full-sequence teacher
+    logits for Group A (128 x 2048 x vocab fp16 ≈ 67 GB each, on CPU).
+    """
     return precompute_groups(ctx.accelerator, model_id, group_items,
                              seed=args.seed, dtype=ctx.dtype,
-                             device_map=ctx.device_map, store_device='cpu')
+                             device_map=ctx.device_map, store_device='cpu',
+                             tasks=tasks)
 
 
 def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
                      loss_func, use_key_token, key_token_path,
                      trunc_len, sliding_window, alpha, beta,
-                     last_tokens=None, precomputed=None):
+                     last_tokens=None, precomputed=None, sides=None,
+                     data_seed=None):
     """One LlamaEvaluator with the requested data-side config. `last_tokens`
     here is set on the evaluator at init so dense_logits gets pre-masked to
     the last N positions — must match the eval_loss last_tokens used at
     metric-call time (eval_loss compares len-N logits vs len-N dense).
-    Dense_logits is moved to CPU right after build (see _move_all_dense_logits_to_cpu)."""
+    Dense_logits is moved to CPU right after build (see _move_all_dense_logits_to_cpu).
+    `sides` (which loader sides to build) and `data_seed` (pinned document
+    selection for long-doc groups) are GROUP-spec keys consumed by
+    precompute_groups; accepted and ignored here because the loaders arrive
+    pre-built via `precomputed`."""
     model_id = f'{args.model_path}/{args.model_name}'
     quant_model_paths = args.quant_model_paths if 'hqq' in args.w_method else []
     # Scalar fallback for replace_kv_cache (per-arch arch['p'] overrides this
@@ -795,9 +1053,26 @@ def _run_calibration_task(args, ctx, evaluator, dataset, eval_kwargs):
     return run_task(args, ctx.accelerator, evaluator, dataset, eval_kwargs)
 
 
-def _run_benchmark_block(args, model, model_id, which):
+def _quant_meta(args):
+    """The quantization configuration a benchmark artefact was produced under —
+    the identity half of meta.json (see utils.func.stamp_artifact_dir)."""
+    return dict(model=args.model_name, w_method=args.w_method,
+                kv_method=args.kv_method, w_bits=args.w_bits,
+                k_bits=args.k_bits, v_bits=args.v_bits,
+                w_group_size=args.w_group_size,
+                residual_length=args.residual_length, attn_sink=args.attn_sink,
+                k_quant_scheme=args.k_quant_scheme,
+                v_quant_scheme=args.v_quant_scheme, seed=args.seed)
+
+
+def _run_benchmark_block(args, model, model_id, which, arch=None, idx=None):
     """which ∈ {'longbench', 'longbench_e', 'ruler'}; mirrors post_search.run_benchmarks
-    but isolated per block so eval mode can run only what was requested."""
+    but isolated per block so eval mode can run only what was requested.
+
+    Every artefact carries provenance twice: `stamp` on each per-example row
+    (run_id / arch_sha8 / idx) and meta.json on the directory, which rotates the
+    directory away if it already holds a different configuration."""
+    stamp = bench_stamp(arch, idx)
     if which in ('longbench', 'longbench_e'):
         e = (which == 'longbench_e')
         if not args.longbench_config:
@@ -808,14 +1083,21 @@ def _run_benchmark_block(args, model, model_id, which):
             raise SystemExit(f"--{which}: pass --longbench{'_e' if e else ''}_result_path")
         clean_up()
         configure_model_cache(args, model, use_cache=True)
+        stamp_artifact_dir(result_path,
+                           dict(benchmark=which, **_quant_meta(args),
+                                **{k: v for k, v in stamp.items() if k != 'run_id'}))
         t0 = time()
         preds = pred_longbench(model, tokenizer=get_tokenizer(model_id),
                                save_path=result_path,
                                longbench_config=args.longbench_config,
-                               e=e, model_name=args.model_name)
+                               e=e, model_name=args.model_name, stamp=stamp)
         # Score this run's predictions in memory (still writes result.json);
         # avoids re-reading the dir, which could mix in stale .jsonl files.
+        # This also rewrites <dataset>.jsonl with the per-example `score`.
         scores = dict(eval_longbench_preds(preds, e, save_path=result_path))
+        print(f"[{which}] per-example generations → {result_path}/"
+              f"pred{'_e' if e else ''}/<dataset>.jsonl "
+              f"({sum(len(v) for v in preds.values())} rows)")
         scores['_time'] = time() - t0
         return scores
 
@@ -825,26 +1107,76 @@ def _run_benchmark_block(args, model, model_id, which):
         clean_up()
         configure_model_cache(args, model, use_cache=True)
         t0 = time()
-        # --ruler_result_path is now a FOLDER (parity with longbench's dir
-        # layout). eval_ruler still wants a single JSON path, so we point it
-        # at `<folder>/scores.json`. Folder layout leaves room for future
-        # per-task artefacts and lets _archive_existing_results move the
-        # whole folder as one unit.
+        # ── ONE eval_ruler call PER context length ──
+        # eval_ruler's builders yield `nsample` samples per requested length and
+        # CHAIN them, then `.shuffle().select(range(nsample))` keeps nsample
+        # MIXED across lengths — so passing several lengths at once used to give
+        # one per-task score averaged over a random length mixture (and only
+        # nsample/len(lengths) samples per length). Looping here keeps every
+        # length at its full `--ruler_sample` and reports the lengths separately.
+        lengths = [int(L) for L in (args.ruler_length or [])]
+        if not lengths:
+            raise SystemExit("--ruler: --ruler_length needs at least one value")
+        multi = len(lengths) > 1
+        # --ruler_result_path is a FOLDER (parity with longbench's dir layout);
+        # eval_ruler wants a single JSON path. With several lengths each gets
+        # its own `len<L>/scores.json` so the raw artefacts stay separable and
+        # _archive_existing_results can still move the whole folder as one unit.
         result_dir = args.ruler_result_path or ''
-        scores_file = ''
-        if result_dir:
-            os.makedirs(result_dir, exist_ok=True)
-            scores_file = os.path.join(result_dir, 'scores.json')
-        eval_ruler(model, tokenizer=get_tokenizer(model_id), model_id=model_id,
-                   tasks=args.ruler_task, yaml_path=args.ruler_yaml_path,
-                   batch_size=args.ruler_batch_size, length=args.ruler_length,
-                   nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks,
-                   result_path=scores_file, seed=args.seed)
-        if scores_file and os.path.exists(scores_file):
-            with open(scores_file) as f:
-                scores = json.load(f)
-        else:
-            scores = {}
+        scores = {}
+        for L in lengths:
+            scores_file = ''
+            if result_dir:
+                sub = os.path.join(result_dir, f'len{L}') if multi else result_dir
+                stamp_artifact_dir(sub, dict(
+                    benchmark='ruler', ruler_task=list(args.ruler_task or []),
+                    length=L, nsample=args.ruler_sample,
+                    batch_size=args.ruler_batch_size,
+                    gen_toks=args.ruler_gen_toks, **_quant_meta(args),
+                    **{k: v for k, v in stamp.items() if k != 'run_id'}))
+                scores_file = os.path.join(sub, 'scores.json')
+            # Per-example generations are dumped by default (nsample x tasks
+            # rows — tiny) next to this length's scores.json, keyed by SEED:
+            # the seed decides which samples exist (eval_ruler re-seeds before
+            # dataset construction), so two seeds are two different sample sets
+            # and must not overwrite each other. An explicit
+            # --ruler_per_example_path still wins; with several lengths it gets
+            # the _len<L> suffix so the runs stay separable.
+            if args.ruler_per_example_path:
+                per_example_path = args.ruler_per_example_path
+                if multi:
+                    base, ext = os.path.splitext(per_example_path)
+                    per_example_path = f'{base}_len{L}{ext or ".jsonl"}'
+            elif scores_file:
+                per_example_path = os.path.join(
+                    os.path.dirname(scores_file),
+                    f'per_example_s{int(args.seed)}.jsonl')
+            else:
+                per_example_path = ''
+            print(f"[correlation/eval]   ruler @ length={L} "
+                  f"(tasks={args.ruler_task}, nsample={args.ruler_sample})")
+            one = eval_ruler(model, tokenizer=get_tokenizer(model_id),
+                             model_id=model_id,
+                             tasks=args.ruler_task, yaml_path=args.ruler_yaml_path,
+                             batch_size=args.ruler_batch_size, length=[L],
+                             nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks,
+                             result_path=scores_file,
+                             per_example_path=per_example_path,
+                             stamp=stamp, seed=args.seed)
+            # eval_ruler returns THIS call's scores; the file it writes is merged
+            # with whatever a previous run left in that dir, so the return value
+            # is the authoritative one (file read kept as a fallback).
+            if not one and scores_file and os.path.exists(scores_file):
+                with open(scores_file) as f:
+                    one = json.load(f)
+            one = {k: v for k, v in (one or {}).items() if k != 'time'}
+            # Single length → flat {task: score} (unchanged layout, so existing
+            # `ruler__<task>` columns keep working). Several lengths → suffixed
+            # `<task>_len<L>` keys; NO cross-length average is invented here
+            # (aggregate's ruler__avg still means "mean over all reported cells").
+            for task, v in one.items():
+                scores[f'{task}_len{L}' if multi else task] = v
+        scores['_lengths'] = lengths
         scores['_time'] = time() - t0
         return scores
     raise ValueError(which)
@@ -872,8 +1204,31 @@ def cmd_eval(args):
     print(f"[correlation/eval] requested: {requested}"
           + (f"  explicit rerun: {sorted(rerun_set)}" if rerun_set else ""))
 
-    out_dir = args.save or os.path.dirname(archs_csv) or '.'
-    os.makedirs(out_dir, exist_ok=True)
+    # Contamination is checked HERE, not only at aggregate time: a benchmark
+    # costs 29-283 min per idx, so a metric that reads documents the benchmark
+    # grades should be visible before that is spent, not after.
+    if calib_keys and bench_keys:
+        pseudo_cols = [f'{b}__avg' for b in bench_keys]
+        bad_now = contaminated_pairs(calib_keys, pseudo_cols, args.needle_task)
+        if bad_now:
+            offenders = sorted({m for m, _ in bad_now})
+            print(f"[correlation/eval] note: {offenders} are measured over "
+                  f"documents {sorted({b.split('__')[0] for _, b in bad_now})} "
+                  f"grades. Fine as long-context REPORTING metrics (nothing is "
+                  f"fit to them); just do not read their correlation with that "
+                  f"benchmark as evidence of prediction — the pair shares "
+                  f"per-arch, per-document noise. Logged at aggregate time.")
+
+    save_dir = args.save or os.path.dirname(archs_csv) or '.'
+    out_dir = measurement_dir(args, create=True)
+    if out_dir != save_dir:
+        print(f"[correlation/eval] measurement dir: {out_dir} "
+              f"(one folder per model+quant config; archs.csv stays shared)")
+    # the shell builds artefact paths from SAVE, which cannot know the config
+    # hash — re-root them so a config change cannot reuse another's artefacts
+    for _a in ('longbench_result_path', 'longbench_e_result_path',
+               'ruler_result_path', 'ruler_per_example_path'):
+        setattr(args, _a, reroot(getattr(args, _a, ''), save_dir, out_dir))
     result_path = os.path.join(out_dir, f'result_{args.idx}.json')
 
     # Always load the existing file (if any) so unrequested metrics are
@@ -897,8 +1252,22 @@ def cmd_eval(args):
     # Per-key rerun: keys listed explicitly on --metrics are force-rerun;
     # keys from `'all'` expansion only run if not already done. --force
     # forces everything regardless.
+    def _spec(k):
+        """Definition fingerprint of one entry: registry spec for a metric,
+        benchmark configuration for a benchmark."""
+        if k in _TASKS:
+            return spec_sha8(k)
+        return _bench_spec(args, k)
+
+    def _stale_spec(k):
+        old = (results.get('_specs') or {}).get(k)
+        return old is not None and old != _spec(k)
+
     def _should_run(k):
-        return args.force or k in rerun_set or not _done(k)
+        # A stored value whose spec hash no longer matches was produced by a
+        # DIFFERENT definition (someone edited the group/task, or the benchmark
+        # config changed) — recompute instead of silently keeping it.
+        return args.force or k in rerun_set or not _done(k) or _stale_spec(k)
 
     pending_calib = [t for t in METRIC_TASKS
                      if t[0] in requested and _should_run(t[0])]
@@ -909,6 +1278,10 @@ def cmd_eval(args):
                and _done(k) and not (args.force or k in rerun_set)]
     if skipped:
         print(f"[correlation/eval] skipping (done): {skipped}")
+    redefined = [k for k in requested if _done(k) and _stale_spec(k)]
+    if redefined:
+        print(f"[correlation/eval] re-measuring (definition changed since the "
+              f"stored value): {redefined}")
     retried = [k for k in requested
                if isinstance(results.get(k), dict) and 'error' in results[k]]
     if retried:
@@ -977,7 +1350,8 @@ def cmd_eval(args):
     # front and stashes them on CPU (dense is arch-independent → one pass serves
     # all groups). Keeps the FP teacher and the (later, reused) quant model off
     # the GPU together.
-    precomp = (_precompute_group_data(args, ctx, model_id, group_items)
+    precomp = (_precompute_group_data(args, ctx, model_id, group_items,
+                                      tasks=pending_calib)
                if group_items else {})
 
     for g, spec in group_items:
@@ -1018,6 +1392,7 @@ def cmd_eval(args):
                 if isinstance(value, torch.Tensor):
                     value = value.item()
                 results[key] = float(value)
+                results.setdefault('_specs', {})[key] = _spec(key)
                 print(f"[correlation/eval]   {key} = {results[key]:.6f}  "
                       f"({time() - t0:.1f}s)")
             except Exception as e:                              # noqa: BLE001
@@ -1048,7 +1423,10 @@ def cmd_eval(args):
         for which in pending_bench:
             print(f"[correlation/eval] → benchmark '{which}'")
             try:
-                results[which] = _run_benchmark_block(args, model, model_id, which)
+                results[which] = _run_benchmark_block(args, model, model_id,
+                                                      which, arch=arch,
+                                                      idx=args.idx)
+                results.setdefault('_specs', {})[which] = _spec(which)
                 print(f"[correlation/eval]   {which} = {results[which]}")
             except Exception as e:                              # noqa: BLE001
                 results[which] = {'error': repr(e)}
@@ -1126,13 +1504,19 @@ def _write_corr_matrix(path, corr, metric_cols, bench_cols, kind):
 
 
 def _print_corr_summary(corr, metric_cols, bench_cols, top_k=3,
-                        out_path=None):
+                        out_path=None, exclude=()):
     """Per benchmark column, list the top-K calibration metrics by |Pearson|
     plus their Spearman. Writes to stdout AND (if `out_path` given) to a
     text file for offline review. Same content goes to both sinks.
+
+    `exclude` = (metric, bench) pairs whose correlation is circular (the metric
+    reads documents the benchmark scores). They stay in the full matrices —
+    the number is still a fact — but they are kept OUT of the ranking, which is
+    where a contaminated pair would otherwise be read as "best proxy".
     """
     if not metric_cols or not bench_cols:
         return
+    exclude = set(exclude)
     lines = []
     lines.append(f"Top-{top_k} calibration metrics per benchmark column "
                  f"(by |Pearson r|):")
@@ -1141,9 +1525,14 @@ def _print_corr_summary(corr, metric_cols, bench_cols, top_k=3,
     lines.append(f"  {'-' * 40}  {'-' * 4}  {'-' * 24}  {'-' * 8}  "
                  f"{'-' * 9}  {'-' * 8}  {'-' * 4}")
     for b in bench_cols:
-        # Rank metrics by |pearson| (NaN sorts last).
+        # Rank metrics by |pearson| (NaN sorts last), minus the circular ones.
+        rankable = [m for m in metric_cols if (m, b) not in exclude]
+        dropped = len(metric_cols) - len(rankable)
+        if dropped:
+            lines.append(f"  {b:<40}  [{dropped} contaminated metric(s) "
+                         f"excluded from this ranking]")
         ranked = sorted(
-            metric_cols,
+            rankable,
             key=lambda m: (np.isnan(corr[m][b]['pearson']),
                            -abs(corr[m][b]['pearson'])
                            if not np.isnan(corr[m][b]['pearson']) else 0.0))
@@ -1168,15 +1557,23 @@ def _print_corr_summary(corr, metric_cols, bench_cols, top_k=3,
 def cmd_aggregate(args):
     archs_csv = (args.archs_csv
                  or os.path.join(args.save or '.', 'archs.csv'))
-    out_dir = args.save or os.path.dirname(archs_csv) or '.'
+    save_dir = args.save or os.path.dirname(archs_csv) or '.'
+    out_dir = measurement_dir(args)
     if not os.path.exists(archs_csv):
         raise SystemExit(f"archs.csv not found at {archs_csv}")
+    others = [d for d in sorted(glob.glob(os.path.join(save_dir, 'm_*')))
+              if os.path.isdir(d) and os.path.normpath(d) != os.path.normpath(out_dir)]
+    if others:
+        print(f"[correlation/aggregate] reading ONE measurement config: "
+              f"{out_dir}\n  other configs in this pool (not mixed in): "
+              f"{[os.path.basename(d) for d in others]}"
+              f"\n  pass --measure_dir to aggregate one of those instead.")
     with open(archs_csv) as f:
         archs_rows = list(csv.DictReader(f))
     arch_header = list(archs_rows[0].keys()) if archs_rows else []
 
     # Discover the column set across all result files
-    rows = []
+    rows, stale, spec_seen = [], [], {}
     for r in archs_rows:
         idx = int(r['idx'])
         result_path = os.path.join(out_dir, f'result_{idx}.json')
@@ -1184,6 +1581,18 @@ def cmd_aggregate(args):
         if os.path.exists(result_path):
             with open(result_path) as f:
                 res = json.load(f)
+            # `idx` is a ROW NUMBER, not an identity: re-running --mode sample
+            # with a different pool/seed rewrites archs.csv while the old
+            # result_<idx>.json files stay, and every measurement would then be
+            # silently attributed to whatever arch now sits at that row. The
+            # results carry the arch they were measured on, so compare hashes.
+            want = arch_sha8(json.loads(r['arch_json']))
+            got = arch_sha8(res['arch']) if isinstance(res.get('arch'), dict) else None
+            if got is not None and got != want:
+                stale.append((idx, want, got))
+                res = {}          # treat exactly like an unmeasured arch
+            for mk, sh in (res.get('_specs') or {}).items():
+                spec_seen.setdefault(mk, {}).setdefault(sh, []).append(idx)
             for mk in METRIC_KEYS:
                 if mk in res:
                     v = res[mk]
@@ -1221,6 +1630,28 @@ def cmd_aggregate(args):
         for k in r:
             if k not in seen:
                 seen.add(k); all_cols.append(k)
+    # per-metric definition drift WITHIN one config folder (old files written
+    # before a registry edit): the folder key covers model/quant, not the
+    # metric specs, so this is where a redefined metric would show up.
+    drift = {}
+    for m, seen in spec_seen.items():
+        if len(seen) > 1:
+            drift[m] = {k: sorted(v)[:4] for k, v in seen.items()}
+    if drift:
+        print(f"[correlation/aggregate] ⚠ {len(drift)} metric(s) have rows "
+              f"measured under DIFFERENT definitions — re-run those idx "
+              f"(--metrics <name>) before comparing: "
+              + ', '.join(f'{m}: ' + ' vs '.join(f'{h}@idx{v}' for h, v in d.items())
+                          for m, d in list(drift.items())[:5]))
+
+    if stale:
+        print(f"[correlation/aggregate] ⚠ DROPPED {len(stale)} result files "
+              f"measured on a DIFFERENT arch than archs.csv now has at that row "
+              f"(archs.csv was regenerated after they were written): "
+              f"{[i for i, _, _ in stale[:10]]}"
+              + (' …' if len(stale) > 10 else '')
+              + ". Re-run those idx or restore the matching archs.csv.")
+
     out_csv = os.path.join(out_dir, 'correlation.csv')
     with open(out_csv, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=all_cols)
@@ -1257,9 +1688,42 @@ def cmd_aggregate(args):
         print(f"[correlation/aggregate] wrote {pearson_path}")
         print(f"[correlation/aggregate] wrote {spearman_path}")
         print(f"[correlation/aggregate] wrote {kendall_path}")
+        # ── contamination: metric corpus ∩ benchmark corpus ──
+        # REPORT-ONLY by default: overlap is recorded, never acted on. Pass
+        # --corr_drop_contaminated to also keep those pairs out of the top-K
+        # ranking (the full matrices always keep every number either way).
+        bad = contaminated_pairs(metric_cols, bench_cols, args.needle_task)
+        if bad:
+            by_metric = {}
+            for m, b in bad:
+                by_metric.setdefault(m, []).append(b)
+            cpath = os.path.join(out_dir, 'correlation_contamination.txt')
+            with open(cpath, 'w') as f:
+                f.write(
+                    "(metric, benchmark) pairs measured over the SAME documents.\n\n"
+                    "This is not an error: a long-context REPORTING metric is\n"
+                    "supposed to sit next to benchmark accuracy on the same test\n"
+                    "documents, and nothing in the pipeline is fit to that text\n"
+                    "(search objective = wikitext2 JSD; post_search selects on the\n"
+                    "archive's stored loss and measures these afterwards).\n"
+                    "What the overlap costs is the PREDICTIVE reading of these\n"
+                    "cells: the pair shares per-architecture, per-document noise,\n"
+                    "so its correlation overstates how well the metric would\n"
+                    "predict the benchmark on unseen documents. Every number is\n"
+                    "in the correlation matrices; --corr_drop_contaminated also\n"
+                    "keeps these pairs out of the top-K ranking.\n\n")
+                for m, bs in sorted(by_metric.items()):
+                    f.write(f"{m}\n" + ''.join(f"    {b}\n" for b in sorted(bs)))
+            print(f"\n[correlation/aggregate] note: {len(bad)} (metric, "
+                  f"benchmark) pairs share documents — {sorted(by_metric)} are "
+                  f"measured over text the benchmark also grades. "
+                  + (f"Excluded from the ranking (--corr_drop_contaminated); "
+                     if args.corr_drop_contaminated else "Reported only; ")
+                  + f"see {cpath}")
         summary_path = os.path.join(out_dir, 'correlation_summary.txt')
         _print_corr_summary(corr, metric_cols, bench_cols,
-                            top_k=args.corr_top_k, out_path=summary_path)
+                            top_k=args.corr_top_k, out_path=summary_path,
+                            exclude=bad if args.corr_drop_contaminated else ())
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1404,9 +1868,23 @@ def build_parser():
     # eval mode
     p.add_argument('--archs_csv', type=str, default='',
                    help='(eval / aggregate) path to archs.csv (default: <save>/archs.csv)')
+    p.add_argument('--measure_dir', type=str, default='',
+                   help='(eval / aggregate) measurement directory. Default: '
+                        '<save>/m_<config sha8> — one folder per model+quant '
+                        'config, so rows in one folder are comparable BY '
+                        'CONSTRUCTION (archs.csv stays shared at <save>). A save '
+                        'dir that already holds result_*.json at its root keeps '
+                        'using the root. Pass this to aggregate a specific '
+                        'config.')
     p.add_argument('--corr_min_samples', type=int, default=5,
                    help='(aggregate) min overlapping numeric samples needed '
                         'to compute a correlation; below this the cell is NaN.')
+    p.add_argument('--corr_drop_contaminated', action='store_true',
+                   help='(aggregate) keep (metric, benchmark) pairs that share '
+                        'documents OUT of the top-K ranking. Off by default: '
+                        'the overlap is written to '
+                        'correlation_contamination.txt and every number stays '
+                        'in the correlation matrices.')
     p.add_argument('--corr_top_k', type=int, default=3,
                    help='(aggregate) per benchmark column, print top-K '
                         'calibration metrics by |Pearson r|.')
@@ -1415,7 +1893,8 @@ def build_parser():
     p.add_argument('--metrics', type=str, nargs='+', default=['all'],
                    help='(eval) calibration metrics (PPL/loss) to evaluate. '
                         '"all" (default) = all METRIC_KEYS. Explicitly listed '
-                        'keys are force-rerun. Benchmarks are NOT accepted '
+                        'keys are force-rerun; "none" runs benchmarks only. '
+                        'Benchmarks are NOT accepted '
                         'here — use --ruler / --longbench / --longbench_e. '
                         f'Valid: {METRIC_KEYS} (or "all").')
     # Benchmark toggles: each flag opts the corresponding benchmark in.
@@ -1463,7 +1942,14 @@ def build_parser():
                             "niah_multikey_3", "niah_multivalue",
                             "niah_multiquery", "ruler_vt", "ruler_cwe",
                             "ruler_fwe", "ruler_qa_squad", "ruler_qa_hotpot"])
-    p.add_argument('--ruler_length', type=int, nargs='+', default=[16384])
+    p.add_argument('--ruler_length', type=int, nargs='+', default=[16384],
+                   help='(eval) RULER context length(s). Independent of '
+                        '--n_token (which is the memory-accounting token '
+                        'count). Several values run one FULL --ruler_sample '
+                        'sweep per length (NOT a mixed sample): scores are '
+                        'then reported as <task>_len<L> and the raw artefacts '
+                        'land in <ruler_result_path>/len<L>/scores.json. A '
+                        'single value keeps the flat <task> layout.')
     p.add_argument('--ruler_yaml_path', type=str, default='utils/ruler_utils',
                    help='dir holding ruler yaml configs AND cached qa JSON '
                         '(hotpot_dev_distractor_v1.json, dev-v2.0.json)')
@@ -1471,6 +1957,12 @@ def build_parser():
     p.add_argument('--ruler_gen_toks', type=int, default=None)
     p.add_argument('--ruler_batch_size', type=int, default=1)
     p.add_argument('--ruler_result_path', type=str, default='')
+    p.add_argument('--ruler_per_example_path', type=str, default='',
+                   help='(eval) JSONL path for sample-level RULER generations, '
+                        'references, scores and prompt hashes. Default: '
+                        '<ruler_result_path>[/len<L>]/per_example_s<seed>.jsonl '
+                        '— always written (a few hundred rows), and keyed by '
+                        'seed because the seed decides which samples exist.')
     # output
     p.add_argument('--save', type=str, default='',
                    help='output dir (archs.csv / sample_meta.json / result_*.json)')

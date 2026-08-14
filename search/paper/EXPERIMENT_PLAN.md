@@ -5,7 +5,51 @@ is still required for a defensible submission.  It is intentionally stricter
 than a normal project TODO list: every experiment is tied to a paper claim or a
 reviewer attack.
 
-## 1. Highest-priority validity checks
+## 1. Dimension scaling and axis-first efficiency
+
+The dimension theorems in `main.md` are scaling statements, not evidence that
+the current 352-position search already exhibits the minimax lower bound.  Test
+them on nested spaces with active weight positions
+`{16,32,64,128,224}` and KV positions `{8,16,32,64}` while fixing all inactive
+positions to the same baseline.
+
+At each dimension and distinct-AWQ-build budget
+`N={25,50,100,200,400}`, compare:
+
+1. random or NSGA-III search in the full joint space;
+2. the same surrogate-assisted optimizer in the full joint space;
+3. product search using the empirical fronts found at the same Stage-1 budget;
+4. epsilon-front product search with the production mutation operator.
+
+Use identical initialization cost strata, surrogate head, acquisition batch,
+and final candidate pool.  Charge HQQ evaluations and AWQ builds by measured
+wall time in addition to reporting raw label counts.  Report hypervolume gap,
+IGD, target-front recall, and memory-band top-1 regret against an independently
+sampled held-out pool.  For each error target, estimate the first budget
+`N_epsilon` that reaches it and regress `log N_epsilon` on the measured effective
+dimension.  Report active-position count as nominal dimension, estimate a
+packing-slope dimension from Hamming distances in the common candidate pool,
+and report kernel effective rank only as a separate surrogate diagnostic.  Raw
+layer count alone is not a valid effective-dimension estimate.
+
+For reduced spaces where a shared finite HQQ pool can be exhaustively labeled,
+add its oracle axis fronts only as an offline upper bound.  Do not count that
+oracle as a feasible matched-budget method; use it to separate Stage-1 front
+estimation error from Stage-2 search error.
+
+The production archive is search-selected and therefore cannot be the only
+reference pool.  Stratify a held-out pool by HQQ cost and structural distance,
+then expose the same pool to every method.  Also use the existing paired
+`20 x 20` grid for an interaction stress test:
+
+`y_lambda(w,k) = mu + alpha(w) + beta(k) + lambda g(w,k)`,
+`lambda={0,0.5,1,2,4}`,
+
+where `g` is the measured two-way residual.  Axis-first regret and the estimated
+ordering-violation margin should increase together as `lambda` grows.  This is a
+controlled failure test, not a substitute for new AWQ measurements.
+
+## 2. Highest-priority validity checks
 
 ### A. Off-front coverage audit (the theorem's main open assumption)
 
@@ -52,7 +96,7 @@ hypervolume, IGD, and memory-band top-1 regret.  This is necessary even if the
 theorem holds: the theorem is an existence result, not a claim that the current
 surrogate/NSGA-III loop finds the covered point.
 
-## 2. HQQ/AWQ proxy boundary
+## 3. HQQ/AWQ proxy boundary
 
 Use the same configurations and measurement protocol for both methods.  Evaluate
 agreement at four resolutions:
@@ -77,7 +121,7 @@ Run this audit on at least Llama-3.1-8B and Qwen2.5-7B.  The current result is
 strong enough to motivate AWQ information in Stage 2, but not to claim universal
 failure of proxy-only joint search.
 
-## 3. PLS sample-efficiency ablation
+## 4. Surrogate sample complexity and PLS ablation
 
 The current PLS results are encouraging but several historical comparisons used
 different splits, heads, or metrics.  Use one fixed held-out test set and vary
@@ -92,8 +136,10 @@ Inputs:
 - self-PLS fitted only on the AWQ archive;
 - exact costs only (negative control).
 
-Keep the surrogate head fixed (`sqrty_ard_gp`, Matérn-3/2), and sweep AWQ training
-sizes `N={25,50,100,200,400}` over at least five splits.  Split by **weight
+Keep the surrogate head fixed (`sqrty_ard_gp`, Matérn-3/2), and sweep distinct
+AWQ-build training sizes
+`N={25,50,75,100,150,200,300,430,600}` over at least ten subsampling seeds.
+Split by **weight
 family**, not by individual architecture, so KV companions sharing one AWQ build
 cannot leak between train and test.
 
@@ -105,11 +151,23 @@ Report:
 - Pareto hypervolume obtained after one acquisition round;
 - fit and acquisition time.
 
-The paper's sample-efficiency claim should be based on the area under the
-learning curve or the number of AWQ builds required to reach a target regret,
-not on one correlation at `N=100`.
+Define the operational minimum sample size `N*` before looking at the curve.  A
+recommended criterion is the first of two consecutive sample sizes whose
+bootstrap 95% upper confidence bounds simultaneously satisfy: 90th-percentile
+memory-band top-1 regret, normalized by that band's robust loss range, at most
+2%; target-front recall at least 90%; and hypervolume gap at most 1%.  These are
+proposed operating thresholds, not constants implied by theory.  Replace them
+with deployment tolerances before inspecting results and report threshold
+sensitivity.  Fit a power-law-plus-floor curve for diagnosis, but do not use its
+point estimate as the final threshold.
 
-## 4. Multi-KV (`K`) ablation
+Also report the kernel effective rank, learned ARD length scales, and an empirical
+log-determinant approximation to GP information gain.  These diagnostics test
+whether PLS actually reduces the effective regression dimension.  The existing
+`N=100` and `N=430` results are two observations, not an estimate of a learning
+exponent or of a universal minimum sample size.
+
+## 5. Multi-KV (`K`) ablation
 
 Define `K` consistently as the **total** number of KV configurations evaluated
 per AWQ weight build.  The current code setting `--companion_kv 10` therefore
@@ -147,7 +205,7 @@ An adaptive policy is a plausible follow-up: allocate the next companion to the
 W family with the largest predicted reduction in worst-cell regret per KV-eval
 second.  It should be proposed only after the fixed-K curve is measured.
 
-## 5. Additional paper-strengthening experiments
+## 6. Additional paper-strengthening experiments
 
 ### Metric and downstream validity
 
@@ -182,7 +240,7 @@ paper should also optimize or at least filter by exact bytes and report real
 latency.  Mixed per-layer bit-widths can incur kernel dispatch and packing
 overheads that an average-bit Pareto plot misses.
 
-## 6. Claims to avoid until the evidence changes
+## 7. Claims to avoid until the evidence changes
 
 - "The joint loss is additive."  It is approximately additive in a useful band
   but has corner saturation; the coverage theorem does not need additivity.
@@ -194,3 +252,7 @@ overheads that an average-bit Pareto plot misses.
   use grouped validation and count distinct builds.
 - "PLS improves sample efficiency" based only on Stage-1 reconstruction R2 or
   one historical split.  Use the fixed-test learning-curve experiment above.
+- "The surrogate needs exactly N labels" without fixing the function class,
+  noise level, representation dimension, sampling policy, and success metric.
+  The theory supplies a conditional rate; the operational `N*` must come from
+  grouped held-out learning curves.
