@@ -184,19 +184,13 @@ GROUPS = {
     # seqlen is group-owned (it re-windows the corpus) ⇒ one group per length.
     #
     # Measured window counts (Llama-3.1 tokenizer, this box):
-    #   wikitext2 test  = 289,077 tok → 141 / 70 / 35 windows @ 2048/4096/8192
-    #   c4 (1100 val docs joined) = 517,864 tok → 252 / 126 / 63 windows
-    # 16384 is NOT offered: wikitext2 would leave 17 windows (too few to be a
-    # stable number). CAVEAT: both corpora are CONCATENATIONS of independent
+    #   wikitext2 test  = 289,077 tok → 141 / 35 windows @ 2048 / 8192
+    #   c4 (1100 val docs joined) = 517,864 tok → 252 / 63 windows
+    # The ladder is 2048 and 8192 only: 4096 was a pure midpoint (the two ends
+    # already give the trend) and 16384 would leave wikitext2 with 17 windows. CAVEAT: both corpora are CONCATENATIONS of independent
     # texts, so a longer window buys context LENGTH, not long-range DEPENDENCY
     # — an 8192-token c4 window spans ~16 unrelated web documents. Use 'E_ppl'
     # (gov_report, real single documents) for genuine long-context PPL.
-    'A_ppl_sl4096': dict(
-        datasets=['wikitext2', 'c4'], n_sample=128, seqlen=4096, min_seqlen=0,
-        loss_func='cross_entropy', use_key_token=False, last_tokens=None,
-        sides=('test',),
-        trunc_len=512, sliding_window=128, alpha=2, beta=-2,
-    ),
     'A_ppl_sl8192': dict(
         datasets=['wikitext2', 'c4'], n_sample=128, seqlen=8192, min_seqlen=0,
         loss_func='cross_entropy', use_key_token=False, last_tokens=None,
@@ -264,32 +258,16 @@ GROUPS = {
         sides=('test',),
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
-    'LB_ppl_sl4096': dict(
-        # Same corpora at a 4096 window (narrativeqa 200/200, qmsum 199/200
-        # documents clear it), so 4096 / 8192 brackets the deployment context
-        # range. 16384 is deliberately NOT offered: only narrativeqa could
-        # supply it (139 docs; qmsum 52, gov_report 100, wikitext2 17 windows),
-        # so it would be a single-corpus outlier, and eval_ppl materialises
-        # 16384 x vocab logits plus a .contiguous() copy (~8.4 GB).
-        datasets=['longbench:narrativeqa', 'longbench:qmsum'],
-        n_sample=LONG_DOC_N_SAMPLE, seqlen=4096, min_seqlen=4096,
-        loss_func='cross_entropy', use_key_token=False, last_tokens=None,
-        sides=('test',),
-        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
-    ),
-    'E_ppl_sl4096': dict(  # gov_report PPL at 4096 (837/973 docs clear it)
-        datasets=['gov_report'], n_sample=LONG_DOC_N_SAMPLE,
-        seqlen=4096, min_seqlen=4096,
-        loss_func='cross_entropy', use_key_token=False, last_tokens=None,
-        sides=('test',),
-        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
-    ),
     # 2048 tier — the long-document corpora at wikitext2/c4's OWN window. This
-    # is the control that separates the two effects that are otherwise
+    # is the CONTROL that separates the two effects that are otherwise
     # confounded: {wt2,c4}_ppl vs {gov,nqa,qmsum}_ppl_sl2048 differ only in
-    # DOMAIN (same 2048 window), while _sl2048 → _sl4096 → 8192 within one
-    # corpus differs only in LENGTH (same documents, longer window). Capacity
-    # is a non-issue: gov_report 960/973, narrativeqa 200/200, qmsum ~199/200.
+    # DOMAIN (same 2048 window), while _sl2048 → 8192 within one corpus differs
+    # only in LENGTH (same documents, longer window). Capacity is a non-issue:
+    # gov_report 960/973, narrativeqa 200/200, qmsum ~199/200 clear 2048.
+    # (16384 is not offered: only narrativeqa has the documents for it — 139
+    # vs qmsum 52 / gov_report 100 — so it would be a single-corpus outlier.
+    # It is executable if ever wanted: measured peak 24.6 GB with the FP16
+    # model, ~4.3 GB over the 8192 run.)
     'E_ppl_sl2048': dict(
         datasets=['gov_report'], n_sample=LONG_DOC_N_SAMPLE,
         seqlen=2048, min_seqlen=2048,
@@ -354,14 +332,6 @@ METRIC_TASKS = [
         # so Group A's last_tokens=None is fine).
         dict(metric='ppl',  loss_func='cross_entropy',
              stride=32, prefill_prompt=True, last_tokens=128)),
-    ('wt2_ppl_sl4096',    'A_ppl_sl4096', 'wikitext2',
-        # Standard full-window PPL at a LONGER context (70 windows). PPL-only
-        # group ⇒ no FP-teacher pass, no dense_logits.
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=0, prefill_prompt=False, last_tokens=None)),
-    ('c4_ppl_sl4096',     'A_ppl_sl4096', 'c4',
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=0, prefill_prompt=False, last_tokens=None)),
     ('wt2_ppl_sl8192',    'A_ppl_sl8192', 'wikitext2',
         # 35 windows — the longest wikitext2 PPL window this corpus supports
         # without the sample count collapsing (16384 would leave 17).
@@ -404,15 +374,6 @@ METRIC_TASKS = [
     ('qmsum_ppl_s512',    'LB_ppl_sl8192', 'longbench:qmsum',
         dict(metric='ppl',  loss_func='cross_entropy',
              stride=512, prefill_prompt=False, last_tokens=None)),
-    ('nqa_ppl_sl4096',    'LB_ppl_sl4096', 'longbench:narrativeqa',
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=0, prefill_prompt=False, last_tokens=None)),
-    ('qmsum_ppl_sl4096',  'LB_ppl_sl4096', 'longbench:qmsum',
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=0, prefill_prompt=False, last_tokens=None)),
-    ('gov_ppl_sl4096',    'E_ppl_sl4096', 'gov_report',
-        dict(metric='ppl',  loss_func='cross_entropy',
-             stride=0, prefill_prompt=False, last_tokens=None)),
     ('nqa_ppl_sl2048',    'LB_ppl_sl2048', 'longbench:narrativeqa',
         dict(metric='ppl',  loss_func='cross_entropy',
              stride=0, prefill_prompt=False, last_tokens=None)),
@@ -598,10 +559,12 @@ METRIC_TASKS = [
 
 # ── answer-phase PPL grid ───────────────────────────────────────────────────
 # Every PPL corpus × window also gets the two answer-phase protocols
-#     _pp512_s32 : prefill the prompt, then score the last 512 tokens in
-#                  32-token chunks
-#     _pp128_s32 : same with a 128-token answer window
-# i.e. the PPL twins of wt2_jsd_pp512_s32 / gov_jsd_pp128_s32. They cost ONE
+#     _pp128_s32 : prefill the prompt, then score the last 128 tokens in
+#                  32-token chunks — the PPL twin of gov_jsd_pp128_s32.
+# The 512-token window was dropped: two answer windows per corpus x window
+# doubled the grid for a difference that is one scoring span, and 128 is the
+# one that matches the JSD side actually in use. (The JSD family keeps its own
+# _pp512_s32 tasks — those are separate, pre-existing metrics.) They cost ONE
 # extra forward each — PPL stores no teacher logits, so no group and no FP pass
 # is added — and they run the real KV-cache path (prefill + stride), unlike the
 # single-shot base task which takes the quant_kv_output=True path.
@@ -610,21 +573,16 @@ METRIC_TASKS = [
 # `<base>_pp<window>_s32`, so e.g. nqa_ppl → nqa_ppl_pp512_s32 and
 # wt2_ppl_sl8192 → wt2_ppl_sl8192_pp128_s32; `resolve_tasks` prints the full
 # resolved list on an unknown name, and METRIC_KEYS holds them all.
-_PPL_ANSWER_WINDOWS = (512, 128)
+_PPL_ANSWER_WINDOWS = (128,)
 _PPL_BASES = [  # (base task name, group, dataset) — one per corpus × window
     ('wt2_ppl',          'A',              'wikitext2'),
     ('c4_ppl',           'A',              'c4'),
-    ('wt2_ppl_sl4096',   'A_ppl_sl4096',   'wikitext2'),
-    ('c4_ppl_sl4096',    'A_ppl_sl4096',   'c4'),
     ('wt2_ppl_sl8192',   'A_ppl_sl8192',   'wikitext2'),
     ('c4_ppl_sl8192',    'A_ppl_sl8192',   'c4'),
     ('gov_ppl_sl2048',   'E_ppl_sl2048',   'gov_report'),
-    ('gov_ppl_sl4096',   'E_ppl_sl4096',   'gov_report'),
     ('gov_ppl',          'E_ppl',          'gov_report'),
     ('nqa_ppl_sl2048',   'LB_ppl_sl2048',  'longbench:narrativeqa'),
     ('qmsum_ppl_sl2048', 'LB_ppl_sl2048',  'longbench:qmsum'),
-    ('nqa_ppl_sl4096',   'LB_ppl_sl4096',  'longbench:narrativeqa'),
-    ('qmsum_ppl_sl4096', 'LB_ppl_sl4096',  'longbench:qmsum'),
     ('nqa_ppl',          'LB_ppl_sl8192',  'longbench:narrativeqa'),
     ('qmsum_ppl',        'LB_ppl_sl8192',  'longbench:qmsum'),
 ]

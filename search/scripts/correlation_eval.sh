@@ -16,19 +16,20 @@
 #                  wt2_jsd_pp32_s8 gov_jsd_pp32_s8
 #                  needle_nll_pp32_s8 needle_jsd_pp32_s8
 #              Longer-context PPL (own groups, no FP-teacher pass):
-#                  wt2_ppl_sl4096 c4_ppl_sl4096 wt2_ppl_sl8192 c4_ppl_sl8192
+#                  wt2_ppl_sl8192 c4_ppl_sl8192
 #                  wt2_ppl_sl8192_s512   (8k windows through the real KV cache)
 #              Long-DOCUMENT PPL — 128 docs, selection seed pinned to 0, each
-#              corpus on the full 2048 / 4096 / 8192 ladder:
-#                  gov_ppl_sl2048 gov_ppl_sl4096 gov_ppl (+ _s512 _pp512_s128)
-#                  nqa_ppl_sl2048 nqa_ppl_sl4096 nqa_ppl (+ _s512)  narrativeqa
-#                  qmsum_ppl_sl2048 qmsum_ppl_sl4096 qmsum_ppl (+ _s512)
+#              corpus at 2048 (domain control) and 8192:
+#                  gov_ppl_sl2048 gov_ppl (+ _s512 _pp512_s128)
+#                  nqa_ppl_sl2048 nqa_ppl (+ _s512)              narrativeqa
+#                  qmsum_ppl_sl2048 qmsum_ppl (+ _s512)
 #              (LongBench grades qmsum → qmsum_ppl* are REPORTING metrics; the
 #               correlation is still measured, just listed in
 #               correlation_contamination.txt as not-a-prediction-claim)
-#              Answer-phase PPL: EVERY corpus above also has <base>_pp512_s32
-#              and <base>_pp128_s32 (e.g. nqa_ppl_pp128_s32,
-#              wt2_ppl_sl8192_pp512_s32) — prefill + 32-token-chunk scoring.
+#              Answer-phase PPL: EVERY corpus above also has <base>_pp128_s32
+#              (e.g. nqa_ppl_pp128_s32, wt2_ppl_sl8192_pp128_s32) — prefill +
+#              32-token-chunk scoring over the last 128 tokens. The full-window
+#              base task stays; the 512-token _s32 variant was dropped.
 #              Long-doc JSD at the 128-doc default: gov_jsd_pp128_s32_n128_sl8192
 #              COST per long-doc task = n_sample x seqlen forward tokens
 #              (0.26M @2048 … 1.05M @8192); an answer-phase variant costs the
