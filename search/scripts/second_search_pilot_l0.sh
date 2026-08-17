@@ -1,10 +1,13 @@
 # PILOT: A/B for --l0_repair (tests/space_reduction/joint_screen.py).
-# Usage: bash scripts/second_search_pilot_l0.sh <gpu> <seed> <l0_repair>
+# Usage: bash scripts/second_search_pilot_l0.sh <gpu> <seed> <l0_repair> [pool_escape]
+# The k=0/pe=0 arm is the shared BASELINE — reuse pilotL00_*_s<seed> instead of re-running it.
 # Config mirrors the screened joint HQQ run 2608050015 (st32/pp128, eps0, dk0,
 # ckv1-2d) but at PILOT length (DOE 500 + 12x50 = 1100 evals, ~1.5 h/arm).
 DEVICES=${1:-0}
 PILOT_SEED=${2:-0}
 L0_REPAIR=${3:-0}
+POOL_ESCAPE=${4:-0}
+AGREE_FRAC=${5:-0.95}   # 0.95 = deployed default; 1.01 = L2 freeze OFF
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
@@ -115,7 +118,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/metric_tag.sh"
 MTAG=$(metric_tag_from_knobs "${DATASET:-${DATASETS}}" "${LOSS_FUNC}" "${METRIC:-loss}" \
                              "${N_SAMPLE}" "${SEQLEN}" "${MIN_SEQLEN:-0}")
 
-SAVE=save/second_search/pilotL0${L0_REPAIR}_${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}${MTAG}_s${SEED}
+ARM_TAG=pilotL0${L0_REPAIR}; [ ${POOL_ESCAPE} -gt 0 ] && ARM_TAG=pilotPE${POOL_ESCAPE}
+[ "${AGREE_FRAC}" != "0.95" ] && ARM_TAG=pilotAF${AGREE_FRAC}
+SAVE=save/second_search/${ARM_TAG}_${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}${MTAG}_s${SEED}
 
 echo "SECOND-SEARCH -> ${SAVE}"
 
@@ -138,6 +143,8 @@ ARGS="--config ${CONFIG} \
 --save ${SAVE}"
 
 [ ${L0_REPAIR} -gt 0 ] && ARGS+=" --l0_repair ${L0_REPAIR}"
+[ ${POOL_ESCAPE} -gt 0 ] && ARGS+=" --pool_escape ${POOL_ESCAPE}"
+ARGS+=" --agree_frac ${AGREE_FRAC}"
 
 [ "${GRID_SEED}" == "True" ] && ARGS+=" --grid_seed"
 [ "${COMPANION_KV}" -gt 0 ] && ARGS+=" --companion_kv ${COMPANION_KV} --companion_method ${COMPANION_METHOD}"

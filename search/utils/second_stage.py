@@ -393,12 +393,13 @@ class KnowledgeMutation(Mutation):
     instead of the pool-global column (+0.4–0.6 bits/cell on front values, removes mode
     collapse; tests/p1p2_band_table.py). band_table=None → legacy global draw."""
     def __init__(self, w, xu, Wg, KVg, nw, segments, base=0.06, p_val=0.5, p_mod=0.15,
-                 band_table=None, comp=None, comp_obj=('wbits', 'eff_kvbits'), l0_repair=0):
+                 band_table=None, comp=None, comp_obj=('wbits', 'eff_kvbits'), l0_repair=0, pool_escape=0):
         super().__init__()
         self.w, self.xu, self.nw, self.base, self.p_val, self.p_mod = w, xu, nw, base, p_val, p_mod
         self.Wg, self.KVg, self.segments = Wg, KVg, segments
         self.bt, self.comp, self.comp_obj = band_table, comp, list(comp_obj)
         self.l0_repair = int(l0_repair)
+        self.pool_escape = int(pool_escape)
         self._L0_PASSES = 4          # fixed-point iterations for the band-shift feedback
 
     def _do(self, problem, X, **kw):
@@ -422,8 +423,71 @@ class KnowledgeMutation(Mutation):
                         X[i, g] = col[np.random.randint(len(col))]
                 else:                                                # local ±1 (direction-free)
                     X[i, g] = min(max(X[i, g] + (1 if np.random.random() < 0.5 else -1), 0), self.xu[g])
-        return self._repair_l0(X) if (self.l0_repair and self.bt is not None
-                                      and self.comp is not None) else X
+        if self.l0_repair and self.bt is not None and self.comp is not None:
+            X = self._repair_l0(X)
+        if self.pool_escape:
+            X = self._repair_pool(X)
+        return X
+
+    def _repair_pool(self, X):
+        """POOL-ANCHORED escape budget (`--pool_escape m`, OFF by default): a child may sit at
+        most m cell-flips from its NEAREST 1st-stage block, per axis half; the excess flips are
+        reverted to that block's values (least band-plausible first when a BandTable is
+        available, else arbitrary).
+
+        Why the nearest BLOCK and not the band staircase (`--l0_repair`): the staircase is one
+        mode-collapsed prototype per band (~44 anchors) while the pool is the full set of
+        measured-good blocks (588 W / 273 KV anchors), and the elite archs live near a BLOCK,
+        not near the average of their band. Measured on the joint HQQ archive, converged tail
+        (tests/space_reduction/pool_restriction_audit.py):
+          * distance to the nearest pool block is a QUALITY signal that survives convergence —
+            per-cell top-0.1% median 3, top-1% 4, top-5% 4, all 7; partial rho(d, jsd|wbits)
+            +0.281 (the staircase distance is +0.008 after convergence, i.e. uninformative);
+          * d_W<=8 keeps 56.5% of the evaluated mass, retains 94-100% of the per-cell champions
+            and ~90% of the top-1% elite, with per-budget-cell regret 0.0000, and improves
+            best-of-B by -0.0023+-0.0009 (B=10) / -0.0012+-0.0003 (B=50);
+          * at MATCHED champion retention the pool anchor dominates the staircase anchor
+            (d_W<=8 cuts 43.5% vs the staircase's dev_W<=24 cutting only 22.8%), and adding the
+            staircase constraint on top of the pool one buys nothing (-0.0021 vs -0.0023).
+          * forbidding the escape entirely (m=0, pure block products) is CATASTROPHIC: 0/16
+            champions retained, regret mean 0.0172 / max 0.1167, and budget cells go
+            unreachable. The pool is a scaffold to depart from, not a menu to pick from.
+        A/B VERDICT (4 seeds, m=8, same pilot, baseline = the l0_repair=0 arms): NULL. The knob
+        bit hard (W archs beyond 8 from the pool: 30% -> 2.8%) yet HV was a dead tie in 4/4
+        seeds, the 2-D budget-cell record was 0W/3L and the wbits marginal 3W/4L. The offline
+        screen predicted -0.0023 — the LARGEST predicted effect of any operator tried — and
+        delivered nothing. Together with l0_repair this is 2/2 failures of offline
+        density-payoff screening to transfer: a real search re-optimises and reaches equally
+        good archs by other routes, so the candidate SUPPORT is not the binding constraint
+        (the surrogate's ranking quality is). Keep OFF.
+
+        One pass suffices: reverting toward block j strictly reduces the distance to j, so the
+        distance to the nearest block is <= m afterwards (no fixed-point iteration needed)."""
+        Xi = np.clip(np.round(X), 0, self.xu).astype(int)
+        nv = len(self.xu)
+        for tag, P, sl in (('w', self.Wg, slice(0, self.nw)),
+                           ('kv', self.KVg, slice(self.nw, nv))):
+            A = Xi[:, sl]
+            d = (A[:, None, :] != P[None, :, :]).sum(2)          # (N, n_pool)
+            j = d.argmin(1)
+            over = np.where(d[np.arange(len(A)), j] > self.pool_escape)[0]
+            for i in over:
+                blk = P[j[i]]
+                diff = np.where(A[i] != blk)[0]
+                order = np.argsort(self._plausibility(diff, A[i], tag, i, Xi))
+                drop = diff[order[:len(diff) - self.pool_escape]]
+                X[i, sl.start + drop] = blk[drop]
+        return X
+
+    def _plausibility(self, diff, row, tag, i, Xi):
+        """band probability of the CURRENT value at each deviating cell (ties → arbitrary but
+        deterministic); without a BandTable every cell scores equally."""
+        if self.bt is None or self.comp is None:
+            return np.zeros(len(diff))
+        C = self.comp.batch(Xi[i:i + 1], self.comp_obj)[0]
+        if tag == 'w':
+            return self.bt.Pw[int(self.bt.band(C[0], 'w')), diff, row[diff]]
+        return self.bt.Pk[int(self.bt.band(C[1], 'kv')), diff, row[diff]]
 
     def _repair_l0(self, X):
         """L0-ball repair (`--l0_repair k`, OFF by default): no child may sit more than k cells
@@ -440,6 +504,11 @@ class KnowledgeMutation(Mutation):
         freezing (the `agree_frac` L2 family) is measurably WORSE than no reduction here, so
         this is deliberately an L0 budget on the NUMBER of deviations, not a freeze of
         particular cells.
+
+        A/B VERDICT (4 seeds x 2 arms, HQQ joint pilot, 2189 evals/arm): effect is REAL but
+        negligible — HV +0.000098 in 4/4 seeds (7x the seed spread) and wbits-marginal 14W/4L
+        (sign-test p=0.031, mean -0.00050 JSD), i.e. ~1/40 of the P1/P2 effect and comparable
+        to the worst-bin downside (+0.0017). Keep OFF; documented so it is not re-litigated.
 
         Reverting a cell moves the individual's comp, which can move it into a NEIGHBOURING
         band whose staircase differs — so the repair is iterated to a fixed point (few passes;

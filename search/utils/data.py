@@ -229,6 +229,37 @@ LONGBENCH_PPL_SUBSETS = ('narrativeqa', 'qmsum', 'gov_report', 'multifieldqa_en'
                          'qasper', 'multi_news', 'lcc', 'repobench-p')
 
 
+# Vendored LongBench rows: utils/longbench_data/<config>.jsonl — the files out
+# of THUDM/LongBench data.zip's data/, committed FLAT in the repo (a `data/`
+# subdir would be swallowed by search/.gitignore's `data/` rule, like
+# minilongbench_data/data already is) so offline containers read them through
+# the repo mount instead of a pre-baked HF datasets cache. Selection is
+# unchanged vs the hub path: the hub script materialises the SAME jsonl line by
+# line, and .shuffle(seed)'s permutation depends only on (seed, num_rows).
+LONGBENCH_LOCAL_DIR = os.path.join(os.path.dirname(__file__), 'longbench_data')
+
+
+def load_longbench_split(config, cache_dir=None):
+    """LongBench test rows, local-first.
+
+    The vendored jsonl when present, else the THUDM/LongBench hub script — the
+    hub fallback needs network or an already-prepared HF cache (script datasets
+    re-download data.zip on a cache miss even offline → OfflineModeIsEnabled;
+    the script API is gone entirely in datasets>=3.0), so vendor the file
+    rather than relying on it."""
+    local = os.path.join(LONGBENCH_LOCAL_DIR, f'{config}.jsonl')
+    if os.path.isfile(local):
+        return load_dataset('json', data_files=local, split='train')
+    try:
+        return load_dataset('THUDM/LongBench', config, split='test',
+                            cache_dir=cache_dir)
+    except Exception as e:
+        raise RuntimeError(
+            f"LongBench/{config}: no vendored file at {local} and the hub "
+            f"fallback failed ({e!r}). Run `python utils/fetch_offline_data.py "
+            f"--only longbench` once on a machine with internet.") from e
+
+
 def get_longbench_ppl(subset, seed, n_sample, tokenizer, batch_size=1, seqlen=2048,
                       min_seqlen=0, cache_dir=None):
     """LongBench `context` documents as a fixed-length PPL/loss corpus.
@@ -246,7 +277,7 @@ def get_longbench_ppl(subset, seed, n_sample, tokenizer, batch_size=1, seqlen=20
     if subset not in LONGBENCH_PPL_SUBSETS:
         raise ValueError(f"LongBench subset '{subset}' is not registered as a PPL "
                          f"corpus. Registered: {list(LONGBENCH_PPL_SUBSETS)}.")
-    data = load_dataset('THUDM/LongBench', subset, split='test', cache_dir=cache_dir)
+    data = load_longbench_split(subset, cache_dir=cache_dir)
     data = data.shuffle(seed=seed).flatten_indices()
 
     tokenizer.pad_token = tokenizer.eos_token
@@ -297,7 +328,12 @@ def get_minilongbench(tokenizer, cache_dir=None, require_answer=True, ignore_ind
     - require_answer=True: prompt + answer; labels use ignore_index on the prompt part so loss is only on answer tokens.
     No shuffle, batch_size=1, no padding, no seqlen/min_seqlen.
     """
-    root = snapshot_download(repo_id="linggm/MiniLongBench", repo_type="dataset", cache_dir=cache_dir)
+    # Local-first: utils/minilongbench_data holds the fetched data files
+    # (utils/minilongbench.py already reads it; populate via
+    # `python utils/fetch_offline_data.py --only minilongbench`); hub fallback.
+    root = os.path.join(os.path.dirname(__file__), "minilongbench_data")
+    if not os.path.isdir(os.path.join(root, "data")):
+        root = snapshot_download(repo_id="linggm/MiniLongBench", repo_type="dataset", cache_dir=cache_dir)
     data_dir = os.path.join(root, "data")
     files = sorted(glob.glob(os.path.join(data_dir, "*.jsonl")))
     if not files:

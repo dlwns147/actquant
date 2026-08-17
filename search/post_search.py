@@ -259,7 +259,8 @@ def run_benchmarks(args, model, model_id, arch=None, idx=None, n_archs=1):
                                save_path=lb_path,
                                longbench_config=args.longbench_config,
                                e=args.longbench_e, model_name=args.model_name,
-                               stamp=stamp)
+                               stamp=stamp,
+                               topk_logits=args.longbench_topk_logits)
         # Score the just-produced predictions in memory (still writes
         # result.json); avoids re-reading the dir, which could mix in stale
         # .jsonl files from a previous run.
@@ -314,7 +315,7 @@ def run_benchmarks(args, model, model_id, arch=None, idx=None, n_archs=1):
                    per_example_path=(args.ruler_per_example_path or
                                      default_per_example_path(ruler_path,
                                                               args.seed)),
-                   stamp=stamp, seed=args.seed,
+                   stamp=stamp, topk_logits=args.topk_logits, seed=args.seed,
                    use_chat_template=args.ruler_chat_template)
         print(f'RULER Time: {time() - t0:.2f}s')
 
@@ -996,6 +997,15 @@ def build_parser():
     p.add_argument('--ruler_gen_toks', type=int, default=None)
     p.add_argument('--ruler_batch_size', type=int, default=1)
     p.add_argument('--ruler_result_path', type=str, default='')
+    p.add_argument('--topk_logits', type=int, default=5,
+                   help='per generated RULER token, store the top-K candidates '
+                        '(+ chosen logprob, top1-top2 margin) in the per-example '
+                        'JSONL. 0 = off.')
+    p.add_argument('--longbench_topk_logits', type=int, default=5,
+                   help='top-K record for LongBench generations. ON here: a '
+                        'post_search run benchmarks one (or a few) final archs '
+                        'and MEASURED cost is 34.5 MB per pass — these are the '
+                        'generations you actually read. 0 = off.')
     p.add_argument('--ruler_per_example_path', type=str, default='',
                    help='JSONL path for sample-level RULER generations (default: '
                         '<ruler_result_path>_per_example_s<seed>.jsonl; always '

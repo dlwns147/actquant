@@ -164,6 +164,22 @@ RULER_YAML_PATH=utils/ruler_utils
 RULER_LENGTH="16384"
 RULER_SAMPLE=5
 RULER_BATCH_SIZE=1
+# Per generated RULER token, store the top-K next-token candidates (raw logits →
+# log-probs) + the chosen token's log-prob + the top1−top2 margin, so a wrong
+# answer can be read as "how wrong". 0 = off. MEASURED cost (niah_single_1
+# @4096): peak GPU memory unchanged (17.00GB both), no wall-clock penalty, and
+# 306 → 1338 bytes per row (~153 B per generated token; a 13-task × 50-sample
+# sweep adds ~0.7 MB). LongBench is NOT wired for this yet.
+RULER_TOPK_LOGITS=5
+# Same record for LongBench generations. OFF by default here because this
+# harness sweeps many IDX. MEASURED on a real prediction dir (2200 examples,
+# 225,455 generated tokens = 66.5% of the max_gen cap):
+#   multi_news 14.2MB | lcc 5.0 | repobench-p 5.0 | samsum 3.7 | qmsum 3.0
+#   trec 2.0 | triviaqa 1.0 | qasper 0.8   ->  34.5 MB per pass at k=5
+# i.e. ~6.9 GB over a 200-idx sweep, vs 0.7 MB for the whole RULER sweep.
+# Transient GPU add is max_gen x vocab x 2B = 131 MB at max_gen 512.
+# post_search.py defaults this ON (it benchmarks one final arch).
+LONGBENCH_TOPK_LOGITS=0
 # Compact tag for the result dir: "4096 8192" → "4096-8192".
 RULER_LEN_TAG=$(echo "${RULER_LENGTH}" | tr -s ' ' '-')
 RULER_RESULT_PATH=${SAVE}/ruler_${IDX}_len${RULER_LEN_TAG}_s${RULER_SAMPLE}
@@ -217,7 +233,8 @@ RUN_LONGBENCH_E=0
 #               (per seed — the seed decides which samples are generated)
 #   LongBench → <LONGBENCH_RESULT_PATH>/pred[_e]/<dataset>.jsonl
 # Each row carries the generation, the references, the per-example score, token
-# counts, input_sha256 AND provenance (run_id / arch_sha8 / idx) so a row can
+# counts, input_sha256, provenance (run_id / arch_sha8 / idx) and — for RULER —
+# the per-token top-K candidates (RULER_TOPK_LOGITS below), so a row can
 # never be misattributed even if files are merged later. The prompts themselves
 # are NOT stored: they are regenerable from (dataset, _id) / (seed, task,
 # sample_index) and the hash proves the regenerated prompt matches.
@@ -226,9 +243,9 @@ RUN_LONGBENCH_E=0
 # old directory to <parent>/archive/<ts>/ instead of interleaving files.
 
 # LongBench / LongBench-E params (always passed; only used if toggled on)
-ARGS+=" --longbench_config ${LONGBENCH_CONFIG} --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_e_result_path ${LONGBENCH_E_RESULT_PATH}"
+ARGS+=" --longbench_config ${LONGBENCH_CONFIG} --longbench_result_path ${LONGBENCH_RESULT_PATH} --longbench_e_result_path ${LONGBENCH_E_RESULT_PATH} --longbench_topk_logits ${LONGBENCH_TOPK_LOGITS}"
 # RULER params (always passed; only used if toggled on)
-ARGS+=" --ruler_task ${RULER_TASK} --ruler_yaml_path ${RULER_YAML_PATH} --ruler_length ${RULER_LENGTH} --ruler_sample ${RULER_SAMPLE} --ruler_batch_size ${RULER_BATCH_SIZE} --ruler_result_path ${RULER_RESULT_PATH}"
+ARGS+=" --ruler_task ${RULER_TASK} --ruler_yaml_path ${RULER_YAML_PATH} --ruler_length ${RULER_LENGTH} --ruler_sample ${RULER_SAMPLE} --ruler_batch_size ${RULER_BATCH_SIZE} --ruler_result_path ${RULER_RESULT_PATH} --topk_logits ${RULER_TOPK_LOGITS}"
 
 [ "${RUN_RULER}"        = "1" ] && ARGS+=" --ruler"
 [ "${RUN_LONGBENCH}"    = "1" ] && ARGS+=" --longbench"

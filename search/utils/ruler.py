@@ -11,7 +11,7 @@ from lm_eval.tasks import utils
 from .ruler_utils import niah_utils, vt_utils, cwe_utils, fwe_utils, qa_utils, common_utils
 from torch.utils.data import DataLoader
 
-from .func import set_seed
+from .func import set_seed, topk_records
 
 def prepare_generation_kwargs(task_config_map, task_name: str, yaml_path:str, gen_toks=None) -> tuple[dict, int]:
     """태스크별 generation_kwargs와 max_gen_toks를 준비"""
@@ -60,6 +60,7 @@ def eval_ruler(model,
                per_example_path='',
                stamp=None,
                append_scores=False,
+               topk_logits=5,
                use_chat_template=True):
     
     task_function = {
@@ -160,6 +161,12 @@ def eval_ruler(model,
 
         datasets[task] = dataset
 
+    _eos = getattr(model.generation_config, 'eos_token_id', None)
+    _eos_ids = set(_eos if isinstance(_eos, (list, tuple)) else
+                   ([_eos] if _eos is not None else []))
+    if tokenizer.eos_token_id is not None:
+        _eos_ids.add(tokenizer.eos_token_id)
+
     tot_scores = dict()
     per_example = []
     prompt_hashes = []      # every sample's input hash, dump or no dump
@@ -207,17 +214,25 @@ def eval_ruler(model,
 
             kwargs["max_length"] = context_enc.shape[1] + max_gen_toks
 
+            # output_logits (RAW, pre-processor) is what makes the per-example
+            # dump diagnostic: for every generated token we keep the top-k
+            # candidates the model weighed. Costs one (batch, vocab) tensor per
+            # step while generate runs (~33 MB at max_gen 128); .scores would be
+            # post-processor and this yaml carries temperature 0.0.
+            _tk = dict(return_dict_in_generate=True, output_logits=True) \
+                if topk_logits else {}
             with torch.inference_mode():
                 output = model.generate(
                     input_ids=context_enc,
                     attention_mask=attn_masks,
                     stopping_criteria=stopping_criteria,
                     use_cache=True,
-                    **kwargs
+                    **kwargs, **_tk
                 )
 
-            output = output[:, context_enc.shape[1]:]
-            output = tokenizer.batch_decode(output, skip_special_tokens=True)
+            step_logits = output.logits if topk_logits else None
+            new_ids = (output.sequences if topk_logits else output)[:, context_enc.shape[1]:]
+            output = tokenizer.batch_decode(new_ids, skip_special_tokens=True)
 
             for i, doc in enumerate(docs):
                 score = scorer(doc, [output[i]])[str(doc["max_length"])]
@@ -234,7 +249,7 @@ def eval_ruler(model,
                     # regenerates it exactly — eval_ruler re-seeds before
                     # dataset construction — and input_sha256 proves the
                     # regenerated prompt is the one the model saw.
-                    per_example.append({
+                    row = {
                         **(stamp or {}),
                         "task": task,
                         "sample_index": sample_index + i,
@@ -248,7 +263,12 @@ def eval_ruler(model,
                         "prediction": output[i],
                         "references": [str(x) for x in refs],
                         "score": float(score),
-                    })
+                    }
+                    if topk_logits:
+                        row["topk"] = topk_records(
+                            step_logits, new_ids[i], i, k=topk_logits,
+                            eos_ids=_eos_ids)
+                    per_example.append(row)
             sample_index += len(docs)
 
         if len(task_scores) > 0:

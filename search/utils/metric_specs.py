@@ -681,7 +681,7 @@ def needs_dense(eval_kwargs):
 
 def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto',
                       device_map='auto', store_device='cpu', batch_size=1,
-                      tasks=None):
+                      tasks=None, fail_soft=False):
     """ONE FP-teacher pass that builds every group's data side.
 
     dense_logits do NOT depend on the arch, so a single pass serves every group
@@ -698,8 +698,16 @@ def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto
     divergence group is built — which for a PPL-only request on a jsd group means
     a full-sequence dense set nobody reads (wikitext2 n128 @2048 = 67 GB).
 
+    `fail_soft` turns a per-group DATA-BUILD failure (a corpus that cannot be
+    loaded — missing file, offline hub, …) into a {'error', 'traceback'} payload
+    for that group instead of an exception, so one bad corpus cannot take down
+    every other group's metrics (a narrativeqa cache-miss once killed all 26
+    metrics of 400 correlation jobs). The FP-teacher pass and spec-consistency
+    errors stay hard either way.
+
     Returns {group: dict(train_loaders, test_loaders, dense_logits,
-                         key_token_list, spec)}.
+                         key_token_list, spec)}; with fail_soft, failed groups
+    map to dict(error=..., traceback=...) instead.
     """
     from utils.data import get_loader
     from utils.eval import get_logits, get_tokenizer
@@ -736,12 +744,22 @@ def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto
         if dense_ds and 'train' not in sides:
             raise SystemExit(f"[metric_specs] group '{g}': dense_logits are "
                              f"computed on the train side, but sides={sides}.")
-        out[g] = dict(train_loaders=_loaders(True) if 'train' in sides else {},
-                      test_loaders=_loaders(False) if 'test' in sides else {},
-                      dense_logits={d: None for d in dense_ds},
-                      key_token_list={d: None for d in spec['datasets']}
-                      if spec['use_key_token'] else {},
-                      spec=spec)
+        try:
+            out[g] = dict(train_loaders=_loaders(True) if 'train' in sides else {},
+                          test_loaders=_loaders(False) if 'test' in sides else {},
+                          dense_logits={d: None for d in dense_ds},
+                          key_token_list={d: None for d in spec['datasets']}
+                          if spec['use_key_token'] else {},
+                          spec=spec)
+        except Exception as e:                                    # noqa: BLE001
+            if not fail_soft:
+                raise
+            import traceback
+            out[g] = dict(error=repr(e), traceback=traceback.format_exc())
+            print(f"[metric_specs] group '{g}' data build FAILED "
+                  f"(datasets={spec['datasets']}): {e!r} — its metrics will be "
+                  f"recorded as errors; the other groups continue.")
+            continue
         if dense_ds or spec['use_key_token']:
             pending.append((g, spec))
 

@@ -598,7 +598,8 @@ class SecondSearch:
         mut = KnowledgeMutation(self.w, self.xu, self.Wg, self.KVg, self.nw, self.segments,
                                 p_val=self.args.mut_p_val, p_mod=self.args.mut_p_mod,
                                 band_table=self.band_table, comp=self._comp, comp_obj=self.comp_obj,
-                                l0_repair=self.args.l0_repair)
+                                l0_repair=self.args.l0_repair,
+                                pool_escape=self.args.pool_escape)
         algo = NSGA3(pop_size=self.ga_pop_size, ref_dirs=self.ref_dirs,
                      sampling=FrontierProductSampling(self.Wg, self.KVg),
                      crossover=AxisBlockCrossover(self.nw, self.n_var),
@@ -1059,7 +1060,18 @@ def build_parser():
                         'regret max 0.0003 JSD, best-of-B -0.0009..-0.0022 on 14-16/16 budget '
                         'cells). Unlike --agree_frac this budgets the NUMBER of deviations '
                         'rather than freezing particular cells, which measured WORSE.')
-    p.add_argument('--agree_frac', type=float, default=0.95, help='L2 freeze: cells where ≥ this fraction of 1st-stage blocks agree are frozen at consensus (mutation skips them); >1.0 disables. 0.95 is loss-free per tests/joint_reabsorption.py')
+    p.add_argument('--pool_escape', type=int, default=0,
+                   help='Pool-anchored escape budget (0 = off): a child may sit at most this '
+                        'many cell-flips from its NEAREST 1st-stage block, per axis half; the '
+                        'excess is reverted to that block. Screened value 8 '
+                        '(tests/space_reduction/pool_restriction_audit.py: cuts 43.5% of the '
+                        'evaluated mass at regret 0.0000, keeps 94-100% of per-cell champions, '
+                        'best-of-B -0.0012..-0.0023). Anchors on the 588/273 measured blocks '
+                        'rather than the ~44 band staircases (--l0_repair), which measured '
+                        'strictly better at matched champion retention. m=0 would be pure '
+                        'block products and is CATASTROPHIC — the pool is a scaffold, not a menu.')
+    p.add_argument('--agree_frac', type=float, default=0.95,
+                   help='L2 freeze: cells where >= this fraction of the 1st-stage BLOCK POOL agree are excluded from mutation (and from the surrogate active set); the value itself is whatever block the individual inherited, NOT forced to the consensus. >1.0 disables. MEASURED (2026-08-14): operationally NEUTRAL — 0.95 vs OFF over 4 paired seeds is an HV tie, budget-cell record 1W/3L, marginals mixed, all |Δ| <= 1e-4 on a harness that resolved P1/P2 at 4.2e-3. The 0.95 itself is underived (it shipped with f7c4813 while its cited ablation ran at 0.90 on a div_k=200 pool freezing 14 cells; today div_k=0 freezes 55). Offline it looks risky (42.7% of per-budget-cell elites use a non-modal option at a frozen cell vs 0.0% at tau=1.0 — tests/space_reduction/freeze_threshold.py) but that exposure does not show up in the A/B, so leave it alone rather than re-tune it.')
     # per-iter down-select = subset selector over union(archive front, picks): std-of-gaps GA,
     # hole-filling, keeps edge candidates (baseline_search 2607100451/0638 post-mortem).
     p.add_argument('--subset_pop_size', type=int, default=100, help='down-select subset-GA population size')
