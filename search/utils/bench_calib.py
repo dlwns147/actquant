@@ -9,9 +9,12 @@ Design decisions (each backed by a measured comparison; see the 2608 audit):
     is taken from the calibration archs, so nothing here is tuned by hand).
     Unseen option values in a scored arch encode as all-zero for that cell
     (prediction-neutral) and are counted + warned about.
-  * front  = PLS-8 supervised on the BENCHMARK target (per target). Supervising
-    on sqrt-JSD (the search's plstyp) was measurably worse: those latents
-    inherit exactly the proxy blindness this module exists to break.
+  * front  = PLS-8 supervised on the chosen TARGET (per target). Targets are
+    'ruler', 'longbench', or ANY correlation.csv column (loss/proxy columns —
+    jsd/ppl/nll/loss in the name — are sign-flipped to higher-is-better).
+    Supervising on the search objective itself (sqrt-JSD plstyp) was measurably
+    worse for benchmark targets: those latents inherit exactly the proxy
+    blindness this module exists to break.
   * head   = predictor.factory 'rbf' (tps) or 'ard_gp' on the 8 latents.
     Raw targets, no sqrty/logy/logity transform. rbf is an interpolant with
     no noise term: fine on the spread-out calibration design, but prefer
@@ -25,14 +28,70 @@ import json
 import numpy as np
 
 
-TARGET_COLS = {
-    'ruler': None,          # mean of ruler__<task> columns (computed in fit)
-    'longbench': 'longbench_e__avg',
-}
-
 _W_LINEARS = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",
               "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj",
               "mlp.down_proj")
+
+# column-name fragments that mean "lower is better" → target sign-flipped so
+# that scores() is ALWAYS higher-is-better regardless of target kind.
+_LOWER_BETTER = ('jsd', 'ppl', 'nll', 'loss')
+
+
+def _target_vector(rows, tgt):
+    """(y, note) with y HIGHER-IS-BETTER for a named target or any
+    correlation.csv column (e.g. 'gov_jsd_pp128_s32', 'wt2_ppl')."""
+    if tgt == 'ruler':
+        cols = [c for c in rows[0] if c.startswith('ruler__')
+                and c != 'ruler__avg']
+        y = np.clip(np.array([[float(r[c]) for c in cols] for r in rows]),
+                    0, 1).mean(1)
+        return y, ''
+    if tgt == 'longbench':
+        return np.array([float(r['longbench_e__avg']) for r in rows]), ''
+    if tgt not in rows[0]:
+        raise SystemExit(
+            f"[bench-calib] target '{tgt}' is neither ruler/longbench nor a "
+            f"column of correlation.csv")
+
+    def f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return np.nan
+    y = np.array([f(r[tgt]) for r in rows])
+    if any(k in tgt for k in _LOWER_BETTER):
+        return -y, f"lower-is-better column → sign-flipped (top pick = lowest {tgt})"
+    return y, "assumed higher-is-better (no jsd/ppl/nll/loss in the name)"
+
+
+def check_loss_protocol(loss_col, protocol):
+    """The measured loss fed at scoring time must mean the same thing as the
+    calibration column: compare the archive's stored protocol against the
+    metric registry spec of `loss_col`. Mismatch is a hard error; a loss_col
+    unknown to the registry only warns (nothing to compare against)."""
+    if not protocol:
+        print(f"[bench-calib] archive stats carry no protocol — cannot verify "
+              f"loss_col '{loss_col}' consistency")
+        return
+    try:
+        from utils.metric_specs import resolve_tasks, groups_for
+        tasks = resolve_tasks([loss_col])
+    except Exception:
+        print(f"[bench-calib] loss_col '{loss_col}' not in the metric registry "
+              f"— protocol check skipped")
+        return
+    key, grp, ds, kw = tasks[0]
+    spec = dict(groups_for(tasks))[grp]
+    expect = dict(dataset=ds, n_sample=spec['n_sample'], seqlen=spec['seqlen'],
+                  loss_func=kw['loss_func'], stride=kw['stride'],
+                  prefill_prompt=kw['prefill_prompt'],
+                  last_tokens=kw['last_tokens'])
+    mismatch = {k: (protocol.get(k), v) for k, v in expect.items()
+                if k in protocol and protocol.get(k) != v}
+    if mismatch:
+        raise SystemExit(
+            f"[bench-calib] --bench_calib_loss_col '{loss_col}' does not match "
+            f"the archive's loss protocol (archive vs {loss_col}): {mismatch}")
 
 
 def _collect_vocab(archs):
@@ -72,7 +131,7 @@ class BenchCalib:
     """Per-target (PLS-8 -> factory predictor) rankers over one-hot genomes."""
 
     def __init__(self, calib_dir, targets=('ruler', 'longbench'),
-                 predictor='rbf', model_name=''):
+                 predictor='rbf', model_name='', loss_col=''):
         import csv as _csv
         if model_name and model_name not in os.path.abspath(calib_dir):
             raise SystemExit(
@@ -90,39 +149,56 @@ class BenchCalib:
         archs = [json.loads(r['arch_json']) for r in arows]
         self.vocab = _collect_vocab(archs)
         X = np.stack([_onehot(a, self.vocab) for a in archs])
-        ru_cols = [c for c in rows[0] if c.startswith('ruler__')
-                   and c != 'ruler__avg']
-        ys = {}
-        ys['ruler'] = np.clip(np.array(
-            [[float(r[c]) for c in ru_cols] for r in rows]), 0, 1).mean(1)
-        ys['longbench'] = np.array([float(r[TARGET_COLS['longbench']])
-                                    for r in rows])
-        ok = np.all(np.isfinite(np.column_stack(list(ys.values()))), axis=1)
+        ys = {tgt: _target_vector(rows, tgt) for tgt in targets}
+        # optional measured-loss covariate: benchmark ≈ g(loss) + arch effects.
+        # The caller must then pass the archive's measured loss to scores();
+        # it MUST be the same protocol as this column (check_loss_protocol).
+        self.loss_col = loss_col
+        loss_vec = None
+        if loss_col:
+            if loss_col not in rows[0]:
+                raise SystemExit(f"[bench-calib] loss_col '{loss_col}' is not "
+                                 f"a correlation.csv column")
+            loss_vec = np.array([float(r[loss_col]) for r in rows])
+        cols = [y for y, _ in ys.values()]
+        if loss_vec is not None:
+            cols.append(loss_vec)
+        ok = np.all(np.isfinite(np.column_stack(cols)), axis=1)
         if ok.sum() < 100:
             raise SystemExit(f"[bench-calib] only {int(ok.sum())} complete "
-                             f"benchmark rows in {calib_dir}; need >= 100")
+                             f"target rows in {calib_dir}; need >= 100")
         self.models = {}
-        for tgt in targets:
-            self.models[tgt] = self._fit(X[ok], ys[tgt][ok], predictor)
+        for tgt, (y, note) in ys.items():
+            if note:
+                print(f"[bench-calib] target '{tgt}': {note}")
+            self.models[tgt] = self._fit(
+                X[ok], y[ok], predictor,
+                loss=loss_vec[ok] if loss_vec is not None else None)
         self.n_labels = int(ok.sum())
         self.predictor = predictor
 
     @staticmethod
-    def _fit(X, y, predictor):
+    def _fit(X, y, predictor, loss=None):
         from sklearn.cross_decomposition import PLSRegression
         from predictor.factory import get_predictor
         pls = PLSRegression(n_components=8).fit(X, y)
         L = pls.transform(X)
+        if loss is not None:
+            # loss joins AFTER the PLS front so it is not diluted among the
+            # 1568 one-hot columns; it enters the predictor head directly.
+            L = np.hstack([L, np.asarray(loss, float)[:, None]])
         mu, sd = L.mean(0), L.std(0) + 1e-12
         Z = (L - mu) / sd
         kw = (dict(kernel='tps', lb=Z.min(0), ub=Z.max(0) + 1e-9)
               if predictor == 'rbf' else
               dict(ard_kernel='matern32', gp_n_restarts=3))
         head = get_predictor(predictor, Z, y, device='cpu', **kw)
-        return dict(pls=pls, mu=mu, sd=sd, head=head)
+        return dict(pls=pls, mu=mu, sd=sd, head=head, use_loss=loss is not None)
 
-    def scores(self, archs, target):
-        """RANK-ONLY predicted benchmark scores (higher = better)."""
+    def scores(self, archs, target, loss=None):
+        """RANK-ONLY predicted benchmark scores (higher = better). When the
+        model was fit with loss_col, `loss` = measured loss of `archs` (same
+        protocol as loss_col) is REQUIRED."""
         miss = []
         X = np.stack([_onehot(a, self.vocab, miss) for a in archs])
         if miss:
@@ -131,5 +207,11 @@ class BenchCalib:
                   f"calibration (prediction-neutral): {uniq[:6]}"
                   + (' …' if len(uniq) > 6 else ''))
         m = self.models[target]
-        Z = (m['pls'].transform(X) - m['mu']) / m['sd']
+        L = m['pls'].transform(X)
+        if m['use_loss']:
+            if loss is None:
+                raise SystemExit("[bench-calib] model was fit with loss_col "
+                                 "but scores() got no measured loss")
+            L = np.hstack([L, np.asarray(loss, float)[:, None]])
+        Z = (L - m['mu']) / m['sd']
         return np.asarray(m['head'].predict(Z)).reshape(-1)

@@ -209,8 +209,15 @@ SECOND_EXPR=save/second_search/2608090529_Llama-3.1-8B-Instruct_joint_awq_kivi_t
 # 필요한 지점 — N=2 로 두 pick 을 다 벤치마크해 실측으로 확정 권장).
 # 점수는 RANK-ONLY (절대값 캘리브레이션 안 됨). 비우면 기존 선택 그대로.
 BENCH_CALIB_DIR=save/correlation/2607301912_Llama-3.1-8B-Instruct_awq_kivi_think_w234k234v234_g128r128_sk8_t16384_n200_s0_qs_metric_w01599_metric_eff_kv01599_r
-BENCH_CALIB_TARGET=both      # ruler | longbench | both
+BENCH_CALIB_TARGET=both      # ruler | longbench | both | correlation.csv 열 이름
+                             # (예: gov_jsd_pp128_s32 — jsd/ppl/nll/loss 류는
+                             #  자동 부호반전되어 "낮을수록 좋음"으로 랭킹)
 BENCH_CALIB_PREDICTOR=rbf    # rbf(tps, 빠름) | ard_gp(라벨을 적응 수집하게 되면 이쪽)
+# 캘리브 200개의 "측정 loss"를 모델 입력으로 명시적으로 넣는 옵션(예:
+# wt2_jsd_pp128_s32). 채점 시 아카이브의 측정 loss가 그대로 들어가며, 캘리브
+# 열과 아카이브 loss 프로토콜 일치를 레지스트리로 검사한다. 실측 효과는 중립
+# (동률 안에선 loss가 상수) — 기본 비활성.
+BENCH_CALIB_LOSS_COL=
 BENCH_GUARD_ABS=0.001
 BENCH_GUARD_REL=0.05
 
@@ -350,6 +357,7 @@ if [ -n "${SECOND_EXPR}" ]; then
     ARGS+=" --second_expr ${SECOND_EXPR}"
     if [ -n "${BENCH_CALIB_DIR}" ]; then
         ARGS+=" --bench_calib_dir ${BENCH_CALIB_DIR} --bench_calib_target ${BENCH_CALIB_TARGET} --bench_calib_predictor ${BENCH_CALIB_PREDICTOR} --bench_guard_abs ${BENCH_GUARD_ABS} --bench_guard_rel ${BENCH_GUARD_REL}"
+        [ -n "${BENCH_CALIB_LOSS_COL}" ] && ARGS+=" --bench_calib_loss_col ${BENCH_CALIB_LOSS_COL}"
     fi
 else
     [ -n "${W_EXPR}" ]      && ARGS+=" --w_expr ${W_EXPR}"

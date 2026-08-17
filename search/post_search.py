@@ -416,18 +416,26 @@ def select_joint(args, ctx):
     # disagreement means a single top-1 is a deployment decision, so it
     # abstains to the measured best (and prints both candidates).
     if args.bench_calib_dir:
-        from utils.bench_calib import BenchCalib
+        from utils.bench_calib import BenchCalib, check_loss_protocol
         guard = max(args.bench_guard_abs,
                     args.bench_guard_rel * float(loss[idx[0]]))
         ties = idx[loss[idx] <= loss[idx[0]] + guard]
         if len(ties) > 1:
+            if args.bench_calib_loss_col:
+                # the loss fed to the model at scoring time is the ARCHIVE's
+                # measured loss — it must mean the same thing as the calib column
+                check_loss_protocol(args.bench_calib_loss_col,
+                                    sf.get('protocol'))
             tgts = (('ruler', 'longbench') if args.bench_calib_target == 'both'
                     else (args.bench_calib_target,))
             bc = BenchCalib(args.bench_calib_dir, targets=tgts,
                             predictor=args.bench_calib_predictor,
-                            model_name=args.model_name)
+                            model_name=args.model_name,
+                            loss_col=args.bench_calib_loss_col)
             tie_archs = [archs[j] for j in ties]
-            wins = {t: int(ties[np.argmax(bc.scores(tie_archs, t))])
+            tie_loss = loss[ties] if args.bench_calib_loss_col else None
+            wins = {t: int(ties[np.argmax(bc.scores(tie_archs, t,
+                                                    loss=tie_loss))])
                     for t in tgts}
             print(f"[bench-calib] {bc.n_labels} labels, predictor="
                   f"{bc.predictor}, guard={guard:.4g} → {len(ties)} tie(s); "
@@ -982,11 +990,21 @@ def build_parser():
                     help='correlation.py campaign dir (correlation.csv + '
                          'archs.csv with RULER/LongBench-E labels). Empty '
                          '(default) keeps pure measured-loss ranking.')
-    bc.add_argument('--bench_calib_target',
-                    choices=['ruler', 'longbench', 'both'], default='both',
-                    help="which benchmark ranker breaks ties. 'both' switches "
-                         "only when the RULER and LongBench rankers agree "
-                         "(disagreement → abstain to measured-best).")
+    bc.add_argument('--bench_calib_target', default='both',
+                    help="tie-break target: 'ruler' | 'longbench' | 'both' "
+                         "(= RULER+LongBench consensus; disagreement → abstain "
+                         "to measured-best) | any correlation.csv column, e.g. "
+                         "gov_jsd_pp128_s32 or wt2_ppl. Columns whose name "
+                         "contains jsd/ppl/nll/loss are auto sign-flipped "
+                         "(lower is better).")
+    bc.add_argument('--bench_calib_loss_col', type=str, default='',
+                    help="correlation.csv loss column (e.g. wt2_jsd_pp128_s32) "
+                         "to add as an EXPLICIT model input: benchmark ≈ "
+                         "g(measured loss) + arch effects. At scoring time the "
+                         "archive's measured loss is fed in, so the column must "
+                         "match the archive's loss protocol (checked against "
+                         "the metric registry). Measured effect on our harness: "
+                         "neutral (ties share ~one loss value); default off.")
     bc.add_argument('--bench_calib_predictor', choices=['rbf', 'ard_gp'],
                     default='rbf',
                     help="predictor head on the PLS-8 latents (raw targets, no "
