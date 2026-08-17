@@ -408,13 +408,57 @@ def select_joint(args, ctx):
     feas &= np.isfinite(loss)
     idx = np.where(feas)[0]
     idx = idx[np.argsort(loss[idx], kind='stable')]      # measured-best first
+    sel_mode = f'joint-stats measured-best'
+    # ── benchmark-calibrated tie-break (utils/bench_calib.py) ──
+    # Re-ranks ONLY measured-loss near-ties (hybrid guard) by a benchmark
+    # ranker trained on --bench_calib_dir. target='both' switches only when
+    # the RULER and LongBench rankers agree on the same tie member; a
+    # disagreement means a single top-1 is a deployment decision, so it
+    # abstains to the measured best (and prints both candidates).
+    if args.bench_calib_dir:
+        from utils.bench_calib import BenchCalib
+        guard = max(args.bench_guard_abs,
+                    args.bench_guard_rel * float(loss[idx[0]]))
+        ties = idx[loss[idx] <= loss[idx[0]] + guard]
+        if len(ties) > 1:
+            tgts = (('ruler', 'longbench') if args.bench_calib_target == 'both'
+                    else (args.bench_calib_target,))
+            bc = BenchCalib(args.bench_calib_dir, targets=tgts,
+                            predictor=args.bench_calib_predictor,
+                            model_name=args.model_name)
+            tie_archs = [archs[j] for j in ties]
+            wins = {t: int(ties[np.argmax(bc.scores(tie_archs, t))])
+                    for t in tgts}
+            print(f"[bench-calib] {bc.n_labels} labels, predictor="
+                  f"{bc.predictor}, guard={guard:.4g} → {len(ties)} tie(s); "
+                  f"per-target pick: "
+                  + ', '.join(f'{t}=arch{w} (loss {loss[w]:.5f})'
+                              for t, w in wins.items())
+                  + '  [rank-only scores]')
+            uniq = set(wins.values())
+            if len(uniq) == 1:
+                win = uniq.pop()
+                if win != int(idx[0]):
+                    idx = np.concatenate(([win], idx[idx != win]))
+                    sel_mode = (f'bench-calib[{args.bench_calib_target}] '
+                                f'tie-break')
+                else:
+                    sel_mode = 'bench-calib abstain (agrees with measured)'
+            else:
+                sel_mode = 'bench-calib abstain (target conflict)'
+                print('[bench-calib] RULER/LongBench rankers disagree within '
+                      'the tie set → keeping measured-best. Use -n 2 (or a '
+                      'single --bench_calib_target) to benchmark both.')
+        else:
+            print(f'[bench-calib] guard={guard:.4g} leaves a single contender '
+                  f'→ measured-best kept')
     n_keep = max(1, int(args.n))
-    # the stored loss already IS the measurement → take the measured-best -n.
+    # the stored loss already IS the measurement → take the (re-ranked) best -n.
     sel = idx[:n_keep]
     ps = [archs[j] for j in sel]
     pf = loss[sel].reshape(-1, 1)
     I = list(range(len(sel)))
-    sel_mode = f'joint-stats measured-best-{len(sel)}'
+    sel_mode = f'{sel_mode}-{len(sel)}'
     for i, o in enumerate(args.comp_obj):
         print(f"[post_search] {o}: in-box [{args.comp_obj_min[i]:.4g},"
               f"{args.comp_obj_max[i]:.4g}] → best arch {int(sel[0])} "
@@ -932,6 +976,28 @@ def build_parser():
     p.add_argument('--second_include_candidates', action='store_true',
                    help="(with --second_expr) also include the stats' "
                         "'candidates' list, not just 'archive'.")
+    bc = p.add_argument_group(
+        'benchmark-calibrated tie-break (joint second_expr path only)')
+    bc.add_argument('--bench_calib_dir', type=str, default='',
+                    help='correlation.py campaign dir (correlation.csv + '
+                         'archs.csv with RULER/LongBench-E labels). Empty '
+                         '(default) keeps pure measured-loss ranking.')
+    bc.add_argument('--bench_calib_target',
+                    choices=['ruler', 'longbench', 'both'], default='both',
+                    help="which benchmark ranker breaks ties. 'both' switches "
+                         "only when the RULER and LongBench rankers agree "
+                         "(disagreement → abstain to measured-best).")
+    bc.add_argument('--bench_calib_predictor', choices=['rbf', 'ard_gp'],
+                    default='rbf',
+                    help="predictor head on the PLS-8 latents (raw targets, no "
+                         "transform). rbf=tps interpolant (fast); prefer "
+                         "ard_gp if calibration labels are ever added "
+                         "adaptively/clustered.")
+    bc.add_argument('--bench_guard_abs', type=float, default=0.001,
+                    help='tie guard absolute floor on measured loss')
+    bc.add_argument('--bench_guard_rel', type=float, default=0.05,
+                    help='tie guard relative width; effective guard = '
+                         'max(abs, rel * best loss)')
     p.add_argument('--sample_path', type=str, default='',
                    help='results.csv from sample_surrogate.py (surrogate '
                         'training data). If omitted, additive metric is used.')

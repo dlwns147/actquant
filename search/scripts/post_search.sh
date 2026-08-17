@@ -117,6 +117,8 @@ PREFER="metric#0.0"
 # 선택은 post_search.py::select_joint 이 아카이브에 저장된 loss(=second_search
 # 측정치)를 예산 박스 안에서 정렬해 top-N을 고르는 방식이다. METRIC_TASKS 는
 # 선택 이후에 재는 REPORTING 지표이지 선택 기준이 아니다.
+# BENCH_CALIB_DIR(아래)이 있으면 loss "동률"에 한해 벤치 랭커가 top-1 을
+# 재정렬할 수 있다 — 동률 밖 순위는 절대 바뀌지 않는다.
 # (top-k verify 노브 SELECT_MEASURED_BEST/VERIFY_TOPK 는 해당 기계가 코드에서
 #  삭제되면서 아무 데도 안 쓰이는 죽은 값이 되어 제거했다.)
 # ⚠️ N>1 이면 arch 마다 벤치마크 산출물 경로에 _arch<idx> 접미가 붙는다
@@ -198,7 +200,21 @@ BETA=-2
 # ── 2nd-stage JOINT search (second_search.py) ──
 SECOND_EXPR=save/second_search/2608090529_Llama-3.1-8B-Instruct_joint_awq_kivi_think_sqrty_ard_gpplstypmatern32_doe25_it15n5p200_subset-st-ckv402d_eps0.05_dk0_st32_pp128_sk8_mwt2j_n128q2048_s0/iter_15.stats
 
-for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR SAMPLE_PATH SECOND_EXPR; do
+# ── benchmark-보정 tie-break (second_expr 경로 전용; utils/bench_calib.py) ──
+# 예산 박스 안에서 측정 loss 가 hybrid guard = max(ABS, REL×best) 이내인
+# "동률"들만, 벤치 캠페인(correlation.csv+archs.csv)으로 학습한 랭커
+# (one-hot 게놈 → benchmark-감독 PLS-8 → rbf/ard_gp, 무변환)로 재정렬한다.
+# 동률이 아니면 개입하지 않는다. TARGET=both 는 RULER/LongBench 랭커가 같은
+# arch 에 합의할 때만 교체, 불일치 시 측정-best 유지(그 박스는 타깃 선언이
+# 필요한 지점 — N=2 로 두 pick 을 다 벤치마크해 실측으로 확정 권장).
+# 점수는 RANK-ONLY (절대값 캘리브레이션 안 됨). 비우면 기존 선택 그대로.
+BENCH_CALIB_DIR=save/correlation/2607301912_Llama-3.1-8B-Instruct_awq_kivi_think_w234k234v234_g128r128_sk8_t16384_n200_s0_qs_metric_w01599_metric_eff_kv01599_r
+BENCH_CALIB_TARGET=both      # ruler | longbench | both
+BENCH_CALIB_PREDICTOR=rbf    # rbf(tps, 빠름) | ard_gp(라벨을 적응 수집하게 되면 이쪽)
+BENCH_GUARD_ABS=0.001
+BENCH_GUARD_REL=0.05
+
+for VAR_NAME in W_EXPR KV_EXPR KVDIM_EXPR SAMPLE_PATH SECOND_EXPR BENCH_CALIB_DIR; do
     VAR_VALUE="${!VAR_NAME}"
     if [ -n "${VAR_VALUE}" ] && [[ "${VAR_VALUE}" != *"${MODEL_NAME}"* ]]; then
         echo "ERROR: ${VAR_NAME} does not contain MODEL_NAME (${MODEL_NAME}): ${VAR_VALUE}"
@@ -332,6 +348,9 @@ if [ -n "${SECOND_EXPR}" ]; then
     # joint path: archive already holds assembled joint archs with measured JSD,
     # so the per-axis expr archives + surrogate are skipped entirely.
     ARGS+=" --second_expr ${SECOND_EXPR}"
+    if [ -n "${BENCH_CALIB_DIR}" ]; then
+        ARGS+=" --bench_calib_dir ${BENCH_CALIB_DIR} --bench_calib_target ${BENCH_CALIB_TARGET} --bench_calib_predictor ${BENCH_CALIB_PREDICTOR} --bench_guard_abs ${BENCH_GUARD_ABS} --bench_guard_rel ${BENCH_GUARD_REL}"
+    fi
 else
     [ -n "${W_EXPR}" ]      && ARGS+=" --w_expr ${W_EXPR}"
     [ -n "${KV_EXPR}" ]     && ARGS+=" --kv_expr ${KV_EXPR}"
