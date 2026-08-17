@@ -147,3 +147,11 @@ fig/
 
 llm-awq*/awq_cache
 scripts/post_search_woo_llama_whether_owq.sh
+out/
+# Vendored dataset payloads: NOT in git — populated in place by running
+# `python utils/fetch_offline_data.py` on a machine with internet (the repo
+# checkout is what the offline containers mount). minilongbench_data/data is
+# already covered by the data/ rule above.
+utils/longbench_data/*.jsonl
+utils/ruler_utils/paul_graham_essays.jsonl
+utils/ruler_utils/nltk_data/

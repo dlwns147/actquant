@@ -190,6 +190,17 @@ of `utils/eval.LazyGpuList`. New code just uses `store_device`.
 of every sample, not just the aggregate: `utils/ruler.py` writes
 `per_example_s<seed>.jsonl` (task, sample_index, seed, requested/sample length,
 `input_sha256`, context/generated tokens, prediction, references, score) and
+`utils/func.topk_records` additionally stores, per generated RULER token, the
+top-K next-token candidates as log-probs plus the chosen token's log-prob and
+the top1−top2 margin (`--topk_logits`, default 5) — from `output_logits` (RAW),
+never `.scores`, since the RULER yaml carries `temperature: 0.0`. Measured cost:
+peak GPU memory and wall clock unchanged, 306 → 1338 bytes per row (~153 B per
+generated token). LongBench carries the same record under
+`--longbench_topk_logits`, but its default differs by entry point because the
+cost does: measured on a real prediction dir, a full LongBench pass generates
+225,455 tokens (66.5% of the max_gen cap) = **34.5 MB at k=5** — ON in
+post_search (one final arch, and those are the generations you read), OFF in
+correlation (a 200-idx sweep would add ~6.9 GB). RULER's whole sweep is 0.7 MB.
 `utils/longbench.py::get_pred` writes `pred[_e]/<dataset>.jsonl` (upstream
 `pred/answers/all_classes/length` **plus** dataset, `_id`, token counts,
 `input_sha256`), with the per-example `score` stamped in afterwards by
@@ -290,6 +301,38 @@ samples reuse almost no blocks (183/200 unique W), so interaction is only
 regression-estimable there. W-only / KV-only marginals: evaluate the same
 archs.csv in a separate save dir with `--kv_method fp16` / `--w_method fp16`
 (or a `--grid_n N 1` one-row grid).
+
+### Offline data (`utils/fetch_offline_data.py`) — no HF-cache baking, no data in git
+
+Cluster containers run `HF_HUB_OFFLINE=1`. Every external corpus is loaded
+LOCAL-FIRST from files inside the repo checkout (hub only as fallback), and
+those data files are NOT committed — `python utils/fetch_offline_data.py`
+(stdlib-only, idempotent, `--only longbench|ruler|minilongbench`, `--force`)
+populates them ONCE per cluster on a machine with internet; the checkout is
+what the containers mount, so no image rebuild is ever needed. A missing file
+raises an error naming that exact command.
+- **LongBench** — `utils/longbench_data/<config>.jsonl` (24 configs ~260 MB,
+  kept FLAT: a `data/` subdir would be swallowed by `search/.gitignore`) via
+  `utils/data.load_longbench_split`, serving BOTH the `longbench:<subset>` PPL
+  corpora (`get_longbench_ppl`) and the `pred_longbench` benchmark. Document
+  selection is identical to the old hub path: same jsonl rows in the same
+  order, and `.shuffle(seed)` is exactly
+  `np.random.default_rng(seed).permutation(num_rows)` (verified). Note
+  `datasets>=3.0` removed script datasets entirely, so the hub path is dead
+  there anyway. `utils/prefetch_longbench.py` is superseded.
+- **RULER** — all in `utils/ruler_utils/`: SQuAD `dev-v2.0.json` + HotpotQA
+  (these two ARE git-tracked, from before), plus fetched
+  `paul_graham_essays.jsonl` (essay haystack, same rows/order as
+  `baber/paul_graham_essays`) and `nltk_data/` (punkt_tab english) hooked in
+  `prepare_niah.py`.
+- **MiniLongBench** — `utils/minilongbench_data/data/` (gitignored; both
+  `utils/minilongbench.py` and `data.get_minilongbench` read it).
+
+`precompute_groups(..., fail_soft=True)` (the correlation.py path) additionally
+contains a corpus that STILL fails: the group gets an `{'error', 'traceback'}`
+payload, its metrics are recorded as error rows (auto-retried on the next run)
+and every other group + benchmark proceeds — a narrativeqa cache-miss once
+zeroed out all 26 metrics of 400 jobs. post_search stays fail-hard.
 
 ### Evaluation (`evaluator.py`)
 

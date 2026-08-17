@@ -1,7 +1,6 @@
 import os
 import torch
 import hashlib
-from datasets import load_dataset
 import json
 from tqdm import tqdm
 import numpy as np
@@ -9,6 +8,8 @@ os.environ["WANDB_DISABLED"] = "true"
 import warnings
 warnings.filterwarnings("ignore")
 
+from .data import load_longbench_split
+from .func import topk_records
 from .metrics import (
     qa_f1_score,
     rouge_zh_score,
@@ -108,7 +109,7 @@ def _prepare_prompt(tokenizer, json_obj, max_length, prompt_format, dataset,
 
 
 def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
-             dataset, device, model_name, stamp=None):
+             dataset, device, model_name, stamp=None, topk_logits=0):
     """Per-sample (batch_size=1) generation, legacy KIVI/ThinK path.
 
     Length-bucket batched generation was investigated and removed —
@@ -132,6 +133,12 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
         input = tokenizer(prompt, truncation=False, return_tensors="pt",
                           add_special_tokens=_add_special).to(device)
         context_length = input.input_ids.shape[-1]
+        # top-k candidates per generated token (utils.func.topk_records). Same
+        # instrument as RULER's; here it is OFF by default because LongBench
+        # generates far more tokens per example — see the measured cost in
+        # scripts/correlation_eval.sh.
+        _tk = dict(return_dict_in_generate=True, output_logits=True) \
+            if topk_logits else {}
         if dataset == "samsum":
             # samsum stops on newline (upstream LongBench idiom, tuned for the
             # Llama-2 SentencePiece "\n" token). Guard the encode result: on some
@@ -146,7 +153,8 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
                 temperature=1.0,
                 min_length=context_length + 1,
                 eos_token_id=_eos,
-            )[0]
+                **_tk,
+            )
         else:
             output = model.generate(
                 **input,
@@ -154,9 +162,12 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
                 num_beams=1,
                 do_sample=False,
                 temperature=1.0,
-            )[0]
-        pred = tokenizer.decode(output[context_length:],
-                                skip_special_tokens=True)
+                **_tk,
+            )
+        step_logits = output.logits if topk_logits else None
+        output = (output.sequences if topk_logits else output)[0]
+        new_ids = output[context_length:]
+        pred = tokenizer.decode(new_ids, skip_special_tokens=True)
         pred = post_process(pred, model_name)
         # The first four keys are the upstream LongBench record (_score_preds
         # and every offline reader depend on them). The rest identifies the
@@ -166,7 +177,7 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
         # prompt (post truncate-in-middle, post chat template) proves a
         # regenerated prompt is the one the model actually saw.
         # `score` is filled in later by eval_longbench_preds.
-        preds.append({**(stamp or {}),
+        rec = {**(stamp or {}),
                       "pred": pred,
                       "answers": json_obj["answers"],
                       "all_classes": json_obj["all_classes"],
@@ -176,12 +187,20 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format,
                       "context_tokens": int(context_length),
                       "generated_tokens": int(output.shape[-1] - context_length),
                       "input_sha256": hashlib.sha256(
-                          prompt.encode("utf-8")).hexdigest()})
+                          prompt.encode("utf-8")).hexdigest()}
+        if topk_logits:
+            _g_eos = getattr(model.generation_config, 'eos_token_id', None)
+            _eos_set = {tokenizer.eos_token_id} | set(
+                _g_eos if isinstance(_g_eos, (list, tuple))
+                else ([_g_eos] if _g_eos is not None else []))
+            rec["topk"] = topk_records(step_logits, new_ids, 0, k=topk_logits,
+                                       eos_ids=_eos_set)
+        preds.append(rec)
     return preds
 
 
 def pred_longbench(model, tokenizer, save_path, longbench_config, e,
-                   model_name=None, stamp=None):
+                   model_name=None, stamp=None, topk_logits=0):
     """LongBench / LongBench-E predictor (per-sample, batch_size=1).
 
     Writes <save_path>/pred[_e]/<dataset>.jsonl — one JSON per example with the
@@ -219,17 +238,16 @@ def pred_longbench(model, tokenizer, save_path, longbench_config, e,
     all_preds = {}
     for dataset in datasets:
         if e:
-            data = load_dataset('THUDM/LongBench', f"{dataset}_e",
-                                split='test')
+            data = load_longbench_split(f"{dataset}_e")
             out_path = os.path.join(save_path, "pred_e", f'{dataset}.jsonl')
         else:
-            data = load_dataset('THUDM/LongBench', dataset, split='test')
+            data = load_longbench_split(dataset)
             out_path = os.path.join(save_path, "pred", f'{dataset}.jsonl')
         prompt_format = dataset2prompt[dataset]
         max_gen = dataset2maxlen[dataset]
         preds = get_pred(model, tokenizer, data, max_length, max_gen,
                          prompt_format, dataset, device, model_name,
-                         stamp=stamp)
+                         stamp=stamp, topk_logits=topk_logits)
         with open(out_path, "w", encoding="utf-8") as f:
             for pred in preds:
                 json.dump(pred, f, ensure_ascii=False)

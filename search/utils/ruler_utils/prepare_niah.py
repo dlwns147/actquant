@@ -13,6 +13,7 @@
 # limitations under the License
 
 
+import json
 import os
 import random
 import re
@@ -66,6 +67,11 @@ def cached_sent_tokenize(text: str) -> List[str]:
     return sent_tokenize(text)
 
 
+# Vendored nltk data (tokenizers/punkt_tab/english) — lets sent_tokenize work
+# in offline containers without a pre-baked ~/nltk_data.
+LOCAL_NLTK_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nltk_data")
+
+
 def download_nltk_resources():
     """Download 'punkt' if not already installed"""
     assert (nltk_version := parse_version(version("nltk"))) >= parse_version(
@@ -74,6 +80,8 @@ def download_nltk_resources():
         f"`nltk` version {nltk_version} is not >= {NLTK_MIN_VERSION}. Please update `nltk` before proceeding--older versions are vulnerable to a remote code execution vulnerability."
     )
 
+    if os.path.isdir(LOCAL_NLTK_DATA) and LOCAL_NLTK_DATA not in nltk.data.path:
+        nltk.data.path.insert(0, LOCAL_NLTK_DATA)
     try:
         nltk.data.find("tokenizers/punkt_tab")
     except LookupError:
@@ -332,7 +340,22 @@ def get_haystack(
 ) -> Union[list[str], str]:
     NEEDLE = "One of the special magic {type_needle_v} for {key} is: {value}."
     if type_haystack == "essay":
-        essay = datasets.load_dataset("baber/paul_graham_essays", split="train")["text"]
+        # Vendored dump of baber/paul_graham_essays (same rows, same order) so
+        # the essay haystack builds in offline containers; hub only as fallback.
+        local = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "paul_graham_essays.jsonl")
+        if os.path.isfile(local):
+            with open(local, encoding="utf-8") as f:
+                essay = [json.loads(line)["text"] for line in f]
+        else:
+            try:
+                essay = datasets.load_dataset("baber/paul_graham_essays", split="train")["text"]
+            except Exception as e:
+                raise RuntimeError(
+                    f"essay haystack: no vendored file at {local} and the hub "
+                    f"fallback failed ({e!r}). Run `python utils/"
+                    f"fetch_offline_data.py --only ruler` once on a machine "
+                    f"with internet.") from e
         essay = " ".join(essay)
         haystack = re.sub(r"\s+", " ", essay).split(" ")
     elif type_haystack == "repeat":

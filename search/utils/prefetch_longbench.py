@@ -1,5 +1,12 @@
 """Pre-download all LongBench dataset configs used by utils/longbench.py.
 
+LARGELY SUPERSEDED: run `python utils/fetch_offline_data.py` instead — it
+places the LongBench jsonl files in utils/longbench_data/ (not git-tracked)
+and utils/data.load_longbench_split reads them local-first, so offline runs
+no longer need a pre-baked HF cache at all (and datasets>=3.0 cannot run
+this script-dataset prefetch anyway). Keep this only for cache-based setups
+on datasets<3.
+
 longbench.pred_longbench() calls
     load_dataset('THUDM/LongBench', <config>, split='test')
 at run time. Running this script once populates the HuggingFace datasets

@@ -774,7 +774,7 @@ def _precompute_group_data(args, ctx, model_id, group_items, tasks=None):
     return precompute_groups(ctx.accelerator, model_id, group_items,
                              seed=args.seed, dtype=ctx.dtype,
                              device_map=ctx.device_map, store_device='cpu',
-                             tasks=tasks)
+                             tasks=tasks, fail_soft=True)
 
 
 def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
@@ -1091,7 +1091,8 @@ def _run_benchmark_block(args, model, model_id, which, arch=None, idx=None):
         preds = pred_longbench(model, tokenizer=get_tokenizer(model_id),
                                save_path=result_path,
                                longbench_config=args.longbench_config,
-                               e=e, model_name=args.model_name, stamp=stamp)
+                               e=e, model_name=args.model_name, stamp=stamp,
+                               topk_logits=args.longbench_topk_logits)
         # Score this run's predictions in memory (still writes result.json);
         # avoids re-reading the dir, which could mix in stale .jsonl files.
         # This also rewrites <dataset>.jsonl with the per-example `score`.
@@ -1163,7 +1164,8 @@ def _run_benchmark_block(args, model, model_id, which, arch=None, idx=None):
                              nsample=args.ruler_sample, gen_toks=args.ruler_gen_toks,
                              result_path=scores_file,
                              per_example_path=per_example_path,
-                             stamp=stamp, seed=args.seed)
+                             stamp=stamp, topk_logits=args.topk_logits,
+                             seed=args.seed)
             # eval_ruler returns THIS call's scores; the file it writes is merged
             # with whatever a previous run left in that dir, so the return value
             # is the authoritative one (file read kept as a fallback).
@@ -1356,10 +1358,25 @@ def cmd_eval(args):
                if group_items else {})
 
     for g, spec in group_items:
+        # fail_soft precompute: a group whose corpus could not be built carries
+        # an error payload. Stamp that error on the group's own metrics (same
+        # shape as a per-metric failure below) and move on — the other groups
+        # and the benchmarks still run.
+        payload = precomp.get(g)
+        if payload is not None and 'error' in payload:
+            print(f"\n[correlation/eval] === group {g} SKIPPED — data build "
+                  f"failed: {payload['error']} ===")
+            for key, group, dataset, eval_kwargs in pending_calib:
+                if group == g:
+                    results[key] = {'error': payload['error'],
+                                    'traceback': payload.get('traceback', '')}
+            with open(result_path, 'w') as f:
+                json.dump(results, f, indent=2)
+            continue
         print(f"\n[correlation/eval] === group {g}: datasets={spec['datasets']} "
               f"n_sample={spec['n_sample']} seqlen={spec['seqlen']} "
               f"use_key_token={spec['use_key_token']} ===")
-        evaluator = _build_evaluator(args, ctx, precomputed=precomp.get(g), **spec)
+        evaluator = _build_evaluator(args, ctx, precomputed=payload, **spec)
         model = _sample_or_reuse(evaluator, arch)
 
         for key, group, dataset, eval_kwargs in pending_calib:
@@ -1958,6 +1975,20 @@ def build_parser():
     p.add_argument('--ruler_gen_toks', type=int, default=None)
     p.add_argument('--ruler_batch_size', type=int, default=1)
     p.add_argument('--ruler_result_path', type=str, default='')
+    p.add_argument('--topk_logits', type=int, default=5,
+                   help='(eval) per generated RULER token, store the top-K '
+                        'next-token candidates (raw logits → logprobs) plus the '
+                        'chosen token logprob and the top1-top2 margin in the '
+                        'per-example JSONL. 0 = off. Cheap here (answers are a '
+                        'few tokens); it is what turns "wrong answer" into "how '
+                        'wrong".')
+    p.add_argument('--longbench_topk_logits', type=int, default=0,
+                   help='(eval) top-K record for LongBench generations. OFF by '
+                        'default because this harness sweeps MANY idx: measured '
+                        '34.5 MB per pass (2200 examples, 225k generated '
+                        'tokens), so a 200-idx sweep would add ~6.9 GB. Set 5 '
+                        'for the handful of idx you want to inspect. RULER is '
+                        'on by default at 0.7 MB per sweep.')
     p.add_argument('--ruler_per_example_path', type=str, default='',
                    help='(eval) JSONL path for sample-level RULER generations, '
                         'references, scores and prompt hashes. Default: '

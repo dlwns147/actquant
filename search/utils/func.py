@@ -97,6 +97,39 @@ def stamp_artifact_dir(path, meta, rotate=True):
     return moved
 
 
+def topk_records(step_logits, chosen_ids, i, k=5, eos_ids=(), ndigits=4):
+    """Per generated token: the top-k candidates the model actually weighed.
+
+    A benchmark score says the answer was wrong; this says HOW wrong — whether
+    the right token was second by a hair or nowhere, and how confident the
+    quantized model was. `chosen_logp` and `margin` (top1 − top2) are the two
+    scalars that make quantization damage visible without reading the lists.
+
+    step_logits: `generate(return_dict_in_generate=True, output_logits=True)`
+        .logits — one (batch, vocab) tensor per step. RAW logits, NOT .scores:
+        scores are post-processor (RULER's yaml carries temperature 0.0, which
+        would be meaningless to read back).
+    chosen_ids: the generated ids of sample `i`; steps stop after the first eos.
+    """
+    import torch
+
+    out = []
+    for t, logits in enumerate(step_logits):
+        if t >= len(chosen_ids):
+            break
+        logp = torch.log_softmax(logits[i].float(), dim=-1)
+        top = torch.topk(logp, k)
+        cid = int(chosen_ids[t])
+        vals = [round(float(v), ndigits) for v in top.values]
+        out.append({'ids': [int(x) for x in top.indices], 'logp': vals,
+                    'chosen': cid,
+                    'chosen_logp': round(float(logp[cid]), ndigits),
+                    'margin': round(vals[0] - vals[1], ndigits) if len(vals) > 1 else None})
+        if cid in eos_ids:
+            break
+    return out
+
+
 def stamp_artifact_file(path, meta, rotate=True):
     """stamp_artifact_dir for artefacts that are FILES, not directories.
 
