@@ -1,5 +1,13 @@
 """Make an existing key-token archive verifiable, without re-running the evaluator.
 
+OBSOLETE for the CURRENT archives, kept as the migration record. It parses the
+pre-`kt_eval-` directory naming (`<evaluator>_<dataset>_<split>_<n>sample_…`),
+which matches 0 of the live `key_token/kt_eval-*_tgt-*_{raw,chat-a512}/` roots
+and only 7 of 26 dirs under `key_token/prev/`; every archive a metric resolves
+to already carries a meta.json. Verification of live archives is
+`tests/verify_key_token_archives.py`. Use this only to resurrect a pre-manifest
+backup.
+
 The shipped archives predate meta.json, so nothing checks that slice_<i>.txt
 belongs to the document a loader hands over — a wrong archive loads silently.
 Regenerating them needs the 72B evaluator's weights; the manifest does not. Its
@@ -12,7 +20,7 @@ inside the reconstructed text AND their boundaries must fall on that
 tokenizer's token boundaries — they came from its offset_mapping, so a wrong
 reconstruction cannot line up.
 
-Usage:  python retrofit_key_token_manifest.py key_token/<archive> [--apply]
+Usage:  python tests/retrofit_key_token_manifest.py key_token/<archive> [--apply]
 """
 import argparse
 import json
@@ -20,7 +28,7 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('HF_DATASETS_OFFLINE', '1')
 
 from utils.loss import load_key_token, write_key_token_manifest   # noqa: E402

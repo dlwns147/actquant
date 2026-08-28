@@ -698,6 +698,22 @@ def _archive_existing_results(args, result_path, results, rerunning_keys):
           + (f"  moved: {moved}" if moved else ""))
 
 
+def rerun_decision(*, done, stale, force):
+    """Should this key be (re)measured?
+
+    --force re-measures everything REQUESTED, whichever way it was requested:
+    `--metrics all`, explicit metric names, and every benchmark whose flag is
+    set (a benchmark reaches `requested` only via its flag, so "flag set" and
+    "requested" are the same statement). Without --force a stored value is kept.
+
+    The other two run unconditionally, because nothing usable is stored:
+      * `not done`  — missing, or a stored {'error': ...} from a past failure
+      * `stale`     — the stored value's spec hash no longer matches the
+                      registry, so it was produced by a different definition
+    """
+    return force or not done or stale
+
+
 def _resolve_metric_set(arg):
     """Return (keys, rerun_set) for CALIBRATION metrics only (PPL/loss).
 
@@ -707,10 +723,9 @@ def _resolve_metric_set(arg):
     `--benchmarks` — they are not metrics by this script's taxonomy.
 
     Any token listed explicitly (i.e. not the magic `'all'`) is added to
-    `rerun_set` → cmd_eval treats those specific keys as force-rerun, so
-    `--metrics wt2_jsd` re-evaluates wt2_jsd even when an entry exists.
-    Keys expanded by `'all'` are NOT in rerun_set → they keep the
-    add-only-if-missing behaviour.
+    `rerun_set`, which cmd_eval uses only to REPORT that an explicitly asked-for
+    key was skipped. It does not by itself re-run anything: overwriting a stored
+    value needs --force, and --force covers `'all'` just the same.
     """
     if not arg:
         return list(METRIC_KEYS), set()
@@ -750,8 +765,9 @@ def _resolve_metric_set(arg):
 def _benchmarks_from_args(args):
     """Return (keys, rerun_set) for benchmarks. Each benchmark is toggled
     by its own boolean flag (`--ruler`, `--longbench`, `--longbench_e`);
-    flagged-on benchmarks are added to rerun_set (force-rerun on next call).
-    Empty by default → no benchmarks run unless a flag is set.
+    flagged-on benchmarks are added to rerun_set for reporting only; overwriting
+    a stored score needs --force, exactly as for metrics. Empty by default → no
+    benchmarks run unless a flag is set.
     """
     keys, rerun_set = [], set()
     for k, flag in (('longbench',   args.longbench),
@@ -1262,9 +1278,13 @@ def cmd_eval(args):
             return False
         return True
 
-    # Per-key rerun: keys listed explicitly on --metrics are force-rerun;
-    # keys from `'all'` expansion only run if not already done. --force
-    # forces everything regardless.
+    # Per-key rerun. --force is the ONLY way to overwrite a stored value, and it
+    # covers everything requested: `--metrics all`, explicit metric names, and
+    # every benchmark whose flag is set. Naming a key alone does NOT re-run it --
+    # `--metrics wt2_jsd` used to silently overwrite a stored wt2_jsd, which made
+    # "add one metric to this idx" and "throw that metric's value away" the same
+    # command. Missing entries and previous {'error': ...} entries still run
+    # unconditionally, as does a stored value whose spec hash no longer matches.
     def _spec(k):
         """Definition fingerprint of one entry: registry spec for a metric,
         benchmark configuration for a benchmark."""
@@ -1277,20 +1297,22 @@ def cmd_eval(args):
         return old is not None and old != _spec(k)
 
     def _should_run(k):
-        # A stored value whose spec hash no longer matches was produced by a
-        # DIFFERENT definition (someone edited the group/task, or the benchmark
-        # config changed) — recompute instead of silently keeping it.
-        return args.force or k in rerun_set or not _done(k) or _stale_spec(k)
+        return rerun_decision(done=_done(k), stale=_stale_spec(k), force=args.force)
 
     pending_calib = [t for t in METRIC_TASKS
                      if t[0] in requested and _should_run(t[0])]
     pending_bench = [k for k in BENCH_KEYS
                      if k in requested and _should_run(k)]
-    skipped = [k for k in requested
-               if k in {t[0] for t in METRIC_TASKS} | set(BENCH_KEYS)
-               and _done(k) and not (args.force or k in rerun_set)]
+    known = {t[0] for t in METRIC_TASKS} | set(BENCH_KEYS)
+    skipped = [k for k in requested if k in known and _done(k) and not _should_run(k)]
     if skipped:
         print(f"[correlation/eval] skipping (done): {skipped}")
+    # Named/flagged without --force: say so, or the run looks like a silent no-op.
+    named_no_force = [k for k in skipped if k in rerun_set and not args.force]
+    if named_no_force:
+        print(f"[correlation/eval] {named_no_force} were requested explicitly but "
+              f"already have a value — add --force to re-measure (the previous "
+              f"value and its raw artefacts are archived first).")
     redefined = [k for k in requested if _done(k) and _stale_spec(k)]
     if redefined:
         print(f"[correlation/eval] re-measuring (definition changed since the "
@@ -1300,8 +1322,8 @@ def cmd_eval(args):
     if retried:
         print(f"[correlation/eval] retrying previous failures: {retried}")
     if not pending_calib and not pending_bench:
-        print("[correlation/eval] nothing to do — all requested metrics already present "
-              "(pass --force to recompute).")
+        print("[correlation/eval] nothing to do — all requested metrics already "
+              "present (pass --force to re-measure them).")
         return
 
     # Archive existing entries we're about to overwrite (no-op when only
@@ -1944,7 +1966,11 @@ def build_parser():
     p.add_argument('--longbench_e', action='store_true',
                    help='(eval) run LongBench-E benchmark.')
     p.add_argument('--force', action='store_true',
-                   help='(eval) recompute even if already in result_<idx>.json')
+                   help='(eval) re-measure everything requested even though '
+                        'result_<idx>.json already has a value — `--metrics all`, '
+                        'explicit metric names, and every benchmark whose flag is '
+                        'set. Without it a stored value is kept (missing entries, '
+                        'past failures and redefined metrics still run).')
     p.add_argument('--no_archive', action='store_true',
                    help='(eval) skip archiving when an existing metric/'
                         'benchmark entry is about to be overwritten. By '
