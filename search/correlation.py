@@ -115,7 +115,17 @@ run-pair looks like:
         --longbench_config utils/longbench_config \\
         --ruler_yaml_path utils/ruler_utils --ruler_task niah_single_1 \\
         --ruler_length 16384 --ruler_sample 50 \\
-        --key_token_path key_token/Qwen2.5-72B-Instruct_gov_report_test_8sample_8192seqlen_8192min_256trunc_64sw_1alpha_-1beta
+        --key_token_path key_token
+
+`--key_token_path` is the DIRECTORY the archives live in (default `key_token`).
+The root itself is derived per metric:
+    <dir>/kt_eval-<evaluator>_tgt-<target>_<layout>/<corpus>_<protocol>
+`evaluator` comes from the metric NAME (`..._q72b` / `..._l8b`), `target` is the
+model being measured, and `layout` is `raw` or `chat-a<answer window>`. So the
+metric name pins which key tokens were used, and a run cannot silently pair a
+metric with another evaluator's archive. The archive is per (evaluator, target, corpus, seqlen, min_seqlen,
+seed, trunc_len, sliding_window) -- meta.json records all of it and a mismatch
+is a hard error, never a silent fallback.
 """
 import os
 import glob
@@ -138,7 +148,7 @@ from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
                         configure_model_cache, get_net_info, clean_up,
                         set_seed, init_accelerator, process_dtype, RunCtx,
                         arch_sha8, bench_stamp, stamp_artifact_dir)
-from utils.metric_specs import spec_sha8, TASKS_BY_NAME as _TASKS
+from utils.metric_specs import key_token_root, spec_sha8, TASKS_BY_NAME as _TASKS
 from utils.select import (build_arch, select_valid_nd_idx, assemble_F,
                           LazyPs, draw_random, quantile_select, axis_of_map,
                           coverage_subset_nsga2_extras, per_axis_metric)
@@ -1339,12 +1349,22 @@ def cmd_eval(args):
     group_items = []
     for g in groups_needed:
         spec = dict(GROUPS[g])
-        if g == 'C':
+        # any key-token GROUP, not just 'C' — a hardcoded name silently left a
+        # second key-token group with key_token_path='' (groups_for() already
+        # keys off the flag; this is the same check)
+        if spec.get('use_key_token'):
             if not args.key_token_path:
                 raise SystemExit(
-                    "gov_jsd_kt requested but --key_token_path is empty. "
-                    "Either pass --key_token_path or drop gov_jsd_kt from --metrics.")
-            spec['key_token_path'] = args.key_token_path
+                    f"a key-token metric (group '{g}') was requested but "
+                    f"--key_token_path is empty. Either pass --key_token_path or "
+                    f"drop the *_kt metrics from --metrics.")
+            # DERIVED, not configured: the evaluator comes from the metric
+            # name (its group), the target is the model being measured, and the
+            # layout from the group -- so a run cannot pair a metric with
+            # another evaluator's archive. --key_token_path is just the
+            # directory those roots live in.
+            spec['key_token_path'] = key_token_root(
+                args.key_token_path, spec, args.model_name)
         else:
             spec['key_token_path'] = ''
         group_items.append((g, spec))
@@ -1933,9 +1953,11 @@ def build_parser():
                         '${SAVE}/archive/<timestamp>/ before re-running, so '
                         'previous results are recoverable.')
     # gov_jsd_kt key-token archive (consumed in eval mode only)
-    p.add_argument('--key_token_path', type=str, default='',
-                   help='dir containing per-dataset key-token archives '
-                        '(required for gov_jsd_kt; see actquant/search/key_token/…)')
+    p.add_argument('--key_token_path', type=str, default='key_token',
+                   help='DIRECTORY the key-token archives live in. The root is '
+                        'derived per metric: <dir>/kt_eval-<evaluator>_tgt-<target>'
+                        '_<layout>, with the evaluator taken from the metric name '
+                        '(..._q72b / ..._l8b)')
     # needle_nll prompt generation knobs — kept small (8 prompts × 2048 ctx
     # ≈ 16k tokens; ~3s on Llama-3.1-8B) so it doesn't dominate the suite.
     p.add_argument('--needle_n_sample', type=int, default=8,

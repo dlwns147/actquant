@@ -2,8 +2,9 @@ import os
 import numpy as np
 import math
 from utils.func import *
-from utils.data import get_loader
-from utils.eval import eval_metric, get_logits, get_tokenizer
+from utils.data import get_loader, chat_spans_for, key_token_corpus, key_token_dir
+from utils.eval import (eval_metric, get_logits, get_tokenizer,
+                        SCORE_LAST, SCORE_FULL, SCORE_CHOICES, _check_score)
 from utils.loss import get_key_token_list
 from model.replace import replace_kv_cache
 from quant.model import get_quantized_model
@@ -84,15 +85,22 @@ class LlamaEvaluator:
                  alpha=2,
                  beta=-2,
                  last_tokens=None,
+                 score=SCORE_LAST,
                  precomputed_train_loaders=None,
                  precomputed_test_loaders=None,
                  precomputed_dense_logits=None,
                  precomputed_key_token_list=None,
+                 # Weight-quantiser calibration set (AWQ/GPTQ/QEFT). None =
+                 # each method's own default (AWQ pileval, GPTQ/QEFT c4).
+                 w_calib=None,
+                 w_act_order=None,
                  **kwargs):
         
         # model_id = os.path.join(model_path, model_name)
         self.method = method
         self.model = None
+        self.w_calib = w_calib
+        self.w_act_order = w_act_order
         self.group_size = group_size
         self.model_id = model_id
         self.device_map = device_map
@@ -113,6 +121,18 @@ class LlamaEvaluator:
                         min_seqlen=min_seqlen if ms is None else int(ms),
                         n_sample=n_sample if ns is None else int(ns),
                         batch_size=data_batch_size if bs is None else int(bs))
+        # 0 means OFF (see the note where self.last_tokens is stored); resolved
+        # HERE because the chat: loader needs the answer window at build time.
+        _last_tokens = None if (last_tokens is not None and int(last_tokens) <= 0) \
+            else last_tokens
+        # `last_tokens` is the ANSWER WINDOW: where the prefill/answer split
+        # falls (and so where the chat: layout puts the assistant header), and —
+        # when score='last' — also what gets scored. score='full' keeps the
+        # split and scores everything, which is the only usable shape with key
+        # tokens (they are too sparse to survive an AND with a small window).
+        _check_score(score)
+        _split = _last_tokens
+        _win = _last_tokens if score == SCORE_LAST else None
         loss_proto = _side(loss_datasets, loss_seqlen, loss_min_seqlen,
                            loss_n_sample, loss_data_batch_size)
         ppl_proto = _side(ppl_datasets, ppl_seqlen, ppl_min_seqlen,
@@ -127,7 +147,7 @@ class LlamaEvaluator:
             self.test_loaders = (precomputed_test_loaders
                                  if precomputed_test_loaders is not None else {})
         else:
-            self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=loss_proto['n_sample'], batch_size=loss_proto['batch_size'], train=True, seed=seed, seqlen=loss_proto['seqlen'], min_seqlen=loss_proto['min_seqlen'])) for dataset in loss_proto['datasets']}
+            self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=loss_proto['n_sample'], batch_size=loss_proto['batch_size'], train=True, seed=seed, seqlen=loss_proto['seqlen'], min_seqlen=loss_proto['min_seqlen'], answer_tokens=_split)) for dataset in loss_proto['datasets']}
             self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=ppl_proto['n_sample'], batch_size=ppl_proto['batch_size'], train=False, seed=seed, seqlen=ppl_proto['seqlen'], min_seqlen=ppl_proto['min_seqlen'])) for dataset in ppl_proto['datasets']}
             if loss_proto != ppl_proto:
                 accelerator.print(
@@ -162,7 +182,15 @@ class LlamaEvaluator:
         # disk. self.outlier (below) is the HQQ-shaped {blk.linear: [idx, fp16ch]}
         # variant; the QEFT path (quant/qeft.py) needs the RAW form instead.
         self.outlier_raw = outlier
-        self.last_tokens = last_tokens
+        # 0 means OFF (the CLI cannot pass None), same convention as
+        # utils/func.metric_protocol. Without this, `--last_tokens 0` made
+        # get_loss_mask select ZERO positions (start_idx = seq_len) and every
+        # loss came back 0.0 — a silent empty measurement rather than the
+        # whole-sequence one the 0 was meant to request.
+        self.last_tokens = _last_tokens          # answer window (split)
+        self.score = score
+        # what the teacher logits were masked to: None under score='full'
+        self.score_window = _win
 
         # Only spin up the FP teacher for work that is NOT already injected:
         # outlier fp16-channels (always needs it), key tokens, dense_logits.
@@ -199,7 +227,22 @@ class LlamaEvaluator:
                                 self.outlier[f'{blk_idx}.{linear}'] = [entry, get_fp16_channel(tlinear, entry)]
 
             if need_keytok:
-                key_token_path_list = {dataset: os.path.join(key_token_path, dataset) for dataset in self.train_loaders}
+                # The archive is filed under the RAW corpus (it is computed on the
+                # raw document), so a chat:/chat: dataset strips its prefix here.
+                key_token_path_list = {
+                    dataset: key_token_dir(
+                        key_token_path, dataset, loss_proto['n_sample'],
+                        loss_proto['seqlen'], loss_proto['min_seqlen'],
+                        trunc_len, sliding_window, alpha, beta, seed)
+                    for dataset in self.train_loaders}
+                # …and the intervals must be mapped onto the DOCUMENT ranges of a
+                # chat sample, not the whole padded sequence (chat: splits the
+                # document around the assistant header -> two ranges).
+                # the ranges follow the LAYOUT, i.e. the answer window --
+                # unaffected by whether score is 'last' or 'full'.
+                _kt_spans = {dataset: chat_spans_for(dataset, self.tokenizer,
+                                                     loss_proto['seqlen'], _split)
+                             for dataset in self.train_loaders}
                 self.key_token_list = {
                     dataset: get_key_token_list(
                         evaluator_model=model,
@@ -210,11 +253,18 @@ class LlamaEvaluator:
                         alpha=alpha,
                         beta=beta,
                         load_path=key_token_path_list[dataset],
-                        mode='offline'
+                        mode='offline',
+                        doc_spans=_kt_spans[dataset],
                     ) for dataset, loader in self.train_loaders.items()
                 }
                 for dataset in self.train_loaders:
-                    n_key_token = sum([len(key_token) for key_token in self.key_token_list[dataset]])
+                    # key_token_list is NESTED [batch][seq]; a key-less document
+                    # is stored as None. The old flat-shape sum() counted batch
+                    # sizes here — and `len(None)` raised outright the moment a
+                    # document had no key token.
+                    n_key_token = sum(
+                        len(k) for batch in self.key_token_list[dataset]
+                        for k in batch if k is not None)
                     n_key_token = sum(accelerator.gather_for_metrics([n_key_token], use_gather_object=True))
                     accelerator.print(f'dataset: {dataset}, n_key_token: {n_key_token}')
                     accelerator.wait_for_everyone()
@@ -236,7 +286,7 @@ class LlamaEvaluator:
                     return get_logits(
                         model, loader,
                         key_token_list=self.key_token_list[dataset] if use_key_token else None,
-                        last_tokens=self.last_tokens,
+                        last_tokens=self.score_window,
                         store_device=dense_logits_device)
 
                 self.dense_logits = {dataset: _dense(dataset, loader)
@@ -409,7 +459,9 @@ class LlamaEvaluator:
                                              config=self.config,
                                              do_owq=('qeft' in self.method['w']
                                                      or 'awq_qeft' in self.method['w']),
-                                             owq_path=self.outlier_raw)
+                                             owq_path=self.outlier_raw,
+                                             w_calib=self.w_calib,
+                                             w_act_order=self.w_act_order)
             self.model.eval()
             # Resolve self.dtype → real torch.dtype now that the model is up;
             # downstream KIVI cache + cuda_bmm dispatch reads model.dtype but
@@ -482,7 +534,7 @@ class LlamaEvaluator:
         return self.model
 
     def eval(self, accelerator, arch, metric, model=None, loss_func='cross_entropy', stride=0, prefill_prompt=False,
-             last_tokens=_INHERIT):
+             last_tokens=_INHERIT, score=_INHERIT):
         """`last_tokens` defaults to the evaluator-wide value (which the FP
         teacher's dense_logits were masked with); pass it explicitly to give
         ONE metric its own answer window — e.g. full-sequence PPL
@@ -497,17 +549,23 @@ class LlamaEvaluator:
             raise NotImplementedError(f"metric should be 'ppl', 'loss', or 'gsm8k', not {metric}")
 
         last_tokens = self.last_tokens if last_tokens is _INHERIT else last_tokens
+        score = self.score if score is _INHERIT else score
+        _check_score(score)
         needs_dense = self.loss_func in ['jsd', 'kld', 'topk', 'forward_kl']
-        # dense_logits were pre-masked to self.last_tokens positions by
+        # dense_logits were pre-masked to the evaluator's SCORING window by
         # get_logits(); eval_loss compares them element-wise against the
         # student's masked logits, so a different window silently misaligns.
+        # score='full' means "no window", so the pair (last_tokens, score) has
+        # to resolve to the same thing the teacher pass used.
+        _win = last_tokens if score == SCORE_LAST else None
         if (metric == 'loss' and needs_dense
-                and (last_tokens or None) != (self.last_tokens or None)):
+                and (_win or None) != (self.score_window or None)):
             raise ValueError(
-                f"loss last_tokens={last_tokens} != evaluator last_tokens={self.last_tokens}: "
-                f"the teacher dense_logits are pre-masked to the evaluator value, so the "
-                f"divergence would be computed against misaligned positions. Set the "
-                f"evaluator's last_tokens (loss side) instead.")
+                f"loss scoring window {_win} (last_tokens={last_tokens}, score={score}) "
+                f"!= evaluator's {self.score_window}: the teacher dense_logits are "
+                f"pre-masked to the evaluator value, so the divergence would be "
+                f"computed against misaligned positions. Set the evaluator's "
+                f"last_tokens/score (loss side) instead.")
         metric_list = dict()
         for dataset, loader in loaders.items():
             # divergence loss needs stored teacher logits; datasets outside
@@ -524,6 +582,9 @@ class LlamaEvaluator:
                 stride=stride,
                 last_tokens=last_tokens,
                 prefill_prompt=prefill_prompt,
+                # last_tokens is the split; `score` says whether it also
+                # restricts what is scored
+                score=score,
                 # dense_logits / key_token_list are keyed by the LOSS-side
                 # datasets, so a ppl-only dataset has no entry — .get(), and
                 # only for the metric that actually consumes them (eval_ppl

@@ -49,6 +49,20 @@ QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 SEED=0
 N_TOKEN=16384
 
+# Chat-templated calibration data: `chat:<corpus>` wraps every sample in ONE
+# user turn (BOS + role header + document + assistant header), matching the
+# format deployment feeds an Instruct model (RULER/LongBench both
+# apply_chat_template). SEQLEN/MIN_SEQLEN stay TOTAL lengths -- the document
+# budget shrinks by the per-model affix overhead (Llama-3.1 35 tokens,
+# Qwen2.5 29, Gemma-3 9, Mistral-v0.3 4). Loss/train side only (no PPL loader).
+# NOTE: this REDEFINES the objective, so archives produced with it are not
+# comparable to the pre-existing raw-wikitext2 ones. Measured on a 130-arch DOE
+# (eff_kvbits, Llama-3.1-8B): chat/raw JSD ratio 1.031, within-band Spearman
+# 0.983-0.995, top-10 overlap 8/10 -- i.e. near-monotone with raw-JSD on that
+# axis. Set to False to reproduce the older archives.
+USE_CHAT_TEMPLATE=True
+# USE_CHAT_TEMPLATE=False
+
 DATASETS="wikitext2"
 DATASETS_TEXT="wikitext2"
 METRIC="loss"
@@ -114,14 +128,25 @@ COVERAGE_PARETO_SELECT=knee
 SINK_TAG=""
 [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
 
+# One layout, parameterised by the answer window: chat: puts the assistant
+# header at seqlen - LAST_TOKENS, so the scored tail is generated in assistant
+# position. LAST_TOKENS=0 leaves the tail empty -> the header simply trails the
+# document (the old "wrapper"). No separate knob: the incoherent combination
+# (wrapper layout WITH a scored tail, which would sit in the USER turn) is not
+# representable. The split is visible in the dir name as _pp<LAST_TOKENS>.
+CHAT_TAG=""
+if [ ${USE_CHAT_TEMPLATE} == 'True' ]; then
+    DATASETS="chat:${DATASETS}"; CHAT_TAG="_ct"
+fi
+
 source "$(dirname "${BASH_SOURCE[0]}")/metric_tag.sh"
-MTAG=$(metric_tag_from_knobs "${DATASET:-${DATASETS}}" "${LOSS_FUNC}" "${METRIC:-loss}" \
+MTAG=$(metric_tag_from_knobs "${DATASETS##chat*:}" "${LOSS_FUNC}" "${METRIC:-loss}" \
                              "${N_SAMPLE}" "${SEQLEN}" "${MIN_SEQLEN:-0}")
 
 # stride/답변창은 search.sh와 같은 _st<STRIDE>_pp<LAST_TOKENS> 관례로. 지금까지
 # 이 두 값이 dir 이름에 없어서 stride만 바꾼 샘플링 런이 구분되지 않았다.
 PP_TAG=""; [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
-SAVE=save/result/sample/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample_${SEED}seed${SINK_TAG}_st${STRIDE}${PP_TAG}${MTAG}
+SAVE=save/result/sample/${TODAY}_${MODEL_NAME}_${W_METHOD_TEXT}_${KV_METHOD}_${DATASETS_TEXT}_sample_${SEED}seed${SINK_TAG}_st${STRIDE}${PP_TAG}${MTAG}${CHAT_TAG}
 [ -n "${W_EXPR}" ]      && SAVE+="_w_expr"
 [ -n "${KV_EXPR}" ]     && SAVE+="_kv_expr"
 [ -n "${KVDIM_EXPR}" ]  && SAVE+="_kvdim_expr"

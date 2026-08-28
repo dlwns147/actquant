@@ -84,6 +84,20 @@ FRONT_EPS_REL=0.05
 DIV_K=0           # structural-diversity blocks/axis (maximin; richest crossover -- dominant for hv)
 
 LOSS_FUNC=jsd
+# Chat-templated calibration data: `chat:<corpus>` wraps every sample in ONE
+# user turn (BOS + role header + document + assistant header), matching the
+# format deployment feeds an Instruct model (RULER/LongBench both
+# apply_chat_template). SEQLEN/MIN_SEQLEN stay TOTAL lengths -- the document
+# budget shrinks by the per-model affix overhead (Llama-3.1 35 tokens,
+# Qwen2.5 29, Gemma-3 9, Mistral-v0.3 4). Loss/train side only (no PPL loader).
+# NOTE: this REDEFINES the objective, so archives produced with it are not
+# comparable to the pre-existing raw-wikitext2 ones. Measured on a 130-arch DOE
+# (eff_kvbits, Llama-3.1-8B): chat/raw JSD ratio 1.031, within-band Spearman
+# 0.983-0.995, top-10 overlap 8/10 -- i.e. near-monotone with raw-JSD on that
+# axis. Set to False to reproduce the older archives.
+USE_CHAT_TEMPLATE=True
+# USE_CHAT_TEMPLATE=False
+
 DATASET=wikitext2
 N_SAMPLE=128
 SEQLEN=2048
@@ -107,11 +121,22 @@ SURROGATE_KERNEL=""   # kernel for the active SURROGATE (rbf: cubic/tps/linear Â
 SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}  # e.g. rbfplstyp
 [ -n "${SURROGATE_KERNEL}" ] && SURR_TAG+=${SURROGATE_KERNEL}   # e.g. rbfplstyptps
 
+# One layout, parameterised by the answer window: chat: puts the assistant
+# header at seqlen - LAST_TOKENS, so the scored tail is generated in assistant
+# position. LAST_TOKENS=0 leaves the tail empty -> the header simply trails the
+# document (the old "wrapper"). No separate knob: the incoherent combination
+# (wrapper layout WITH a scored tail, which would sit in the USER turn) is not
+# representable. The split is visible in the dir name as _pp<LAST_TOKENS>.
+CHAT_TAG=""
+if [ ${USE_CHAT_TEMPLATE} == 'True' ]; then
+    DATASET="chat:${DATASET}"; CHAT_TAG="_ct"
+fi
+
 source "$(dirname "${BASH_SOURCE[0]}")/metric_tag.sh"
-MTAG=$(metric_tag_from_knobs "${DATASET:-${DATASETS}}" "${LOSS_FUNC}" "${METRIC:-loss}" \
+MTAG=$(metric_tag_from_knobs "${DATASET##chat*:}" "${LOSS_FUNC}" "${METRIC:-loss}" \
                              "${N_SAMPLE}" "${SEQLEN}" "${MIN_SEQLEN:-0}")
 
-SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}${MTAG}_s${SEED}
+SAVE=save/second_search/${TODAY}_${MODEL_NAME}_joint_${W_METHOD_TEXT}${QEFT_TAG}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${N_DOE}_it${ITERATIONS}n${N_ITER}p${POP}_${CAND_TAG}_eps${FRONT_EPS_REL}_dk${DIV_K}_st${STRIDE}${PP_TAG}${SINK_TAG}${MTAG}${CHAT_TAG}_s${SEED}
 
 echo "SECOND-SEARCH -> ${SAVE}"
 

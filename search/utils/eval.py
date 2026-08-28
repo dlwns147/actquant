@@ -60,17 +60,35 @@ def load_and_eval_ppl(model, model_name='', device=torch.device("cuda:0"), datas
         ppl_test = eval_ppl(model, testloader, seqlen=seqlen, device=device)
     return ppl_test 
 
+# What enters the loss. 'last' = only the --last_tokens window (the split is
+# there anyway); 'full' = every position the label/key masks allow, with the
+# split unchanged.
+SCORE_LAST = 'last'
+SCORE_FULL = 'full'
+SCORE_CHOICES = (SCORE_LAST, SCORE_FULL)
+
+
+def _check_score(score):
+    if score not in SCORE_CHOICES:
+        raise ValueError(f"score must be one of {SCORE_CHOICES}, got {score!r}")
+
+
 @torch.no_grad()
 def eval_ppl(model, accelerator, loader, seqlen=2048, stride=0,
-             last_tokens=None, prefill_prompt=False):
+             last_tokens=None, prefill_prompt=False, score=SCORE_LAST):
     """PPL evaluation. Forward strategy mirrors eval_loss:
       1) prefill_prompt + last_tokens: prefill prompt, stride answer span.
       2) stride > 0: chunked forward over whole sequence.
       3) else: single forward pass.
-    When last_tokens is set, CE/PPL is computed ONLY over the last N positions
-    per sequence; the denominator tracks actual scored tokens so PPL stays
-    apples-to-apples across stride / last_tokens variants.
+    `last_tokens` sets the prefill/answer SPLIT. `score` says whether it is also
+    the SCORING window:
+      'last' — CE/PPL over the last N positions only (default, and the
+               historical behaviour)
+      'full' — CE/PPL over every position, with the split unchanged
+    The denominator tracks actual scored tokens so PPL stays apples-to-apples
+    across stride / last_tokens variants.
     """
+    _check_score(score)
     nlls = []
     n_positions = []
 
@@ -79,13 +97,17 @@ def eval_ppl(model, accelerator, loader, seqlen=2048, stride=0,
         total_seq_len = inputs.shape[1]
 
         # ── Forward strategy ──
+        # `last_tokens` is the prefill/answer SPLIT; `score` says whether it is
+        # also the SCORING window (see the docstring).
+        _span = last_tokens
+        _win = last_tokens if score == SCORE_LAST else None
         use_prefill_mode = (
-            prefill_prompt and last_tokens is not None
-            and 0 < last_tokens < total_seq_len
+            prefill_prompt and _span is not None
+            and 0 < _span < total_seq_len
         )
         if use_prefill_mode:
-            prompt_len = total_seq_len - last_tokens
-            answer_stride = stride if (stride is not None and stride > 0) else last_tokens
+            prompt_len = total_seq_len - _span
+            answer_stride = stride if (stride is not None and stride > 0) else _span
             chunked_logits = []
             past_key_values = None
 
@@ -137,10 +159,10 @@ def eval_ppl(model, accelerator, loader, seqlen=2048, stride=0,
         shift_logits = lm_logits[:, :-1, :].contiguous()  # [B, T-1, V]
         shift_labels = inputs[:, 1:].contiguous()         # [B, T-1]
 
-        # last_tokens mask: keep only last N scored positions per sequence.
-        if last_tokens is not None:
+        # scoring window: keep only the last N scored positions per sequence.
+        if _win is not None:
             t_shift = shift_logits.shape[1]
-            start_idx = max(0, t_shift - last_tokens)
+            start_idx = max(0, t_shift - _win)
             shift_logits = shift_logits[:, start_idx:, :]
             shift_labels = shift_labels[:, start_idx:]
 
@@ -295,7 +317,7 @@ def get_logits(model, loader, key_token_list=None, last_tokens=None, ignore_inde
 
 
 @torch.no_grad()
-def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, ignore_index=-100, prefill_prompt=False):
+def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, ignore_index=-100, prefill_prompt=False, score=SCORE_LAST):
     """
     Evaluate loss on a model using a data loader.
 
@@ -323,6 +345,7 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     Returns:
         Average loss value
     """
+    _check_score(score)
     if loss_func == 'jsd':
         assert dense_logits_list is not None, "dense_logits_list must be provided for jsd"
     if key_token_list is not None:
@@ -341,13 +364,20 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
         # 1) prefill_prompt + last_tokens set: prefill prompt, then stride answer.
         # 2) stride>0: chunked forward over the whole sequence (legacy).
         # 3) else: single forward pass.
+        # `last_tokens` is the prefill/answer SPLIT; `score` says whether it
+        # is also the SCORING window. score='full' prefills the
+        # prompt, strides the last `last_tokens` through the cache, and scores
+        # the WHOLE sequence -- the only usable shape with key tokens, which are
+        # too sparse to survive an AND with a small window.
+        _span = last_tokens
+        _win = last_tokens if score == SCORE_LAST else None
         use_prefill_mode = (
-            prefill_prompt and last_tokens is not None
-            and 0 < last_tokens < total_seq_len
+            prefill_prompt and _span is not None
+            and 0 < _span < total_seq_len
         )
         if use_prefill_mode:
-            prompt_len = total_seq_len - last_tokens
-            answer_stride = stride if (stride is not None and stride > 0) else last_tokens
+            prompt_len = total_seq_len - _span
+            answer_stride = stride if (stride is not None and stride > 0) else _span
             chunked_logits = []
             past_key_values = None
 
@@ -417,7 +447,7 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
             key_tokens = key_token_list[batch_idx][seq_idx] if key_token_list is not None else None
             if key_tokens is None and key_token_list is not None:
                 continue
-            mask = get_loss_mask(seq_shift_labels, key_tokens=key_tokens, last_tokens=last_tokens, ignore_index=ignore_index, device=seq_shift_labels.device)
+            mask = get_loss_mask(seq_shift_labels, key_tokens=key_tokens, last_tokens=_win, ignore_index=ignore_index, device=seq_shift_labels.device)
 
             cur_seqlen = mask.sum().item()
             if cur_seqlen == 0:
@@ -462,7 +492,21 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
 
     # Compute average loss
     if len(losses) == 0:
-        return 0.0
+        # Every sequence was skipped -> nothing was measured. Returning 0.0 for a
+        # DIVERGENCE reads as "perfect architecture", which is the most damaging
+        # possible silent failure: it wins every selection. The realistic cause is
+        # key_tokens AND last_tokens both set — key tokens are sparse and spread
+        # over the whole document, so a small answer window often intersects none
+        # of them (MEASURED on a real archive: gov/qmsum @512 with last_tokens=128
+        # keeps 0 of ~6 key tokens per document on 3 of 4 models). Use
+        # score='entire_sequence', which keeps the prefill/answer split at
+        # last_tokens while scoring every key token.
+        raise ValueError(
+            "eval_loss scored ZERO positions: every sequence was skipped. "
+            "With use_key_token this usually means key_tokens and the "
+            "last_tokens window do not intersect — pass "
+            f"score='{SCORE_FULL}' to score every key token while "
+            "keeping the prefill/answer split.")
     
     losses = torch.stack(accelerator.gather_for_metrics(losses)).flatten()
     total_seqlen = sum(accelerator.gather_for_metrics(seqlens))
@@ -475,7 +519,7 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, prefill_prompt=False, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, prefill_prompt=False, score=SCORE_LAST, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
     """
     Evaluate metric on a model using a data loader.
     
@@ -494,7 +538,11 @@ def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_ent
         dense_logits_list: List of dense logits for JSD calculation (required for 'jsd')
         key_token_list: Pre-computed key token list (optional, for 'loss' metric)
         stride: Chunk size for stride-aware evaluation (0 = single forward pass, default)
-        last_tokens: If set, loss is computed only on the last N tokens per sequence (for 'loss' metric)
+        last_tokens: The answer window: the prefill/answer split point, and the
+            scoring window when score='last' (for the 'loss'/'ppl' metrics)
+        score: 'last' — score only the last_tokens window (default);
+            'full' — score every position the label/key masks allow, with the
+            prefill/answer split still at last_tokens.
         tokenizer: Tokenizer (required for 'gsm8k')
         limit: Limit number of samples (for 'gsm8k')
         batch_size: Batch size (for 'gsm8k')
@@ -508,9 +556,10 @@ def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_ent
     """
     if metric == 'ppl':
         return eval_ppl(model, accelerator, loader, seqlen=seqlen, stride=stride,
-                        last_tokens=last_tokens, prefill_prompt=prefill_prompt)
+                        last_tokens=last_tokens, prefill_prompt=prefill_prompt,
+                        score=score)
     elif metric == 'loss':
-        return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list, stride=stride, last_tokens=last_tokens, prefill_prompt=prefill_prompt)
+        return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list, stride=stride, last_tokens=last_tokens, prefill_prompt=prefill_prompt, score=score)
     elif 'gsm8k' in metric:
         return eval_zeroshot(model, tokenizer, task_list=[metric], limit=limit, batch_size=batch_size, num_fewshot=num_fewshot, verbosity=verbosity, task_manager=task_manager, task_dict=task_dict)
     else:

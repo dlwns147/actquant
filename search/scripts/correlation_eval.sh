@@ -139,7 +139,10 @@ N_TOKEN=16384
 MEASURE_DIR=""
 
 # ── gov_jsd_kt key-token archive (set to '' to skip gov_jsd_kt) ──
-KEY_TOKEN_PATH=key_token/Qwen2.5-72B-Instruct_gov_report_test_8sample_8192seqlen_8192min_256trunc_64sw_1alpha_-1beta
+# DIRECTORY the archives live in. correlation.py derives the root per metric:
+#   <dir>/kt_eval-<evaluator>_tgt-<target>_<layout>/<corpus>_<protocol>
+# the evaluator comes from the metric NAME (..._q72b / ..._l8b).
+KEY_TOKEN_PATH=key_token
 
 # ── needle_nll knobs (kept small: 8 prompts × 2048 ctx ≈ 16k tokens, ~3s) ──
 # NEEDLE_TASK: harder than niah_single_1 — multikey_2 uses a haystack of

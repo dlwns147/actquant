@@ -277,6 +277,8 @@ def build_parser():
                         "post_search reads.")
     p.add_argument('--loss_func', type=str, default='cross_entropy')
     p.add_argument('--stride', type=int, default=None)
+    p.add_argument('--score', choices=('last', 'full'), default='last',
+                   help="what enters the loss: 'last' = only the --last_tokens window (default); 'full' = every position, with the prefill/answer split still at --last_tokens. Use 'full' with --use_key_token: key tokens are sparse and an AND with a small window often scores nothing.")
     p.add_argument('--last_tokens', type=int, default=None)
     p.add_argument('--prefill_prompt', action='store_true')
     p.add_argument('--n_sample', type=int, default=128)

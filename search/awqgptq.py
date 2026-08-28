@@ -131,6 +131,9 @@ def main(args):
         key_token_path=args.key_token_path,
         last_tokens=args.last_tokens,
         dense_logits_device=(None if args.dense_logits_device == 'gpu' else 'cpu'),
+        w_calib=args.w_calib,
+        w_act_order=({'true': True, 'false': False, 'auto': 'auto'}[args.w_act_order]
+                     if args.w_act_order else None),
     )
 
     # Canonical arch schema: {'q': {'w': {linear: [bits,...],...}, 'k': [[bits,gs],...], 'v': [...]}, 'p': {'k': [dim,...], 'v': [...]}}
@@ -243,6 +246,8 @@ def main(args):
         stamp_artifact_dir(args.longbench_result_path,
                            dict(benchmark='longbench_e' if args.longbench_e else 'longbench',
                                 model=args.model_name, w_method=args.w_method,
+                                 w_calib=args.w_calib,
+                                 w_act_order=args.w_act_order,
                                 kv_method=args.kv_method, w_bits=args.w_bits,
                                 k_bits=args.k_bits, v_bits=args.v_bits,
                                 residual_length=args.residual_length,
@@ -283,6 +288,8 @@ def main(args):
                                  length=list(args.ruler_length or []),
                                  nsample=args.ruler_sample,
                                  model=args.model_name, w_method=args.w_method,
+                                 w_calib=args.w_calib,
+                                 w_act_order=args.w_act_order,
                                  kv_method=args.kv_method, w_bits=args.w_bits,
                                  k_bits=args.k_bits, v_bits=args.v_bits,
                                  residual_length=args.residual_length,
@@ -389,6 +396,15 @@ if __name__ == '__main__':
     parser.add_argument('--kv_method', type=str, nargs='+', default=['kivi'], choices=['fp16', 'hqq', 'kivi', 'think'],
                         help='')
     
+    parser.add_argument('--w_calib', type=str, default=None,
+                        help='Weight-quantiser calibration corpus (awq/gptq/qeft). '
+                             'Omit for each method\'s own default (AWQ pileval, '
+                             'GPTQ/QEFT c4). Supported: pileval, wikitext2, c4, '
+                             'gov_report.')
+    parser.add_argument('--w_act_order', type=str, default=None,
+                        choices=['true', 'false', 'auto'],
+                        help='GPTQ/QEFT act_order override. Omit to keep the '
+                             'method default (False for all models).')
     parser.add_argument('--w_bits', type=int, default=4, 
                         help='')
     parser.add_argument('--k_bits', type=int, default=None, 

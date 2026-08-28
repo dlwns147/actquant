@@ -520,7 +520,8 @@ def run_final(args, ctx, ps, I, pf, K):
                 f"--metric_tasks '{key}' needs a custom loader (kind="
                 f"{kw.get('kind')!r}) that only correlation.py provides. "
                 f"Drop it here and measure it with correlation.py --mode eval.")
-    group_items = groups_for(tasks, key_token_path=args.key_token_path) if tasks else []
+    group_items = groups_for(tasks, key_token_path=args.key_token_path,
+                             target_model=args.model_name) if tasks else []
     store_device = None if args.dense_logits_device == 'gpu' else 'cpu'
     precomp = (precompute_groups(ctx.accelerator, model_id, group_items,
                                  seed=args.seed, dtype=ctx.dtype,
@@ -954,6 +955,13 @@ def build_parser():
                        action=argparse.BooleanOptionalAction, default=False,
                        help='prefill the prompt, then push the answer window in '
                             'stride-sized chunks (real-decode KV evolution)')
+        g.add_argument(f'--{_side}_score', choices=('last', 'full'), default=None,
+                       help="what enters the loss: 'last' = only the "
+                            f'--{_side}_last_tokens window (default); '
+                            "'full' = every position, with the prefill/answer "
+                            f'split still at --{_side}_last_tokens. Use "full" '
+                            'with key tokens, which are too sparse to survive an '
+                            'AND with a small window.')
         g.add_argument(f'--{_side}_last_tokens', type=int, default=0,
                        help='answer window; 0 = score the whole sequence'
                             + (' — this ALSO masks the FP-teacher dense_logits'
@@ -990,13 +998,11 @@ def build_parser():
                     help='correlation.py campaign dir (correlation.csv + '
                          'archs.csv with RULER/LongBench-E labels). Empty '
                          '(default) keeps pure measured-loss ranking.')
-    bc.add_argument('--bench_calib_target', default='both',
-                    help="tie-break target: 'ruler' | 'longbench' | 'both' "
-                         "(= RULER+LongBench consensus; disagreement → abstain "
-                         "to measured-best) | any correlation.csv column, e.g. "
-                         "gov_jsd_pp128_s32 or wt2_ppl. Columns whose name "
-                         "contains jsd/ppl/nll/loss are auto sign-flipped "
-                         "(lower is better).")
+    bc.add_argument('--bench_calib_target',
+                    choices=['ruler', 'longbench', 'both'], default='both',
+                    help="which benchmark ranker breaks ties. 'both' switches "
+                         "only when the RULER and LongBench rankers agree "
+                         "(disagreement → abstain to measured-best).")
     bc.add_argument('--bench_calib_loss_col', type=str, default='',
                     help="correlation.csv loss column (e.g. wt2_jsd_pp128_s32) "
                          "to add as an EXPLICIT model input: benchmark ≈ "

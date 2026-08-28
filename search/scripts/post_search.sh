@@ -139,7 +139,8 @@ N=1
 # ⚠️ teacher logits(CPU) 크기 = n_sample × 답변창 × vocab × 2B. 요청한 태스크가
 #    실제로 쓰는 것만 만든다(PPL 전용이면 0). gov 계열은 합쳐서 ~1.3GB지만
 #    wt2_jsd_pp512_* 를 추가하면 +16.8GB, 답변창 없는 wt2_jsd는 +67GB.
-METRIC_TASKS="gov_jsd_pp512_s128 gov_jsd_pp128_s32 wt2_ppl c4_ppl"
+# METRIC_TASKS="gov_jsd_pp512_s128 gov_jsd_pp128_s32 wt2_ppl c4_ppl"
+METRIC_TASKS="gov_jsd_pp512_s128 gov_jsd_pp128_s32 wt2_ppl_pp128_s32 c4_ppl_pp128_s32 gov_report_ppl_pp128_s32"
 # METRIC_TASKS="gov_jsd_pp512_s128 gov_jsd_pp128_s32 wt2_jsd_pp512_s32 wt2_jsd_pp128_s32 wt2_ppl c4_ppl"
 # METRIC_TASKS=""   # 비우면 아래 (B) knob 방식으로 동작
 
@@ -188,8 +189,20 @@ DENSE_LOGITS_DEVICE=cpu
 
 TRUNC_LEN=256
 SLIDING_WINDOW=64
-ALPHA=2
-BETA=-2
+# alpha/beta are unused when the archive is loaded offline (they only steer
+# find_key_token during generation), but they are recorded in the archive name
+# -- keep them equal to it so an online run cannot silently use other
+# thresholds than the archive was built with.
+ALPHA=1
+BETA=-1
+# The key-token archive. Its directory name records the protocol it was built
+# with (n_sample / seqlen / trunc / sliding_window / alpha / beta) and the
+# loader here MUST match it, or utils/loss.py rejects the archive by text hash.
+# The default is the one correlation_eval.sh uses (group C: 8 x 8192, 256/64).
+# DIRECTORY the archives live in. The root is derived per metric group:
+#   <dir>/kt_eval-<evaluator>_tgt-<target>_<layout>/<corpus>_<protocol>
+# the evaluator coming from the metric NAME (..._q72b / ..._l8b).
+KEY_TOKEN_PATH=key_token
 
 # ── per-axis search archives — MUST match stage 1 ──
 # W_EXPR=save/search/think/2605112032_Llama-3.1-8B-Instruct_wbits_loss_w_hqq_kv_kivi_iter_200_n_iter_50_w234kv4bits_w128kv128gs_128res_len_k_channel_v_token_kdim0_vdim0_obj_2_5_jsd_co_0.9_mut_0.1_wikitext2_1bs_128sample_2560seq_0token_rbf_128stride_pp512/iter_200.stats
@@ -209,9 +222,7 @@ SECOND_EXPR=save/second_search/2608090529_Llama-3.1-8B-Instruct_joint_awq_kivi_t
 # 필요한 지점 — N=2 로 두 pick 을 다 벤치마크해 실측으로 확정 권장).
 # 점수는 RANK-ONLY (절대값 캘리브레이션 안 됨). 비우면 기존 선택 그대로.
 BENCH_CALIB_DIR=save/correlation/2607301912_Llama-3.1-8B-Instruct_awq_kivi_think_w234k234v234_g128r128_sk8_t16384_n200_s0_qs_metric_w01599_metric_eff_kv01599_r
-BENCH_CALIB_TARGET=both      # ruler | longbench | both | correlation.csv 열 이름
-                             # (예: gov_jsd_pp128_s32 — jsd/ppl/nll/loss 류는
-                             #  자동 부호반전되어 "낮을수록 좋음"으로 랭킹)
+BENCH_CALIB_TARGET=both      # ruler | longbench | both
 BENCH_CALIB_PREDICTOR=rbf    # rbf(tps, 빠름) | ard_gp(라벨을 적응 수집하게 되면 이쪽)
 # 캘리브 200개의 "측정 loss"를 모델 입력으로 명시적으로 넣는 옵션(예:
 # wt2_jsd_pp128_s32). 채점 시 아카이브의 측정 loss가 그대로 들어가며, 캘리브
@@ -339,6 +350,12 @@ for g in "${K_GROUP_SIZE[@]}"; do ARGS+=" --k_group_size ${g} "; done
 for g in "${V_GROUP_SIZE[@]}"; do ARGS+=" --v_group_size ${g} "; done
 
 if [ ${USE_KEY_TOKEN} == 'True' ]; then
+    # An empty KEY_TOKEN_PATH here does NOT fall back to anything: argparse
+    # would take the NEXT flag as its value.
+    if [ -z "${KEY_TOKEN_PATH}" ] || [ ! -d "${KEY_TOKEN_PATH}" ]; then
+        echo "USE_KEY_TOKEN=True but KEY_TOKEN_PATH is empty or missing: '${KEY_TOKEN_PATH}'" >&2
+        exit 1
+    fi
     ARGS+=" --use_key_token --trunc_len ${TRUNC_LEN} --sliding_window ${SLIDING_WINDOW} --alpha ${ALPHA} --beta ${BETA} --key_token_path ${KEY_TOKEN_PATH} "
 fi
 [ ${W_METHOD} == "hqq" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS} "

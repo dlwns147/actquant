@@ -1,0 +1,52 @@
+{
+  "evaluator_model": "Qwen/Qwen2.5-72B-Instruct",
+  "target_model": "Qwen/Qwen2.5-72B-Instruct",
+  "dataset": "gov_report",
+  "train": false,
+  "n_sample": 8,
+  "seqlen": 8192,
+  "min_seqlen": 8192,
+  "seed": 0,
+  "trunc_len": 256,
+  "sliding_window": 64,
+  "alpha": 1,
+  "beta": -1,
+  "data_batch_size": 1,
+  "retrofitted": true,
+  "note": "manifest reconstructed from the archive name + the evaluator tokenizer; the evaluator also owned the loader, so this text is a PREFIX of what a target-tokenizer loader produces",
+  "n_slices": 8,
+  "slices": [
+    {
+      "sha256": "85df6da5a14f4eb62e95513aa24b7b8b9c4c0fe4c46b0ba60f2b3b735cbd12a0",
+      "chars": 40861
+    },
+    {
+      "sha256": "fd971e3c3d903feb2d257f139d7aabce320c8b7e77abae3af41b1f260c34f3e1",
+      "chars": 38262
+    },
+    {
+      "sha256": "2985449a14ac51d02ea8ea83aa26b371312ef697f553f1f1e7c47ae0a0853a53",
+      "chars": 42199
+    },
+    {
+      "sha256": "cf5bb91eb20424f57e945a740eb4f1bd93cf654b39a086fe56ce95fc1d89620c",
+      "chars": 40091
+    },
+    {
+      "sha256": "8180723bd70db06b4281b83a97645206202daee3c7d56f4d6ad836719db06f88",
+      "chars": 39733
+    },
+    {
+      "sha256": "56e86b19a64b7b406d4914a519099ff82beea016631e2f35197f4ab0761234ba",
+      "chars": 40632
+    },
+    {
+      "sha256": "f4d0c5c56bd482c201fce329a3744aa6899c96b130bd93b048fb904e1d539b2c",
+      "chars": 38865
+    },
+    {
+      "sha256": "dfe5c4aca1dbdec9fc613c1e136d3661cae2ba5751a0094945af6b47637e2911",
+      "chars": 42841
+    }
+  ]
+}
