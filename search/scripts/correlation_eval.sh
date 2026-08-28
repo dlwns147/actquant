@@ -1,60 +1,3 @@
-#!/usr/bin/env bash
-# Usage: bash scripts/correlation_eval.sh <DEVICES> <IDX> [<SAVE_DIR>] [<METRICS>]
-#   DEVICES    e.g. "0" or "0,1"
-#   IDX        row index in archs.csv to evaluate
-#   SAVE_DIR   correlation save dir (the one stage 1 wrote);
-#              if omitted, picks the newest save/correlation/* directory.
-#   METRICS    space- or comma-separated CALIBRATION metric keys (default
-#              "all" = all PPL/loss metrics). Benchmarks (ruler/longbench/
-#              longbench_e) are NOT valid here — toggle them with the
-#              RUN_RULER / RUN_LONGBENCH / RUN_LONGBENCH_E variables below.
-#              Calibration keys: c4_ppl wt2_jsd wt2_jsd_s512 wt2_jsd_pp512_s128
-#                  wt2_jsd_lt128 needle_nll needle_nll_s512 needle_nll_pp512_s128
-#                  gsm8k_jsd gov_jsd gov_jsd_s512 gov_jsd_pp512_s128 gov_jsd_lt128
-#                  gsm8k_jsd_pp_s128 gov_jsd_kt gov_jsd_kt_s512
-#              Decode-tight answer window (stride 8 over the last 32 tokens):
-#                  wt2_jsd_pp32_s8 gov_jsd_pp32_s8
-#                  needle_nll_pp32_s8 needle_jsd_pp32_s8
-#              Longer-context PPL (own groups, no FP-teacher pass):
-#                  wt2_ppl_sl8192 c4_ppl_sl8192
-#                  wt2_ppl_sl8192_s512   (8k windows through the real KV cache)
-#              Long-DOCUMENT PPL — 128 docs, selection seed pinned to 0, each
-#              corpus at 2048 (domain control) and 8192:
-#                  gov_ppl_sl2048 gov_ppl (+ _s512 _pp512_s128)
-#                  nqa_ppl_sl2048 nqa_ppl (+ _s512)              narrativeqa
-#                  qmsum_ppl_sl2048 qmsum_ppl (+ _s512)
-#              (LongBench grades qmsum → qmsum_ppl* are REPORTING metrics; the
-#               correlation is still measured, just listed in
-#               correlation_contamination.txt as not-a-prediction-claim)
-#              Answer-phase PPL: EVERY corpus above also has <base>_pp128_s32
-#              (e.g. nqa_ppl_pp128_s32, wt2_ppl_sl8192_pp128_s32) — prefill +
-#              32-token-chunk scoring over the last 128 tokens. The full-window
-#              base task stays; the 512-token _s32 variant was dropped.
-#              Long-doc JSD at the 128-doc default: gov_jsd_pp128_s32_n128_sl8192
-#              COST per long-doc task = n_sample x seqlen forward tokens
-#              (0.26M @2048 … 1.05M @8192); an answer-phase variant costs the
-#              same as its base (the prefill dominates). For reference the
-#              benchmarks this harness correlates against measure, per idx:
-#              RULER 28.6 min / LongBench 150.1 min / LongBench-E 282.7 min.
-#              The authoritative list is utils/metric_specs.py::METRIC_TASKS;
-#              `--metrics all` runs every one of them.
-#
-# Run this once per IDX (parallelise across GPUs by launching multiple
-# instances). Results go to SAVE_DIR/m_<config sha8>/result_<IDX>.json — ONE
-# FOLDER PER MEASUREMENT CONFIG (model + w/kv method + bits + group sizes +
-# residual + sink + quant schemes + seed), with the full config in that
-# folder's meta.json. archs.csv stays at SAVE_DIR and is shared, so the same
-# arch pool can be measured under several configs without them ever mixing:
-# aggregate reads ONE folder, and rows inside it are comparable by
-# construction. Benchmark artefact paths follow into the same folder.
-# A SAVE_DIR that already holds result_*.json at its root keeps using the root
-# (existing runs are untouched). bash scripts/correlation_aggregate.sh merges
-# one folder into correlation.csv.
-#
-# Each measured value also stores a spec hash of its DEFINITION (the registry
-# group+task): edit a group and the affected metric is re-measured on the next
-# run instead of keeping a number that no longer means the same thing.
-
 DEVICES=${1:-0}
 IDX=${2:?"need IDX (row index in archs.csv)"}
 SAVE_ARG=${3:-}
@@ -81,7 +24,7 @@ fi
 # ── Model / quant config (MUST match the run that produced archs.csv) ──
 MODEL_PATH=/SSD/huggingface/meta-llama
 MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
+DTYPE=bfloat16
 CONFIG=config/llama.json
 
 W_METHOD=hqq
@@ -138,10 +81,6 @@ N_TOKEN=16384
 # derived from the config below (see the header). Leave empty for the default.
 MEASURE_DIR=""
 
-# ── gov_jsd_kt key-token archive (set to '' to skip gov_jsd_kt) ──
-# DIRECTORY the archives live in. correlation.py derives the root per metric:
-#   <dir>/kt_eval-<evaluator>_tgt-<target>_<layout>/<corpus>_<protocol>
-# the evaluator comes from the metric NAME (..._q72b / ..._l8b).
 KEY_TOKEN_PATH=key_token
 
 # ── needle_nll knobs (kept small: 8 prompts × 2048 ctx ≈ 16k tokens, ~3s) ──
