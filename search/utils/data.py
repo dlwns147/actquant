@@ -73,7 +73,8 @@ def get_c4(tokenizer, seqlen=2048, batch_size=1, cache_dir=None):
     attention_mask = attention_mask[:, :n_sample * seqlen].reshape(n_sample, seqlen)
     return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size, drop_last=False)
 
-def get_wikitext2_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
+def get_wikitext2_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None,
+                           add_special_tokens=True):
     
     traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train', cache_dir=cache_dir)
     traindata = traindata.shuffle(seed=seed)
@@ -83,7 +84,11 @@ def get_wikitext2_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048,
     # trainenc = trainenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)
     # return DataLoader(trainenc, batch_size=batch_size)
 
-    tokenized = tokenizer("\n\n".join(traindata[:n_sample]['text']), return_tensors='pt')
+    # add_special_tokens=False is what the chat path needs: the BOS then comes
+    # from the chat template's own prefix instead of the stream (otherwise
+    # sample 0 would carry TWO).
+    tokenized = tokenizer("\n\n".join(traindata[:n_sample]['text']), return_tensors='pt',
+                          add_special_tokens=add_special_tokens)
     input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
     n_sample = input_ids.numel() // seqlen
     input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
@@ -91,7 +96,8 @@ def get_wikitext2_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048,
     return DataLoader(TensorDataset(input_ids, attention_mask, input_ids), batch_size=batch_size)
 
 
-def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None):
+def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_dir=None,
+                    add_special_tokens=True):
     # Offline-safe c4 load: read arrow shards directly from the cache, bypassing
     # `datasets.load_dataset`'s config-hash lookup which never resolves to the
     # pre-built cache config (`default-b04fc8a0b8562884`) across datasets-lib
@@ -114,7 +120,8 @@ def get_c4_trainenc(seed, n_sample, tokenizer, batch_size=1, seqlen=2048, cache_
     # trainenc = trainenc[:, :n_sample * seqlen].reshape(n_sample, seqlen)    
     # return DataLoader(trainenc, batch_size=batch_size, drop_last=True)
 
-    tokenized = tokenizer(' '.join(traindata[:n_sample]['text']), return_tensors='pt')
+    tokenized = tokenizer(' '.join(traindata[:n_sample]['text']), return_tensors='pt',
+                          add_special_tokens=add_special_tokens)
     input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
     n_sample = input_ids.numel() // seqlen
     input_ids = input_ids[:, :n_sample * seqlen].reshape(n_sample, seqlen)
@@ -426,6 +433,316 @@ def get_task3(tokenizer, n_sample=129, ignore_index=-100, max_len=2048):
     return DataLoader(ex, batch_size=1)
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Chat-templated calibration data ('chat:<corpus>')
+# ════════════════════════════════════════════════════════════════════════════
+# Deployment feeds Instruct models a CHAT-formatted prompt (RULER / LongBench
+# both apply_chat_template now), while calibration JSD has always been measured
+# on raw continuation text. `chat:<corpus>` builds the same corpora inside a
+# user turn so the two can be compared:
+#
+#     [ pre ][            document            ][ post ]
+#       ^ template prefix (BOS + role header)    ^ assistant header
+#
+# CONVENTION: `seqlen` / `min_seqlen` are the TOTAL sequence length, affixes
+# INCLUDED — the same thing they mean for every other corpus and for the KV /
+# memory accounting. The document budget is therefore
+#     seqlen - len(pre) - len(post)
+# which shrinks by a model-specific amount (measured: Mistral-v0.3 4 tokens,
+# Gemma-3 9, Qwen2.5 29, Llama-3.1 35 — Llama and Qwen auto-inject a system
+# block, Llama's containing a date string).
+#
+# The sample is assembled in TOKEN space, never by re-tokenizing decoded text:
+# the document keeps the base loader's exact ids, which is what key-token
+# character offsets index (see utils/loss._loader_offsets on decode drift).
+# The cost is a <=1-token BPE boundary artefact vs a single-shot
+# apply_chat_template when the document starts with whitespace (the affix's
+# trailing space/newline does not merge into the first document token);
+# `chat_affix_report` measures it. It is fixed for a given (model, corpus), so
+# it shifts no architecture ranking.
+CHAT_PREFIX = 'chat:'
+# The chat sample is ONE layout, parameterised by the answer window: the
+# assistant header lands at seqlen - answer_tokens, so the scored tail is
+# produced in ASSISTANT position. answer_tokens=0 leaves the tail empty and the
+# header simply trails the document — the degenerate case, not a second mode.
+#
+#   answer_tokens=0 : [ pre ][            document            ][ post ]
+#   answer_tokens=A : [ pre ][   context   ][ post ][   tail   ]
+#                      prefill ─────────────────────┘  ^scored (A tokens)
+#
+# With --prefill_prompt --last_tokens A the prefill covers exactly
+# pre+context+post (prompt_len = seqlen - A), so the prefill/answer split
+# COINCIDES with the turn boundary and the scored tokens are produced in
+# assistant position — which is what the answer-phase protocol claims to
+# measure. `context` and `tail` are a CONTIGUOUS slice of one document (the
+# header is inserted between them), so the tail is still a genuine continuation.
+# CAVEAT: the tail is corpus text, not a real assistant reply — realistic in
+# position and KV state, still out-of-distribution in content.
+# `chatdoc:` is the DOCUMENT a chat sample wraps, with no affixes — what a
+# key-token archive for a chat corpus must be built on. It is NOT the same as the
+# raw corpus for the stream corpora: get_chat_loader builds their base with
+# add_special_tokens=False (the BOS comes from the template), which shifts every
+# chunk boundary by one token. Generating the archive from plain `wikitext2`
+# therefore yields documents that differ from the ones the chat loader produces
+# (MEASURED: 9292 vs 9291 chars on slice 1) and the manifest check rejects it.
+CHATDOC_PREFIX = 'chatdoc:'
+_CHAT_MARK = '\u0001DOC\u0001'
+_CHAT_AFFIX_CACHE = {}
+
+
+def chat_affixes(tokenizer, instruction=''):
+    """(pre_ids, post_ids): the chat wrapper around a document, in TOKEN space.
+
+    Derived by splitting the `tokenize=False` template on a marker and encoding
+    each side with add_special_tokens=False, so `pre` carries the model's own
+    BOS exactly once and `post` is the assistant header the answer would follow.
+    Raises for a tokenizer with no chat template (base models)."""
+    if getattr(tokenizer, 'chat_template', None) in (None, ''):
+        raise ValueError(
+            f"tokenizer {getattr(tokenizer, 'name_or_path', '?')} has no chat_template: "
+            f"'chat:<corpus>' needs an Instruct/chat model. Use the raw corpus instead.")
+    key = (getattr(tokenizer, 'name_or_path', id(tokenizer)), instruction)
+    if key in _CHAT_AFFIX_CACHE:
+        return _CHAT_AFFIX_CACHE[key]
+    content = (instruction + '\n\n' + _CHAT_MARK) if instruction else _CHAT_MARK
+    s = tokenizer.apply_chat_template([{'role': 'user', 'content': content}],
+                                      tokenize=False, add_generation_prompt=True)
+    if _CHAT_MARK not in s:
+        raise ValueError("chat template dropped the document marker — cannot split it")
+    pre_s, post_s = s.split(_CHAT_MARK)
+    pre = tokenizer(pre_s, add_special_tokens=False)['input_ids']
+    post = tokenizer(post_s, add_special_tokens=False)['input_ids']
+    if not pre or not post:
+        raise ValueError(f"empty chat affix (pre={len(pre)}, post={len(post)})")
+    bos = getattr(tokenizer, 'bos_token_id', None)
+    if bos is not None:
+        n_bos = sum(1 for t in pre if t == bos) + sum(1 for t in post if t == bos)
+        if n_bos > 1:
+            raise ValueError(f"chat affixes carry {n_bos} BOS tokens — expected at most 1")
+    _CHAT_AFFIX_CACHE[key] = (pre, post)
+    return pre, post
+
+
+def chat_overhead(tokenizer, instruction=''):
+    pre, post = chat_affixes(tokenizer, instruction)
+    return len(pre) + len(post)
+
+
+def chat_answer_spans(tokenizer, seqlen, answer_tokens, instruction=''):
+    """[(start, end), (start, end)] — the two token ranges the DOCUMENT occupies
+    in a chat sample WITH an answer window: the context before the assistant header and the
+    scored tail after it. Also the prefill boundary: `seqlen - answer_tokens`
+    is the end of `post`."""
+    pre, post = chat_affixes(tokenizer, instruction)
+    a = int(answer_tokens)
+    ctx_end = int(seqlen) - a - len(post)
+    return [(len(pre), ctx_end), (int(seqlen) - a, int(seqlen))]
+
+
+def chat_doc_span(tokenizer, seqlen, instruction=''):
+    """(start, end) token indices of the DOCUMENT body inside a chat sample.
+
+    Constant across samples for the continuation corpora (the document fills its
+    budget exactly), which is what key-token consumption needs: build the offset
+    mapping over this slice only, then shift the returned indices by `start`."""
+    pre, post = chat_affixes(tokenizer, instruction)
+    return len(pre), int(seqlen) - len(post)
+
+
+def chat_affix_report(tokenizer, probe='The quick brown fox jumps over the lazy dog.',
+                      instruction=''):
+    """Diagnostic: how far the token-space assembly is from a single-shot
+    apply_chat_template on the same document text. Returns a dict; `delta` is
+    the (built - canonical) token count, expected in {-1, 0, 1}."""
+    pre, post = chat_affixes(tokenizer, instruction)
+    doc = tokenizer(probe, add_special_tokens=False)['input_ids']
+    built = list(pre) + list(doc) + list(post)
+    content = (instruction + '\n\n' + probe) if instruction else probe
+    canon = list(tokenizer.apply_chat_template([{'role': 'user', 'content': content}],
+                                               tokenize=True, add_generation_prompt=True))
+    return dict(pre=len(pre), post=len(post), overhead=len(pre) + len(post),
+                built=len(built), canon=len(canon), delta=len(built) - len(canon),
+                exact=built == canon)
+
+
+# Corpora whose base loader emits ONE contiguous document per sample with no
+# special tokens — these wrap directly. wikitext2 / c4 are streams (handled by
+# the add_special_tokens=False branch); gsm8k is a prompt+answer layout whose
+# chat form puts the assistant header BETWEEN them, so it is not a wrapper case.
+_CHAT_DOC_CORPORA = ('gov_report', 'longbench:')
+_CHAT_STREAM_CORPORA = ('wikitext2', 'c4')
+
+
+def chat_spans_for(name, tokenizer, seqlen, answer_tokens=None, instruction=''):
+    """DOCUMENT token range(s) for a corpus name, or None when it is not a chat
+    corpus. This is what `get_key_token_list(doc_spans=...)` wants:
+      chat:<c>     -> [(len(pre), seqlen-len(post))]
+      chat:<c> + answer_tokens=A -> [(len(pre), ctx_end), (seqlen-A, seqlen)]
+    """
+    if name.startswith((CHAT_PREFIX, CHATDOC_PREFIX)):
+        # the document is SPLIT only when there is a tail; with no answer window
+        # it is one contiguous range (the wrapper).
+        if answer_tokens:
+            return chat_answer_spans(tokenizer, seqlen, answer_tokens, instruction)
+        return [chat_doc_span(tokenizer, seqlen, instruction)]
+    return None
+
+
+def key_token_corpus(name):
+    """The BASE corpus a key-token archive is filed under: the archive is built
+    on the RAW document, so `chat:`/`chatdoc:` must be stripped before joining
+    the path (else it looks for `<key_token_path>/chat:wikitext2`)."""
+    for p in (CHATDOC_PREFIX, CHAT_PREFIX):
+        if name.startswith(p):
+            return name[len(p):]
+    return name
+
+
+def key_token_dirname(dataset, n_sample, seqlen, min_seqlen, trunc_len,
+                      sliding_window, alpha, beta, seed=0):
+    """Directory a key-token archive lives in, protocol spelled out.
+
+    The ROOT already says who judged (eval-), whose loader/tokenizer/template
+    the intervals are indexed against (tgt-) and the input layout (raw /
+    chat-a<N>). What it cannot say is the per-CORPUS protocol, because one root
+    holds several corpora with different ones -- so it goes here. meta.json is
+    still the authority (it is what gets checked); this only makes a mismatch
+    visible in the path instead of only in an exception.
+    """
+    return (f"{key_token_corpus(dataset)}_{int(n_sample)}sample_{int(seqlen)}seqlen"
+            f"_{int(min_seqlen)}min_{int(trunc_len)}trunc_{int(sliding_window)}sw"
+            f"_{alpha}alpha_{beta}beta_s{int(seed)}")
+
+
+def key_token_dir(root, dataset, n_sample, seqlen, min_seqlen, trunc_len,
+                  sliding_window, alpha, beta, seed=0):
+    """`root`/<protocol dir>, falling back to the bare corpus name.
+
+    Archives written before the protocol went into the directory name are filed
+    under `<root>/<corpus>`; they stay loadable (their meta.json still pins the
+    protocol). New ones get the explicit name.
+    """
+    import os
+    explicit = os.path.join(root, key_token_dirname(
+        dataset, n_sample, seqlen, min_seqlen, trunc_len, sliding_window,
+        alpha, beta, seed))
+    if os.path.isdir(explicit):
+        return explicit
+    legacy = os.path.join(root, key_token_corpus(dataset))
+    if os.path.isdir(legacy):
+        return legacy
+    return explicit          # not there: name the EXPECTED one in the error
+
+
+def get_chat_loader(name, seed=0, n_sample=128, tokenizer=None, batch_size=1,
+                    seqlen=2048, min_seqlen=0, train=True, cache_dir=None,
+                    instruction='', model='', answer_tokens=None):
+    """`chat:<corpus>` — the corpus inside one chat turn.
+
+    seqlen / min_seqlen are TOTAL lengths (affixes included); the base corpus is
+    built at the reduced document budget and the affixes are concatenated in
+    token space. Every returned sample is exactly `seqlen` tokens.
+
+    `answer_tokens` (= the run's answer window) decides the layout: with A > 0 the
+    document is split so the last `answer_tokens` sit AFTER the assistant header.
+    The base-corpus call is identical either way — only the assembly differs,
+    since len(context) + len(tail) == the same document budget.
+    """
+    if tokenizer is None:
+        tokenizer = get_tokenizer(model, cache_dir=cache_dir)
+    doc_only = name.startswith(CHATDOC_PREFIX)
+    for _p in (CHATDOC_PREFIX, CHAT_PREFIX):
+        if name.startswith(_p):
+            base = name[len(_p):]
+            break
+    else:
+        base = name
+    if not train:
+        # LlamaEvaluator.__init__ builds BOTH loader sides unconditionally, so a
+        # hard error here made `--dataset chat:<corpus>` crash at construction
+        # even for a pure `--metric loss` run. The chat wrapper is a LOSS-side
+        # (train) construction — PPL over template boilerplate is not a metric
+        # anyone wants — so the test side is None, exactly as gsm8k already does.
+        # `--metric ppl` on a chat: dataset is therefore unsupported, not silently
+        # substituted with the raw corpus.
+        print(f"[chat] '{name}': no test-side loader (loss/train side only); "
+              f"measure PPL on the raw corpus instead.")
+        return None
+    pre, post = chat_affixes(tokenizer, instruction)
+    ov = 0 if doc_only else len(pre) + len(post)
+    inner = int(seqlen) - ov
+    if inner <= 0:
+        raise ValueError(f"seqlen={seqlen} is shorter than the chat overhead ({ov} tokens)")
+    inner_min = max(0, int(min_seqlen) - ov) if min_seqlen else 0
+    # ONE layout, parameterised by where the assistant header falls:
+    #     pre + context + post + tail        len(tail) = answer_tokens
+    # answer_tokens = 0 leaves the tail EMPTY, which is exactly the wrapper
+    # (pre + document + post) -- so "wrapper" is not a separate mode, it is the
+    # degenerate case, and the incoherent combination (wrapper layout WITH an
+    # answer window, i.e. a scored tail sitting in the USER turn) becomes
+    # unrepresentable.
+    n_ans = int(answer_tokens or 0)
+    if n_ans < 0 or n_ans >= inner:
+        raise ValueError(
+            f"'{name}' needs 0 <= answer_tokens < {inner} (the document budget at "
+            f"seqlen={seqlen}); got {answer_tokens}. It is the run's answer window: "
+            f"the tail placed after the assistant header (0 = no tail).")
+
+    if any(base.startswith(c) for c in _CHAT_STREAM_CORPORA):
+        fn = get_wikitext2_trainenc if 'wikitext2' in base else get_c4_trainenc
+        base_loader = fn(seed=seed, n_sample=n_sample, batch_size=1, seqlen=inner,
+                         tokenizer=tokenizer, cache_dir=cache_dir,
+                         add_special_tokens=False)
+    elif any(base.startswith(c) for c in _CHAT_DOC_CORPORA):
+        base_loader = get_loader(base, n_sample=n_sample, train=train, seed=seed,
+                                 seqlen=inner, min_seqlen=inner_min, batch_size=1,
+                                 tokenizer=tokenizer, model=model, cache_dir=cache_dir)
+    else:
+        raise ValueError(
+            f"'{name}': no chat wrapper for corpus '{base}'. Supported: "
+            f"{_CHAT_STREAM_CORPORA + _CHAT_DOC_CORPORA} (gsm8k needs the "
+            f"prompt/answer split layout, not a wrapper).")
+
+    if doc_only:
+        return base_loader          # the bare document, at the caller's seqlen
+    pre_t = torch.tensor(pre, dtype=torch.long)
+    post_t = torch.tensor(post, dtype=torch.long)
+    ones_pre = torch.ones(len(pre), dtype=torch.long)
+    ones_post = torch.ones(len(post), dtype=torch.long)
+    bos = getattr(tokenizer, 'bos_token_id', None)
+    ids_l, am_l, lab_l = [], [], []
+    for doc_ids, doc_am, doc_lab in base_loader:
+        for r in range(doc_ids.shape[0]):
+            d = doc_ids[r]
+            if d.numel() != inner:
+                raise ValueError(f"'{name}': base corpus returned {d.numel()} tokens, "
+                                 f"expected the document budget {inner}")
+            if bos is not None and int(d[0]) == bos:
+                raise ValueError(f"'{name}': the base corpus emitted a BOS at position 0 — "
+                                 f"the chat prefix already carries one.")
+            m_pre = torch.full((len(pre),), -100, dtype=torch.long)
+            m_post = torch.full((len(post),), -100, dtype=torch.long)
+            if n_ans:
+                # pre + context + post + tail: the header lands exactly at
+                # seqlen - n_ans, so prompt_len == that boundary.
+                c, t = d[:-n_ans], d[-n_ans:]
+                ids_l.append(torch.cat([pre_t, c, post_t, t]))
+                am_l.append(torch.cat([ones_pre, doc_am[r][:-n_ans], ones_post,
+                                       doc_am[r][-n_ans:]]))
+                lab_l.append(torch.cat([m_pre, doc_lab[r][:-n_ans], m_post,
+                                        doc_lab[r][-n_ans:]]))
+            else:
+                ids_l.append(torch.cat([pre_t, d, post_t]))
+                am_l.append(torch.cat([ones_pre, doc_am[r], ones_post]))
+                # affix positions are context, never scored
+                lab_l.append(torch.cat([m_pre, doc_lab[r], m_post]))
+    if not ids_l:
+        raise ValueError(f"'{name}': base corpus produced no samples "
+                         f"(n_sample={n_sample}, budget={inner})")
+    return DataLoader(TensorDataset(torch.stack(ids_l), torch.stack(am_l),
+                                    torch.stack(lab_l)), batch_size=batch_size)
+
+
 def get_trainloaders(name, n_sample=128, seed=0, seqlen=2048, model='', batch_size=1, cache_dir=None):
     tokenizer = get_tokenizer(model)
     if 'wikitext2' in name:
@@ -435,9 +752,14 @@ def get_trainloaders(name, n_sample=128, seed=0, seqlen=2048, model='', batch_si
     if 'gsm8k' in name:
         return get_gsm8k_trainenc(seed, n_sample, seqlen, model, tokenizer, batch_size, cache_dir=cache_dir)
 
-def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0, batch_size=1, tokenizer=None, model='', cache_dir=None, sub_dataset=None, require_answer=False):
+def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0, batch_size=1, tokenizer=None, model='', cache_dir=None, sub_dataset=None, require_answer=False, answer_tokens=None):
     if tokenizer is None:
         tokenizer = get_tokenizer(model, cache_dir=cache_dir)
+    if name.startswith((CHAT_PREFIX, CHATDOC_PREFIX)):
+        return get_chat_loader(name, seed=seed, n_sample=n_sample, tokenizer=tokenizer,
+                               batch_size=batch_size, seqlen=seqlen, min_seqlen=min_seqlen,
+                               train=train, cache_dir=cache_dir, model=model,
+                               answer_tokens=answer_tokens)
     if "minilongbench" in name:
         return get_minilongbench(tokenizer=tokenizer, cache_dir=cache_dir, require_answer=require_answer)
     if "task3" in name:  # downstream-aware calibration (gsm8k+ifeval+mbpp answer tokens)

@@ -1310,6 +1310,20 @@ def metric_protocol(args, metric):
     return stride, prefill_prompt, last_tokens, (stride is not None or prefill_prompt)
 
 
+def metric_score(args, metric):
+    """What one metric scores: 'last' (only the --last_tokens window) or 'full'
+    (everything, with the prefill/answer split still at --last_tokens).
+
+    Kept out of `metric_protocol`'s return tuple on purpose: that 4-tuple is
+    unpacked positionally in post_search and asserted in tests. Same
+    --{loss,ppl}_ override convention as metric_protocol."""
+    from utils.eval import SCORE_LAST
+    side = 'ppl' if metric == 'ppl' else 'loss'
+    v = getattr(args, f'{side}_score', None)
+    v = getattr(args, 'score', None) if v is None else v
+    return SCORE_LAST if v in (None, '') else v
+
+
 def evaluate_metric(args, arch, model, evaluator, accelerator,
                     metric=None, loss_func=None):
     """Run one calibration-set metric (loss/JSD/ppl) for one architecture.
@@ -1325,8 +1339,9 @@ def evaluate_metric(args, arch, model, evaluator, accelerator,
     metric = args.metric if metric is None else metric
     loss_func = args.loss_func if loss_func is None else loss_func
     stride, prefill_prompt, last_tokens, use_cache = metric_protocol(args, metric)
+    score = metric_score(args, metric)
     configure_model_cache(args, model, use_cache=use_cache)
     return evaluator.eval(arch=arch, metric=metric, model=model,
                           accelerator=accelerator, loss_func=loss_func,
                           stride=stride, prefill_prompt=prefill_prompt,
-                          last_tokens=last_tokens)[0]
+                          last_tokens=last_tokens, score=score)[0]

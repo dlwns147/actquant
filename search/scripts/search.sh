@@ -24,8 +24,17 @@ CONFIG=config/llama.json
 COMP_OBJ=eff_kvbits
 # COMP_OBJ=memory
 
+# Key-token (LongPPL) weighting: score only the tokens an EVALUATOR model finds
+# long-range-dependent. The archive stores CHARACTER intervals, so one evaluator
+# serves every target -- but the archive itself is per (target, corpus, seqlen)
+# because the loader text is target-tokenized.
 # USE_KEY_TOKEN=True
 USE_KEY_TOKEN=False
+KEY_TOKEN_EVALUATOR=${MODEL_NAME}      # any Instruct model; Qwen2.5-72B-Instruct is the shipped one
+TRUNC_LEN=512
+SLIDING_WINDOW=128
+ALPHA=1
+BETA=-1
 
 # USE_QEFT=True
 USE_QEFT=False
@@ -235,6 +244,20 @@ PREDICTOR=rbf
 # PREDICTOR=mlp
 # PREDICTOR=gp
 
+# Chat-templated calibration data: `chat:<corpus>` wraps every sample in ONE
+# user turn (BOS + role header + document + assistant header), matching the
+# format deployment feeds an Instruct model (RULER/LongBench both
+# apply_chat_template). SEQLEN/MIN_SEQLEN stay TOTAL lengths -- the document
+# budget shrinks by the per-model affix overhead (Llama-3.1 35 tokens,
+# Qwen2.5 29, Gemma-3 9, Mistral-v0.3 4). Loss/train side only (no PPL loader).
+# NOTE: this REDEFINES the objective, so archives produced with it are not
+# comparable to the pre-existing raw-wikitext2 ones. Measured on a 130-arch DOE
+# (eff_kvbits, Llama-3.1-8B): chat/raw JSD ratio 1.031, within-band Spearman
+# 0.983-0.995, top-10 overlap 8/10 -- i.e. near-monotone with raw-JSD on that
+# axis. Set to False to reproduce the older archives.
+USE_CHAT_TEMPLATE=True
+# USE_CHAT_TEMPLATE=False
+
 DATASET=wikitext2
 N_SAMPLE=128
 # N_SAMPLE=32
@@ -270,6 +293,17 @@ STRIDE=128
 # PREFILL_PROMPT=False
 # LAST_TOKENS=0
 PREFILL_PROMPT=True
+
+# What enters the loss. LAST_TOKENS is the ANSWER WINDOW either way: it sets the
+# prefill/answer split and, under chat:, where the assistant header lands.
+#   last : score only that window (the historical behaviour)
+#   full : score every position, split unchanged
+# Key tokens are ANDed with the window and are sparse, so a small window
+# intersects few or none of them (MEASURED: 0 of ~6 per document on 3 of 4
+# models at seqlen 512 / last_tokens 128) and eval_loss then scores NOTHING ->
+# use 'full' whenever USE_KEY_TOKEN=True.
+SCORE=last
+# SCORE=full
 # LAST_TOKENS=128
 # LAST_TOKENS=256
 LAST_TOKENS=512
@@ -297,10 +331,17 @@ SAVE_ITER=10
 # SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_hqq_kv_${KV_METHOD}_w24k24v24bits_w128k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_2048seqlen_0minseq_jsd/loss
 SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_hqq_kv_kivi_w24k24v24bits_w128k128x2v128x2group_size_1axis_k_${K_QUANT_SCHEME}_v_${V_QUANT_SCHEME}_wikitext2_128sample_2048seqlen_0minseq_jsd/loss
 
+# The tag has to carry SCORE: _pp512 with score=last and with score=full are
+# different metrics (one scores 512 positions, the other the whole sequence)
+# and would otherwise collide in the same save dir.
 PP_TAG=""
 if [ ${PREFILL_PROMPT} == 'True' ]; then
     PP_TAG="_pp${LAST_TOKENS}"
+    [ ${SCORE} == 'full' ] && PP_TAG="${PP_TAG}full"
 fi
+
+KT_TAG=""
+[ ${USE_KEY_TOKEN} == 'True' ] && KT_TAG="_kt"
 
 # Compress an arithmetic int list ("0 16 32 48 64" -> "0to64x16"); else '_'-join.
 compress_dim() {
@@ -329,11 +370,56 @@ if [ -n "${N_QEFT_COLUMN}" ]; then
     QEFT_TAG="_qc$(echo ${N_QEFT_COLUMN} | sed 's/ /-/g')_ob$(echo ${BASE_OUTLIER_BITS} | sed 's/ //g')"
 fi
 
+# One layout, parameterised by the answer window: chat: puts the assistant
+# header at seqlen - LAST_TOKENS, so the scored tail is generated in assistant
+# position. LAST_TOKENS=0 leaves the tail empty -> the header simply trails the
+# document (the old "wrapper"). No separate knob: the incoherent combination
+# (wrapper layout WITH a scored tail, which would sit in the USER turn) is not
+# representable. The split is visible in the dir name as _pp<LAST_TOKENS>.
+CHAT_TAG=""
+if [ ${USE_CHAT_TEMPLATE} == 'True' ]; then
+    DATASET="chat:${DATASET}"; CHAT_TAG="_ct"
+fi
+
+# The key-token archive is computed on the RAW document. Under a chat layout the
+# document is SEQLEN minus the model's affix overhead, so the archive must have
+# been generated at THAT length -- ask utils.data for it rather than hardcoding
+# a per-model constant.
+if [ ${USE_KEY_TOKEN} == 'True' ]; then
+    # Archive layout: `raw`, or `chat-a<answer window>` -- under a chat layout
+    # the sample text depends on where the assistant header falls, so each
+    # window is a different input with its own archive. The evaluator and the
+    # TARGET are in the root name; the per-corpus protocol is the subdirectory.
+    KT_LAYOUT=raw
+    KT_SEQLEN=${SEQLEN}
+    KT_ANS=0
+    if [ ${USE_CHAT_TEMPLATE} == 'True' ]; then
+        KT_ANS=${LAST_TOKENS}
+        KT_LAYOUT=chat-a${KT_ANS}
+    fi
+    KT_MIN_SEQLEN=${MIN_SEQLEN}
+    KEY_TOKEN_PATH=key_token/kt_eval-${KEY_TOKEN_EVALUATOR}_tgt-${MODEL_NAME}_${KT_LAYOUT}
+    KT_SUBDIR=${DATASET##chat*:}_${N_SAMPLE}sample_${KT_SEQLEN}seqlen_${KT_MIN_SEQLEN}min_${TRUNC_LEN}trunc_${SLIDING_WINDOW}sw_${ALPHA}alpha_${BETA}beta_s0
+    if [ ! -d "${KEY_TOKEN_PATH}/${KT_SUBDIR}" ] && [ ! -d "${KEY_TOKEN_PATH}/${DATASET##chat*:}" ]; then
+        echo "[search.sh] key-token archive missing: ${KEY_TOKEN_PATH}/${KT_SUBDIR}"
+        echo "  generate it (gen_key_token.py resolves the chat body budget and the"
+        echo "  answer window itself when you pass --metrics; here it is spelled out):"
+        echo "    python gen_key_token.py --config ${CONFIG} --dtype ${DTYPE} \\"
+        echo "      --model_path ${MODEL_PATH} --model_name ${KEY_TOKEN_EVALUATOR} \\"
+        echo "      --target_model_path ${MODEL_PATH} --target_model ${MODEL_NAME} \\"
+        echo "      --dataset ${DATASET} --train --n_sample ${N_SAMPLE} \\"
+        echo "      --seqlen ${KT_SEQLEN} --min_seqlen ${KT_MIN_SEQLEN} --answer_tokens ${KT_ANS} \\"
+        echo "      --trunc_len ${TRUNC_LEN} --sliding_window ${SLIDING_WINDOW} --alpha ${ALPHA} --beta ${BETA} \\"
+        echo "      --save_path ${KEY_TOKEN_PATH}"
+        exit 1
+    fi
+fi
+
 source "$(dirname "${BASH_SOURCE[0]}")/metric_tag.sh"
-MTAG=$(metric_tag_from_knobs "${DATASET:-${DATASETS}}" "${LOSS_FUNC}" "${METRIC:-loss}" \
+MTAG=$(metric_tag_from_knobs "${DATASET##chat*:}" "${LOSS_FUNC}" "${METRIC:-loss}" \
                              "${N_SAMPLE}" "${SEQLEN}" "${MIN_SEQLEN:-0}")
 
-SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${KV_METHOD_TEXT}${QEFT_TAG}${SINK_TAG}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_r${RESIDUAL_LENGTH}_kd${K_PRUNING_DIM_C}_vd${V_PRUNING_DIM_C}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_st${STRIDE}${PP_TAG}${MTAG}
+SAVE=save/search/think/${TODAY}_${MODEL_NAME}_${COMP_OBJ_TEXT}_${KV_METHOD_TEXT}${QEFT_TAG}${SINK_TAG}_w${W_BITS_TEXT}kv${KV_BITS_TEXT}_gs${KV_GROUP_SIZE_TEXT}_r${RESIDUAL_LENGTH}_kd${K_PRUNING_DIM_C}_vd${V_PRUNING_DIM_C}_obj_${COMP_OBJ_MIN_TEXT}_${COMP_OBJ_MAX_TEXT}_st${STRIDE}${PP_TAG}${MTAG}${CHAT_TAG}${KT_TAG}
 
 N_PROC=1
 
@@ -417,7 +503,13 @@ else
 fi
 
 if [ ${PREFILL_PROMPT} == 'True' ]; then
-    ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
+    if [ ${USE_KEY_TOKEN} == 'True' ] && [ ${SCORE} == 'last' ]; then
+        echo "[search.sh] WARNING: USE_KEY_TOKEN=True with SCORE=last — key tokens are"
+        echo "  ANDed with the last ${LAST_TOKENS} positions (measured coverage 4-20%, and 0 on"
+        echo "  some documents, which drops them from the average). Set SCORE=full to score"
+        echo "  every key token while keeping the prefill/answer split."
+    fi
+    ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} --score ${SCORE} "
 fi
 
 CUDA_VISIBLE_DEVICES=${DEVICES} accelerate launch --num_processes=${N_PROC} --num_machines=1 --main_process_port=${PORT_NUM} search.py \

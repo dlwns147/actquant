@@ -1,16 +1,16 @@
 TODAY=`date +%y%m%d%H%M`
 
-MODEL_PATH=/SSD/huggingface/meta-llama
-MODEL_NAME=Llama-3.1-8B-Instruct
-DTYPE=float16
-CONFIG=config/llama.json
-
-# MODEL_PATH=/SSD/huggingface/Qwen
-# MODEL_NAME=Qwen2.5-7B-Instruct
-# # ㅣㅣMODEL_NAME=Qwen2.5-14B-Instruct
-# # DTYPE=bfloat16
+# MODEL_PATH=/SSD/huggingface/meta-llama
+# MODEL_NAME=Llama-3.1-8B-Instruct
 # DTYPE=float16
-# CONFIG=config/qwen2.json
+# CONFIG=config/llama.json
+
+MODEL_PATH=/SSD/huggingface/Qwen
+MODEL_NAME=Qwen2.5-7B-Instruct
+# MODEL_NAME=Qwen2.5-14B-Instruct
+# DTYPE=bfloat16
+DTYPE=float16
+CONFIG=config/qwen2.json
 
 # MODEL_PATH=/SSD/huggingface/mistralai
 # MODEL_NAME=Mistral-7B-Instruct-v0.3
@@ -29,10 +29,10 @@ N_TOKEN_LIST=(16384 32768 65536 131072)
 # W_GROUP_SIZE_LIST=(-1 -1)
 # W_BITS_LIST=(2.75 3.25 3.75)
 # W_GROUP_SIZE_LIST=(128 128 128)
-# W_BITS_LIST=(2)
-# W_GROUP_SIZE_LIST=(128)
-W_BITS_LIST=(4)
+W_BITS_LIST=(2)
 W_GROUP_SIZE_LIST=(128)
+# W_BITS_LIST=(4)
+# W_GROUP_SIZE_LIST=(128)
 
 # KV_BITS_LIST <-> KV_GROUP_SIZE_LIST pair one-to-one (like W_BITS_LIST <->
 # W_GROUP_SIZE_LIST): index i = (bits[i], group_size[i]). group_size
@@ -43,16 +43,16 @@ W_GROUP_SIZE_LIST=(128)
 # KV_GROUP_SIZE_LIST=(128 32)
 # KV_BITS_LIST=(1.25 2 2.75 3.5)
 # KV_GROUP_SIZE_LIST=(128 128 128 128)
-# KV_BITS_LIST=(2)
-# KV_GROUP_SIZE_LIST=(128)
-KV_BITS_LIST=(4)
+KV_BITS_LIST=(2)
 KV_GROUP_SIZE_LIST=(128)
+# KV_BITS_LIST=(4)
+# KV_GROUP_SIZE_LIST=(128)
 
 # prune dim = # head_dim channels removed (0 = no pruning). NOT remaining dim.
 # INDEPENDENT axis: cartesian product with the (bits, group_size) pairs above.
 # KV_PRUNE_DIM_LIST=(48 0)
-# KV_PRUNE_DIM_LIST=(64)
-KV_PRUNE_DIM_LIST=(0)
+KV_PRUNE_DIM_LIST=(64)
+# KV_PRUNE_DIM_LIST=(0)
 
 SAVE=csv/mem
 CSV_FILE=${TODAY}_${MODEL_NAME}.csv

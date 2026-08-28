@@ -85,7 +85,8 @@ def _worker_main(gpu_id, wid, task_q, result_q, cfg, recycle_after):
                         evaluator.apply_kv(arch)        # cheap KV swap, weights reused
                     m, _ = evaluator.eval(accelerator=accelerator, arch=arch, metric='loss',
                                           model=evaluator.model, loss_func=cfg['loss_func'],
-                                          stride=cfg['stride'], prefill_prompt=cfg['prefill_prompt'])
+                                          stride=cfg['stride'], prefill_prompt=cfg['prefill_prompt'],
+                                          score=cfg.get('score', 'last'))
                     result_q.put(('ok', wid, i, (float(list(m.values())[0]), round(time() - t0, 1))))
                 except Exception as e:                  # noqa: BLE001 — report, main decides
                     result_q.put(('err', wid, i, repr(e)[:500]))

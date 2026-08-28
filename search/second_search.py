@@ -178,6 +178,7 @@ class SecondSearch:
                        v_quant_scheme=args.v_quant_scheme, loss_func=args.loss_func,
                        last_tokens=args.last_tokens, stride=args.stride,
                        prefill_prompt=args.prefill_prompt,
+                       score=getattr(args, 'score', 'last'),
                        # QUIET WORKERS (default): each worker redirects its OS-level stdout/stderr
                        # to <save>/awq_logs/ so the terminal shows only main-process [awq_pool]
                        # progress; --awq_verbose_workers keeps the inline spew (None = no redirect).
@@ -217,7 +218,8 @@ class SecondSearch:
             bits={'w': self.wbits, 'k': self.kvbits, 'v': self.kvbits}, group_size=self.ss.group_size,
             residual_length=args.residual_length, attn_sink=args.attn_sink,
             k_quant_scheme=args.k_quant_scheme, v_quant_scheme=args.v_quant_scheme,
-            loss_func=args.loss_func, last_tokens=args.last_tokens)
+            loss_func=args.loss_func, last_tokens=args.last_tokens,
+            score=getattr(args, 'score', 'last'))
 
     # ───────────────── evaluation (real JSD via LlamaEvaluator.eval) ─────────────────
     def _evaluate(self, archs):
@@ -238,7 +240,8 @@ class SecondSearch:
         metric = []
         for arch in archs:
             m, _ = self.evaluator.eval(self.accelerator, arch, 'loss', loss_func=self.args.loss_func,
-                                       stride=self.args.stride, prefill_prompt=self.args.prefill_prompt)
+                                       stride=self.args.stride, prefill_prompt=self.args.prefill_prompt,
+                                       score=getattr(self.args, 'score', 'last'))
             metric.append(float(list(m.values())[0]))
         return list(range(len(archs))), metric, comp
 
@@ -1064,14 +1067,14 @@ def build_parser():
                    help='Pool-anchored escape budget (0 = off): a child may sit at most this '
                         'many cell-flips from its NEAREST 1st-stage block, per axis half; the '
                         'excess is reverted to that block. Screened value 8 '
-                        '(tests/space_reduction/pool_restriction_audit.py: cuts 43.5% of the '
-                        'evaluated mass at regret 0.0000, keeps 94-100% of per-cell champions, '
+                        '(tests/space_reduction/pool_restriction_audit.py: cuts 43.5%% of the '
+                        'evaluated mass at regret 0.0000, keeps 94-100%% of per-cell champions, '
                         'best-of-B -0.0012..-0.0023). Anchors on the 588/273 measured blocks '
                         'rather than the ~44 band staircases (--l0_repair), which measured '
                         'strictly better at matched champion retention. m=0 would be pure '
                         'block products and is CATASTROPHIC — the pool is a scaffold, not a menu.')
     p.add_argument('--agree_frac', type=float, default=0.95,
-                   help='L2 freeze: cells where >= this fraction of the 1st-stage BLOCK POOL agree are excluded from mutation (and from the surrogate active set); the value itself is whatever block the individual inherited, NOT forced to the consensus. >1.0 disables. MEASURED (2026-08-14): operationally NEUTRAL — 0.95 vs OFF over 4 paired seeds is an HV tie, budget-cell record 1W/3L, marginals mixed, all |Δ| <= 1e-4 on a harness that resolved P1/P2 at 4.2e-3. The 0.95 itself is underived (it shipped with f7c4813 while its cited ablation ran at 0.90 on a div_k=200 pool freezing 14 cells; today div_k=0 freezes 55). Offline it looks risky (42.7% of per-budget-cell elites use a non-modal option at a frozen cell vs 0.0% at tau=1.0 — tests/space_reduction/freeze_threshold.py) but that exposure does not show up in the A/B, so leave it alone rather than re-tune it.')
+                   help='L2 freeze: cells where >= this fraction of the 1st-stage BLOCK POOL agree are excluded from mutation (and from the surrogate active set); the value itself is whatever block the individual inherited, NOT forced to the consensus. >1.0 disables. MEASURED (2026-08-14): operationally NEUTRAL — 0.95 vs OFF over 4 paired seeds is an HV tie, budget-cell record 1W/3L, marginals mixed, all |Δ| <= 1e-4 on a harness that resolved P1/P2 at 4.2e-3. The 0.95 itself is underived (it shipped with f7c4813 while its cited ablation ran at 0.90 on a div_k=200 pool freezing 14 cells; today div_k=0 freezes 55). Offline it looks risky (42.7%% of per-budget-cell elites use a non-modal option at a frozen cell vs 0.0%% at tau=1.0 — tests/space_reduction/freeze_threshold.py) but that exposure does not show up in the A/B, so leave it alone rather than re-tune it.')
     # per-iter down-select = subset selector over union(archive front, picks): std-of-gaps GA,
     # hole-filling, keeps edge candidates (baseline_search 2607100451/0638 post-mortem).
     p.add_argument('--subset_pop_size', type=int, default=100, help='down-select subset-GA population size')
@@ -1176,6 +1179,8 @@ def build_parser():
     p.add_argument('--min_seqlen', type=int, default=0)
     p.add_argument('--loss_func', default='jsd'); p.add_argument('--stride', type=int, default=128)
     p.add_argument('--prefill_prompt', action='store_true'); p.add_argument('--last_tokens', type=int, default=512)
+    p.add_argument('--score', choices=('last', 'full'), default='last',
+                   help="what enters the loss: 'last' = only the --last_tokens window (default); 'full' = every position, with the prefill/answer split still at --last_tokens. Use 'full' with --use_key_token: key tokens are sparse and an AND with a small window often scores nothing.")
     return p
 
 

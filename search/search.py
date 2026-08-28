@@ -114,6 +114,9 @@ class Search:
         self.stride = kwargs.pop('stride', 0)
         self.prefill_prompt = kwargs.pop('prefill_prompt', False)
         self.last_tokens = kwargs.pop('last_tokens', None)
+        # prefill/answer SPLIT point, independent of last_tokens (the SCORING
+        # window). None = inherit last_tokens -> historical behaviour.
+        self.score = kwargs.pop('score', 'last')
         self.use_key_token = kwargs.pop('use_key_token', False)
         self.trunc_len = kwargs.pop('trunc_len', 512)
         self.sliding_window = kwargs.pop('sliding_window', 128)
@@ -181,6 +184,7 @@ class Search:
             task_dict=self.task_dict,
             verbosity=self.verbosity,
             last_tokens=self.last_tokens,
+            score=self.score,
             use_key_token=self.use_key_token,
             trunc_len=self.trunc_len,
             sliding_window=self.sliding_window,
@@ -387,7 +391,7 @@ class Search:
     def _evaluate(self, archs, accelerator):
         metric_list, complexity_list = [], []
         for arch in tqdm(archs, desc='Eval Arch', disable=not accelerator.is_main_process):
-            metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func, stride=self.stride, prefill_prompt=self.prefill_prompt)
+            metric, complexity = self.evaluator.eval(accelerator=accelerator, arch=arch, metric=self.metric, loss_func=self.loss_func, stride=self.stride, prefill_prompt=self.prefill_prompt, score=self.score)
             metric_list.append(min(self.max_value, np.nan_to_num(list(metric.values())[0], nan=self.max_value)))
             complexity_list.append([complexity[obj] for obj in self.comp_obj])
 
@@ -925,8 +929,11 @@ if __name__ == '__main__':
     
     parser.add_argument('--stride', type=int, default=0,
                         help='chunk size for stride-aware eval with use_cache=True (0 = single forward pass)')
+    parser.add_argument('--score', choices=('last', 'full'), default='last',
+                        help="what enters the loss: 'last' = only the --last_tokens window (default); 'full' = every position, with the prefill/answer split still at --last_tokens. Use 'full' with --use_key_token: key tokens are sparse and an AND with a small window often scores nothing.")
     parser.add_argument('--last_tokens', type=int, default=None,
-                        help='If set, loss is computed only on the last N tokens per sample.')
+                        help='The answer window: the prefill/answer split point, and '
+                             '(with --score last) the positions the loss is computed on.')
     parser.add_argument('--prefill_prompt', action='store_true',
                         help='If set (with --last_tokens > 0), prefill the prompt in one forward '
                              'and stride only the answer span (matches real-decode KV state).')

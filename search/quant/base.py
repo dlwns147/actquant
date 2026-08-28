@@ -32,6 +32,24 @@ def _c4_traindata(cache_dir=None):
         data_files={'train': 'en/c4-train.00000-of-01024.json.gz'},
         split='train')
 
+def _gov_report_traindata(n_docs=256, seed=42):
+    """gov_report TRAIN split as a list of document strings, shuffled by `seed`.
+
+    Calibration counterpart of utils/data.py::get_gov_report (which reads the
+    TEST split, because there gov_report is an evaluation/loss corpus). Calib
+    must not touch test, so this reads `train` — the same domain (long US
+    government reports), disjoint documents.
+
+    `n_docs` bounds the tokenizer cost: gov_report documents are ~9k tokens, so
+    256 docs is ~2.3M tokens — far more than any calib budget here (128x512 for
+    AWQ, 128x2048 for GPTQ) while keeping the one-shot tokenize a few seconds.
+    """
+    ds = load_dataset('launch/gov_report', 'plain_text', split='train')
+    ds = ds.shuffle(seed=seed).flatten_indices()
+    n = min(int(n_docs), len(ds))
+    return ds[:n]['document']
+
+
 def get_awq_calib_dataset(data="pileval", tokenizer=None, n_samples=512, block_size=512):
     if data == "pileval":
         dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
@@ -61,6 +79,20 @@ def get_awq_calib_dataset(data="pileval", tokenizer=None, n_samples=512, block_s
         need = n_samples * block_size
         if enc.shape[1] < need:
             raise ValueError(f"wikitext2 train has {enc.shape[1]} tokens < "
+                             f"requested {need} ({n_samples}x{block_size})")
+        cat_samples = enc[:, :need]
+    elif 'gov_report' in data or data == 'gov':
+        # gov_report (long US government reports) for AWQ — the long-context
+        # DOMAIN calib, to test whether calibrating on the kind of text the
+        # long-context benchmarks actually contain helps RULER/LongBench.
+        # Same contract as the wikitext2 branch (concatenate -> first
+        # n_samples*block_size tokens -> chop), so the ONLY thing that differs
+        # between the wikitext2 and gov_report arms is the text.
+        docs = _gov_report_traindata()
+        enc = tokenizer("\n\n".join(docs), return_tensors="pt").input_ids
+        need = n_samples * block_size
+        if enc.shape[1] < need:
+            raise ValueError(f"gov_report slice has {enc.shape[1]} tokens < "
                              f"requested {need} ({n_samples}x{block_size})")
         cat_samples = enc[:, :need]
     elif 'c4' in data:
@@ -131,6 +163,24 @@ def get_owq_calib_dataset(data="c4", tokenizer=None, n_samples=128, seed=0, seql
             tar[:, :-1] = -100
             trainloader.append((inp, tar))
             
+    elif 'gov_report' in data or data == 'gov':
+        # gov_report for GPTQ/OWQ. Mirrors the wikitext2 branch exactly
+        # (concatenate the corpus, draw n_samples random seqlen windows), so
+        # the wikitext2 <-> gov_report contrast is pure CONTENT.
+        docs = _gov_report_traindata()
+        trainenc = tokenizer("\n\n".join(docs), return_tensors='pt')
+        if trainenc.input_ids.shape[1] <= seqlen + 1:
+            raise ValueError(
+                f"gov_report slice has {trainenc.input_ids.shape[1]} tokens, "
+                f"too few for seqlen={seqlen}")
+        trainloader = []
+        for _ in range(n_samples):
+            i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            inp = trainenc.input_ids[:, i:j]
+            tar = inp.clone()
+            tar[:, :-1] = -100
+            trainloader.append((inp, tar))
     elif 'c4' in data:
         # Offline-safe c4 (shared loader, mirrors utils/data.py); per-doc
         # random-window sampling below is the OWQ/GPTQ calibration convention.

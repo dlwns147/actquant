@@ -18,6 +18,16 @@ Two levels:
   last_tokens``. Tasks in the same group differ only here and cost one extra
   forward each, no extra teacher pass.
 
+``last_tokens`` is the ANSWER WINDOW: the prefill/answer split point, where the
+``chat:`` loader puts the assistant header (``seqlen - last_tokens``), and — under
+the default ``score='last'`` — the positions that are scored. ``score='full'``
+keeps the split and scores everything instead; that is the shape key-token
+metrics need, because key tokens are sparse and an AND with a small window often
+scores nothing. So a ``_pp<N>_s<M>`` name means: prefill up to ``seqlen - N``,
+push the last ``N`` through the cache in ``M``-token chunks, score those ``N``
+positions — unless the metric sets ``score='full'``, which scores every position
+the label/key masks allow.
+
 Helpers: :func:`resolve_tasks` (names → task tuples), :func:`groups_for`
 (tasks → the group specs to build), :func:`precompute_groups` (ONE FP-teacher
 pass for every group, parked on CPU) and :func:`apply_group` (point an existing
@@ -176,6 +186,108 @@ GROUPS = {
         datasets=['gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
         loss_func='jsd', use_key_token=True, last_tokens=None,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+        key_token_suffix='_raw',
+    ),
+    # ── chat-templated twins (`chat:<corpus>`) ────────────────────────────
+    # Same corpus, same window, but each sample is wrapped in ONE user turn with
+    # the assistant header at seqlen - last_tokens, so the scored tail is
+    # produced in ASSISTANT position -- the format deployment actually feeds an
+    # Instruct model. seqlen/min_seqlen stay TOTAL; the document budget shrinks
+    # by the per-model affix overhead (Llama-3.1 35 tokens, Qwen2.5 29,
+    # Gemma-3 9, Mistral-v0.3 4), so these are NOT the same token spans as the
+    # raw twins -- pair them by name, not by assuming identical text.
+    # sides=('train',): the chat loader is loss-side only (PPL over template
+    # boilerplate is not a metric), so the test build is skipped entirely.
+    'A_lt128_chat': dict(
+        datasets=['chat:wikitext2'], n_sample=128, seqlen=2048, min_seqlen=0,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        trunc_len=512, sliding_window=128, alpha=2, beta=-2,
+    ),
+    'A_pp_chat': dict(
+        datasets=['chat:wikitext2'], n_sample=128, seqlen=2048, min_seqlen=0,
+        loss_func='jsd', use_key_token=False, last_tokens=512, sides=('train',),
+        trunc_len=512, sliding_window=128, alpha=2, beta=-2,
+    ),
+    'B_lt128_chat': dict(
+        datasets=['chat:gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_pp_chat': dict(
+        datasets=['chat:gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=512, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'C_pp': dict(  # gov_report long, key-token, 512-token answer window
+        # gov_jsd_pp512_s128's key-token twin (group B_pp + the flag).
+        datasets=['gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=True, last_tokens=512,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+        key_token_suffix='_raw',
+    ),
+    'C_wt2_pp': dict(  # wikitext2, key-token, 512-token answer window
+        # The FIRST key-token group on a non-gov corpus, so it needs its own
+        # archive. trunc_len/sliding_window are gov's RATIOS, not gov's numbers:
+        # trunc_len is the "no long context" baseline, so what matters is its
+        # share of the window. gov is 256/8192 = 3.1% with 124 short forwards per
+        # document; at 2048 that is 64/16 -- same share, same window count, same
+        # cost per document.
+        # MEASURED (Llama-3.1-8B self-evaluated, 4 docs x 2048), hit rate =
+        # intervals / candidate positions:
+        #     512/128  ->   32 intervals  0.52%   (the original, far too coarse)
+        #     256/64   ->   56            0.78%
+        #      64/16   ->  166            2.09%   <- gov's 2.38%
+        #      32/8    ->  326            4.04%   (looser than gov's ratio: a
+        #                                          32-token baseline calls any
+        #                                          token needing ~50 tokens key)
+        # alpha/beta keep C's thresholds (1/-1).
+        # ⚠️ MEASURED AND THIN. wikitext2 is far sparser than gov_report:
+        # n_sample=128 yields only 4 windows (the loader joins 128 text ROWS then
+        # reslices), carrying 15 key tokens in total. With last_tokens=512 just
+        # 7 survive, spread [4, 0, 1, 2] -- ONE DOCUMENT CONTRIBUTES NOTHING and
+        # is skipped by eval_loss. Compare gov_jsd_kt_pp512_s128: 119 survivors
+        # over 8 documents, none empty. Treat this metric as a very-low-N probe;
+        # to make it substantive raise n_sample (n_sample=2048 -> 65 windows),
+        # loosen alpha/beta, or drop the window (score every key token, as the
+        # last_tokens=None group C tasks do).
+        datasets=['wikitext2'], n_sample=128, seqlen=2048, min_seqlen=0,
+        loss_func='jsd', use_key_token=True, last_tokens=512,
+        trunc_len=64, sliding_window=16, alpha=1, beta=-1,
+        key_token_suffix='_raw',
+    ),
+    # ── chat-templated key-token groups ───────────────────────────────────
+    # `key_token_on_sample`: the archive is computed on the WHOLE chat sample --
+    # affixes included -- not on the bare document, because that sample IS the
+    # input being measured. The sample text depends on the answer window (with
+    # answer_tokens=A the document is laid out pre+context+post+tail, so `post`
+    # moves): MEASURED, all of chat A=0 / A=128 / A=512 and the bare document
+    # are four DIFFERENT strings. So each window needs its own archive, named by
+    # `key_token_suffix`. Key tokens that land on the affixes are dropped by the
+    # label mask (the chat loader sets -100 there), so they cost nothing.
+    # Same TOTAL seqlen as the raw twins (the chat convention: the affixes come
+    # out of the DOCUMENT budget), so the archive is computed on the shorter
+    # body and is NOT the raw archive. Generate it with
+    # Llama-3.1 (overhead 35): --dataset chatdoc:gov_report --seqlen 8157.
+    # precompute_groups files it under the BASE corpus and maps the intervals
+    # onto the document range(s), so <key_token_path>/gov_report is the path.
+    'C_pp_chat': dict(
+        datasets=['chat:gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=True, last_tokens=512, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+        key_token_suffix='_chat-a512', key_token_on_sample=True,
+    ),
+    'C_wt2_pp_chat': dict(
+        # wikitext2 is a STREAM corpus: the chat body is built with
+        # add_special_tokens=False, so it differs from the raw loader by the BOS
+        # and the two archives are NOT interchangeable (MEASURED: the raw loader
+        # is rejected against a chat-body archive; the windows sit one token
+        # apart). Generate with --dataset chatdoc:wikitext2 --seqlen 2013.
+        # trunc/sliding_window follow C_wt2_pp (64/16 = gov's ratios at 2048).
+        # Inherits C_wt2_pp's thinness warning -- 4 windows, ~15 key tokens.
+        datasets=['chat:wikitext2'], n_sample=128, seqlen=2048, min_seqlen=0,
+        loss_func='jsd', use_key_token=True, last_tokens=512, sides=('train',),
+        trunc_len=64, sliding_window=16, alpha=1, beta=-1,
+        key_token_suffix='_chat-a512', key_token_on_sample=True,
     ),
     # ── PPL-only groups ────────────────────────────────────────────────────
     # PPL reads test_loaders and never touches dense_logits, so loss_func=
@@ -294,11 +406,29 @@ def is_long_doc(spec):
                for d in spec['datasets'])
 
 
-# Pin the document-selection seed on every long-doc group (see LONG_DOC_DATA_SEED).
+# The chat layout only says something when there IS an answer window: with
+# answer_tokens=0 the assistant header just trails the document, which is not a
+# protocol anyone measures -- and it would need its own archive (the sample text
+# depends on the window). Fail loudly rather than let one be added by accident.
+for _g, _g_spec in GROUPS.items():
+    if (_g_spec.get('use_key_token')
+            and any(str(d).startswith('chat:') for d in _g_spec['datasets'])
+            and not _g_spec.get('last_tokens')):
+        raise SystemExit(
+            f"[metric_specs] chat key-token group '{_g}' has no answer window "
+            f"(last_tokens={_g_spec.get('last_tokens')}). The chat layout is only "
+            f"used with prefill_prompt + an answer window; give it one or drop "
+            f"the group.")
+
+
+# Pin the document-selection seed on every long-doc group (see LONG_DOC_DATA_SEED)
+# AND on every key-token group: an archive is bound to the exact documents by a
+# per-slice text hash, so a run with a different --seed would select other
+# documents and utils/loss.py would reject the archive outright.
 # Done as a loop, not 14 copies of `data_seed=0`, so a new long-doc group is
 # covered the moment it is added. A group may still override it explicitly.
 for _g_spec in GROUPS.values():
-    if is_long_doc(_g_spec):
+    if is_long_doc(_g_spec) or _g_spec.get('use_key_token'):
         _g_spec.setdefault('data_seed', LONG_DOC_DATA_SEED)
 del _g_spec
 
@@ -549,6 +679,38 @@ METRIC_TASKS = [
     ('gov_jsd_kt',        'C', 'gov_report',
         dict(metric='loss', loss_func='jsd',
              stride=0, prefill_prompt=False, last_tokens=None)),
+    # chat-templated twins of wt2/gov _pp{128,512}_s32 (see the *_chat groups).
+    # No key tokens: the same answer-phase protocol as the raw twins, with every
+    # sample wrapped in one user turn and the assistant header at
+    # seqlen - last_tokens. They are the control for the chat LAYOUT on its own.
+    ('wt2_jsd_pp128_s32_chat', 'A_lt128_chat', 'chat:wikitext2',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('wt2_jsd_pp512_s32_chat', 'A_pp_chat', 'chat:wikitext2',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp128_s32_chat', 'B_lt128_chat', 'chat:gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_jsd_pp512_s32_chat', 'B_pp_chat', 'chat:gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_kt_pp512_s128', 'C_pp', 'gov_report',
+        # gov_jsd_pp512_s128's key-token twin. 119 of gov_report's 1729 key
+        # tokens fall in the last 512 positions (7,10,29,11,24,11,4,23) --
+        # 4.6x the pp128 window, non-empty on every document.
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('wt2_jsd_kt_pp512_s128', 'C_wt2_pp', 'wikitext2',
+        # wt2_jsd_pp512_s128's key-token twin.
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_kt_pp512_s128_chat', 'C_pp_chat', 'chat:gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('wt2_jsd_kt_pp512_s128_chat', 'C_wt2_pp_chat', 'chat:wikitext2',
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
     ('gov_jsd_kt_s512',   'C', 'gov_report',
         # stride=512 chunked forward over the same key-token archive as
         # gov_jsd_kt — bounds peak activation memory at 8K context while
@@ -600,6 +762,49 @@ for _base, _grp, _ds in _PPL_BASES:
                                   stride=32, prefill_prompt=True, last_tokens=_lt)))
 del _base, _grp, _ds, _lt, _name, _existing
 
+# ── one metric (and one group) per key-token EVALUATOR ──────────────────────
+# The evaluator decides WHICH tokens are key, and swapping it moves the value:
+# MEASURED on gov_report, Qwen2.5-72B vs Llama-3.1-8B pick only ~half the same
+# tokens (jaccard 0.38) and the JSD differs by 10-16%. A single name like
+# `gov_jsd_kt` would therefore mean two different numbers depending on which
+# archive a run happened to point at, so the evaluator goes in the NAME and the
+# archive path is DERIVED from it (no --key_token_path root to get wrong).
+# Groups double too: dense_logits are pre-masked to the key positions, so a
+# different key set needs its own FP-teacher pass.
+_KT_EVALS = {           # name tag -> evaluator model (the `eval-` in the path)
+    'q72b': 'Qwen2.5-72B-Instruct',
+    'l8b':  'Llama-3.1-8B-Instruct',
+}
+
+_kt_base_groups = [g for g, sp in GROUPS.items() if sp.get('use_key_token')]
+for _g in _kt_base_groups:
+    _spec = GROUPS.pop(_g)
+    for _tag, _ev in _KT_EVALS.items():
+        GROUPS[f'{_g}_{_tag}'] = dict(_spec, key_token_eval=_ev)
+
+_expanded = []
+for _t in METRIC_TASKS:
+    if _t[1] in _kt_base_groups:
+        for _tag in _KT_EVALS:
+            _expanded.append((f'{_t[0]}_{_tag}', f'{_t[1]}_{_tag}', _t[2], dict(_t[3])))
+    else:
+        _expanded.append(_t)
+METRIC_TASKS = _expanded
+del _kt_base_groups, _expanded, _g, _spec, _tag, _ev, _t
+
+
+def key_token_root(base_dir, spec, target_model):
+    """<base_dir>/kt_eval-<evaluator>_tgt-<target>_<layout> for one group.
+
+    Derived, not configured: the evaluator comes from the metric name (via its
+    group) and the target is the model being measured, so a run cannot pair a
+    metric with another evaluator's archive.
+    """
+    import os
+    return os.path.join(base_dir, f"kt_eval-{spec['key_token_eval']}"
+                                  f"_tgt-{target_model}{spec['key_token_suffix']}")
+
+
 METRIC_KEYS = [t[0] for t in METRIC_TASKS]
 BENCH_KEYS = ['longbench', 'longbench_e', 'ruler']
 ALL_KEYS = METRIC_KEYS + BENCH_KEYS
@@ -647,9 +852,14 @@ def resolve_tasks(names):
     return out
 
 
-def groups_for(tasks, key_token_path=''):
+def groups_for(tasks, key_token_path='', target_model=None):
     """The group specs `tasks` need, as [(group_name, spec)] in first-use order.
-    Group 'C' is the key-token group and needs --key_token_path."""
+
+    A key-token group needs `key_token_path` (the DIRECTORY the archives live
+    in). With `target_model` the per-group root is derived from it —
+    `kt_eval-<evaluator>_tgt-<target>_<layout>`, the evaluator coming from the
+    metric name — which is what a caller measuring one model should pass.
+    Without it the bare directory is handed through (legacy callers)."""
     out, seen = [], set()
     for _key, g, _ds, _kw in tasks:
         if g in seen:
@@ -660,7 +870,8 @@ def groups_for(tasks, key_token_path=''):
             if not key_token_path:
                 raise SystemExit(
                     f"metric group '{g}' needs key tokens → pass --key_token_path.")
-            spec['key_token_path'] = key_token_path
+            spec['key_token_path'] = (key_token_root(key_token_path, spec, target_model)
+                                      if target_model else key_token_path)
         else:
             spec['key_token_path'] = ''
         out.append((g, spec))
@@ -709,7 +920,7 @@ def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto
                          key_token_list, spec)}; with fail_soft, failed groups
     map to dict(error=..., traceback=...) instead.
     """
-    from utils.data import get_loader
+    from utils.data import get_loader, chat_spans_for, key_token_corpus, key_token_dir
     from utils.eval import get_logits, get_tokenizer
     from utils.func import clean_up, get_hfmodel
     from utils.loss import get_key_token_list
@@ -731,7 +942,10 @@ def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto
             return {d: accelerator.prepare(get_loader(
                         d, model=model_id, n_sample=spec['n_sample'],
                         batch_size=batch_size, train=train, seed=data_seed,
-                        seqlen=spec['seqlen'], min_seqlen=spec['min_seqlen']))
+                        seqlen=spec['seqlen'], min_seqlen=spec['min_seqlen'],
+                        # a chat: corpus with an answer window splits the DOCUMENT, so its span is a
+                        # GROUP property (it changes the data, not just the forward)
+                        answer_tokens=spec['last_tokens']))
                     for d in spec['datasets']}
         # `sides` (optional) restricts which loader sides are built: 'loss'
         # metrics read train_loaders, 'ppl' reads test_loaders, so a PPL-only
@@ -771,17 +985,39 @@ def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto
     t0 = time()
     fp = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
     fp.eval()
-    tok = get_tokenizer(model_id, use_fast=True)
+    # only the key-token path needs a tokenizer here; loading one for a
+    # dense-logits-only group is a pointless read (and made the mocked test
+    # reach the hub)
+    tok = (get_tokenizer(model_id, use_fast=True)
+           if any(sp['use_key_token'] for _, sp in pending) else None)
     for g, spec in pending:
         r = out[g]
         if spec['use_key_token']:
+            # Two chat-corpus corrections, mirroring LlamaEvaluator:
+            #  * the archive is computed on the RAW document, so it is filed under
+            #    the BASE corpus -- `chat:gov_report` must look in
+            #    <key_token_path>/gov_report, not <…>/chat:gov_report;
+            #  * the character intervals address the DOCUMENT, so the offsets must
+            #    be built over the document range(s) only. Without this the
+            #    template affixes shift every offset and the manifest check
+            #    rejects the archive (which is the good failure, but a hard stop).
+            _ans = spec.get('answer_span') or spec['last_tokens']
             r['key_token_list'] = {
                 d: get_key_token_list(
                     evaluator_model=fp, evaluator_tokenizer=tok, loader=loader,
                     trunc_len=spec['trunc_len'], sliding_window=spec['sliding_window'],
                     alpha=spec['alpha'], beta=spec['beta'],
-                    load_path=os.path.join(spec.get('key_token_path', ''), d),
-                    mode='offline')
+                    load_path=key_token_dir(
+                        spec.get('key_token_path', ''), d, spec['n_sample'],
+                        spec['seqlen'], spec['min_seqlen'], spec['trunc_len'],
+                        spec['sliding_window'], spec['alpha'], spec['beta'],
+                        spec.get('data_seed', 0)),
+                    mode='offline',
+                    # doc_spans maps intervals computed on the BARE document
+                    # into a chat sample. An on-sample archive needs no mapping:
+                    # its offsets already refer to the whole sequence.
+                    doc_spans=(None if spec.get('key_token_on_sample')
+                               else chat_spans_for(d, tok, spec['seqlen'], _ans)))
                 for d, loader in r['train_loaders'].items()}
         if not r['dense_logits']:
             continue
@@ -875,6 +1111,7 @@ def run_task(args, accelerator, evaluator, dataset, eval_kwargs):
         stride=eval_kwargs.get('stride') or 0,
         last_tokens=eval_kwargs.get('last_tokens'),
         prefill_prompt=bool(eval_kwargs.get('prefill_prompt')),
+        score=eval_kwargs.get('score', 'last'),
         tokenizer=evaluator.tokenizer)
 
 
@@ -886,7 +1123,7 @@ def run_task(args, accelerator, evaluator, dataset, eval_kwargs):
 # there: an archive should be self-describing about how its loss was measured.
 PROTOCOL_KEYS = ('dataset', 'datasets', 'n_sample', 'seqlen', 'min_seqlen',
                  'data_batch_size', 'metric', 'loss_func', 'stride',
-                 'prefill_prompt', 'last_tokens', 'use_key_token',
+                 'prefill_prompt', 'last_tokens', 'score', 'use_key_token',
                  'attn_sink', 'residual_length')
 
 

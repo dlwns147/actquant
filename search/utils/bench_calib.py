@@ -9,12 +9,11 @@ Design decisions (each backed by a measured comparison; see the 2608 audit):
     is taken from the calibration archs, so nothing here is tuned by hand).
     Unseen option values in a scored arch encode as all-zero for that cell
     (prediction-neutral) and are counted + warned about.
-  * front  = PLS-8 supervised on the chosen TARGET (per target). Targets are
-    'ruler', 'longbench', or ANY correlation.csv column (loss/proxy columns —
-    jsd/ppl/nll/loss in the name — are sign-flipped to higher-is-better).
-    Supervising on the search objective itself (sqrt-JSD plstyp) was measurably
-    worse for benchmark targets: those latents inherit exactly the proxy
-    blindness this module exists to break.
+  * front  = PLS-8 supervised on the BENCHMARK target ('ruler' or
+    'longbench', per target). Supervising on the search objective itself
+    (sqrt-JSD plstyp) was measurably worse: those latents inherit exactly the
+    proxy blindness this module exists to break. Loss enters (optionally) as a
+    model INPUT via loss_col, never as a target.
   * head   = predictor.factory 'rbf' (tps) or 'ard_gp' on the 8 latents.
     Raw targets, no sqrty/logy/logity transform. rbf is an interpolant with
     no noise term: fine on the spread-out calibration design, but prefer
@@ -32,36 +31,19 @@ _W_LINEARS = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",
               "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj",
               "mlp.down_proj")
 
-# column-name fragments that mean "lower is better" → target sign-flipped so
-# that scores() is ALWAYS higher-is-better regardless of target kind.
-_LOWER_BETTER = ('jsd', 'ppl', 'nll', 'loss')
-
-
 def _target_vector(rows, tgt):
-    """(y, note) with y HIGHER-IS-BETTER for a named target or any
-    correlation.csv column (e.g. 'gov_jsd_pp128_s32', 'wt2_ppl')."""
+    """y (HIGHER-IS-BETTER) for a benchmark target — 'ruler' or 'longbench'.
+    Loss/proxy columns are deliberately NOT accepted as targets; measured loss
+    may enter as a model input (loss_col) instead."""
     if tgt == 'ruler':
         cols = [c for c in rows[0] if c.startswith('ruler__')
                 and c != 'ruler__avg']
-        y = np.clip(np.array([[float(r[c]) for c in cols] for r in rows]),
-                    0, 1).mean(1)
-        return y, ''
+        return np.clip(np.array([[float(r[c]) for c in cols] for r in rows]),
+                       0, 1).mean(1)
     if tgt == 'longbench':
-        return np.array([float(r['longbench_e__avg']) for r in rows]), ''
-    if tgt not in rows[0]:
-        raise SystemExit(
-            f"[bench-calib] target '{tgt}' is neither ruler/longbench nor a "
-            f"column of correlation.csv")
-
-    def f(v):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return np.nan
-    y = np.array([f(r[tgt]) for r in rows])
-    if any(k in tgt for k in _LOWER_BETTER):
-        return -y, f"lower-is-better column → sign-flipped (top pick = lowest {tgt})"
-    return y, "assumed higher-is-better (no jsd/ppl/nll/loss in the name)"
+        return np.array([float(r['longbench_e__avg']) for r in rows])
+    raise SystemExit(f"[bench-calib] unknown target '{tgt}' "
+                     f"(valid: ruler | longbench)")
 
 
 def check_loss_protocol(loss_col, protocol):
@@ -160,7 +142,7 @@ class BenchCalib:
                 raise SystemExit(f"[bench-calib] loss_col '{loss_col}' is not "
                                  f"a correlation.csv column")
             loss_vec = np.array([float(r[loss_col]) for r in rows])
-        cols = [y for y, _ in ys.values()]
+        cols = list(ys.values())
         if loss_vec is not None:
             cols.append(loss_vec)
         ok = np.all(np.isfinite(np.column_stack(cols)), axis=1)
@@ -168,9 +150,7 @@ class BenchCalib:
             raise SystemExit(f"[bench-calib] only {int(ok.sum())} complete "
                              f"target rows in {calib_dir}; need >= 100")
         self.models = {}
-        for tgt, (y, note) in ys.items():
-            if note:
-                print(f"[bench-calib] target '{tgt}': {note}")
+        for tgt, y in ys.items():
             self.models[tgt] = self._fit(
                 X[ok], y[ok], predictor,
                 loss=loss_vec[ok] if loss_vec is not None else None)

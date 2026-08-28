@@ -1,0 +1,58 @@
+{
+  "evaluator_model": "/SSD/huggingface/Qwen/Qwen2.5-72B-Instruct",
+  "target_model": "/SSD/huggingface/meta-llama/Llama-3.1-8B-Instruct",
+  "dataset": "gov_report",
+  "train": false,
+  "n_sample": 8,
+  "seqlen": 8192,
+  "min_seqlen": 8192,
+  "seed": 0,
+  "data_batch_size": 1,
+  "trunc_len": 256,
+  "sliding_window": 64,
+  "alpha": 1,
+  "beta": -1,
+  "n_slices": 8,
+  "slices": [
+    {
+      "sha256": "9b331aa922ffc9a464183903ae86680a6e767301dc7406d2380d11fda964cdbf",
+      "chars": 43252,
+      "n_intervals": 150
+    },
+    {
+      "sha256": "757bead3f036d945346b09cec6aeca7392ef016c95cc33a309e70a55e046b2b2",
+      "chars": 40351,
+      "n_intervals": 126
+    },
+    {
+      "sha256": "d30decf18aa32f13386071ff5663d5a07510ad5f788738de81ee0e4661c37bba",
+      "chars": 43554,
+      "n_intervals": 210
+    },
+    {
+      "sha256": "410412953e715970fc22840a71187dc42473b19943e1aaea8f7c33022e4ff7b3",
+      "chars": 41458,
+      "n_intervals": 146
+    },
+    {
+      "sha256": "55398a2b55dc58635a2e2b83f34467732bfd833d0756d5b8f0d4dce9ade97ae7",
+      "chars": 41239,
+      "n_intervals": 202
+    },
+    {
+      "sha256": "e974f2848de1a509bafc7eb30ac44e5bdb0fd2d30bdacd9512b355c661612f1e",
+      "chars": 42808,
+      "n_intervals": 235
+    },
+    {
+      "sha256": "fe5b74bbffbcbb598a7722db347ac0c4d59fed8b8ccee84412d3052727a0e669",
+      "chars": 41419,
+      "n_intervals": 264
+    },
+    {
+      "sha256": "1e5ab8c4cd68f0ac9791fdbb008858c4c1ca66f07b1cb8fc20d027dd35cc86b3",
+      "chars": 43968,
+      "n_intervals": 177
+    }
+  ]
+}

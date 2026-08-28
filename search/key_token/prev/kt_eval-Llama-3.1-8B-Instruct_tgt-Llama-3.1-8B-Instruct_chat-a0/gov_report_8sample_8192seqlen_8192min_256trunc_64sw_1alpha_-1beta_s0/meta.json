@@ -1,0 +1,59 @@
+{
+  "evaluator_model": "/SSD/huggingface/meta-llama/Llama-3.1-8B-Instruct",
+  "target_model": "/SSD/huggingface/meta-llama/Llama-3.1-8B-Instruct",
+  "dataset": "chat:gov_report",
+  "train": true,
+  "n_sample": 8,
+  "seqlen": 8192,
+  "min_seqlen": 8192,
+  "seed": 0,
+  "data_batch_size": 1,
+  "answer_tokens": 0,
+  "trunc_len": 256,
+  "sliding_window": 64,
+  "alpha": 1,
+  "beta": -1,
+  "n_slices": 8,
+  "slices": [
+    {
+      "sha256": "00398d3048736282965b6302dd53ca66548abc7d78a1c7a0f148e2c575373527",
+      "chars": 43180,
+      "n_intervals": 152
+    },
+    {
+      "sha256": "48a8d3601b9ef5a5bc8569b2709e171fbd3208e5e4f5dd30ad379c877426230b",
+      "chars": 40253,
+      "n_intervals": 129
+    },
+    {
+      "sha256": "bc7a423772bea5d4f3de72c478d25091ef208b84d821b4e2e1442833845f5129",
+      "chars": 43457,
+      "n_intervals": 196
+    },
+    {
+      "sha256": "2673c62aa3498ebb8c84d51a085671259ca80a2e45853c42b51b4fa57d2ca971",
+      "chars": 41365,
+      "n_intervals": 149
+    },
+    {
+      "sha256": "28c5c368533f47b895efeb1485c9e50ba70eed2529b30fb964cb37fe6281429b",
+      "chars": 41161,
+      "n_intervals": 191
+    },
+    {
+      "sha256": "cebbffe7664cd76a977f5edeb5705411bb3730c150420d6ce06a45caf56f4d29",
+      "chars": 42764,
+      "n_intervals": 241
+    },
+    {
+      "sha256": "e64cf8be6084863f5579d61a1a8e1204de5136bd8387647248b6e89d1f5b6456",
+      "chars": 41286,
+      "n_intervals": 257
+    },
+    {
+      "sha256": "040dc065112b857bde68c224d0e285317bffce40c5882be50bf8bddc3082c78a",
+      "chars": 43862,
+      "n_intervals": 166
+    }
+  ]
+}
