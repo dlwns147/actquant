@@ -913,8 +913,16 @@ def groups_for(tasks, key_token_path='', target_model=None):
         spec = dict(GROUPS[g])
         if spec.get('use_key_token'):
             if not key_token_path:
+                # Defensive: correlation.py never reaches this — it drops
+                # unmeasurable key-token TASKS before building groups (see
+                # correlation.drop_key_token_tasks), so no such group survives.
+                # A caller that lands here handed key-token tasks straight
+                # through without that filter.
                 raise SystemExit(
-                    f"metric group '{g}' needs key tokens → pass --key_token_path.")
+                    f"metric group '{g}' needs key tokens → pass --key_token_path, "
+                    f"or filter the key-token tasks out first "
+                    f"(correlation.drop_key_token_tasks does this and reports "
+                    f"which metrics it skipped).")
             spec['key_token_path'] = (key_token_root(key_token_path, spec, target_model)
                                       if target_model else key_token_path)
         else:
