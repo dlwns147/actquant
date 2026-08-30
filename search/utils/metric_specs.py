@@ -83,17 +83,27 @@ GROUPS = {
         loss_func='jsd', use_key_token=False, last_tokens=512,
         trunc_len=512, sliding_window=128, alpha=2, beta=-2,
     ),
+    # KEEP IN MIND when reading pp32_s8: under residual_length=128 the whole
+    # 32-token window is inside the FP residual, so none of the SCORED tokens'
+    # own KV is quantised -- it probes the quantised PREFIX, not the
+    # KV-accumulates-as-you-decode behaviour the name suggests. MEASURED scored
+    # positions: wt2 128 (wikitext2 yields 4 windows, not 128 -- the loader
+    # joins 128 text ROWS then reslices) and gov 256, against 2048/4096 for the
+    # pp512_s128 pair, which is also the only window wider than the residual
+    # (384 of its 512 positions carry quantised KV). It is the tightest
+    # decode-shaped probe available; just do not read it as the most realistic.
     'A_lt32': dict(  # wikitext2 — last-32-token answer window (pp32_s8).
-        # The tightest answer window in the registry: prefill 2016 tokens, then
-        # score 32 tokens in 8-token chunks — the closest stand-in for real
-        # DECODE (4 cache-appending steps) that the loss harness can do.
-        # dense_logits are tiny (128 x 32 x vocab fp16 ~ 1.0 GB).
-        # CAVEAT: with residual_length=128 the scored window itself is inside
-        # the FP residual, so pp32_s8 probes the QUANTIZED PREFIX only; and 32
-        # positions x 128 seqs is 4x less averaging than lt128 -> noisier.
+        # Prefill 2016 tokens, then score 32 in 8-token chunks (4 cache-appending
+        # steps). dense_logits are tiny (32 positions x vocab fp16).
         datasets=['wikitext2'], n_sample=128, seqlen=2048, min_seqlen=0,
         loss_func='jsd', use_key_token=False, last_tokens=32,
         trunc_len=512, sliding_window=128, alpha=2, beta=-2,
+    ),
+    'B_lt32': dict(  # gov_report — last-32-token answer window (pp32_s8).
+        # 8k prefill + 32 scored tokens in 8-token chunks; same shape as A_lt32.
+        datasets=['gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=32,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
     'A_lt128': dict(  # wikitext2 — last-128-token JSD (dense_logits masked to
         # the last 128 positions). Serves both wt2_jsd_lt128 (single-pass) and
@@ -112,14 +122,6 @@ GROUPS = {
         # eval_loss path fits without stream_dense gymnastics.
         datasets=['gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
         loss_func='jsd', use_key_token=False, last_tokens=512,
-        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
-    ),
-    'B_lt32': dict(  # gov_report — last-32-token answer window (pp32_s8).
-        # 8k prefill + 32 scored tokens in 8-token chunks. Same decode-like
-        # motivation and the same caveats as A_lt32 (residual_length covers the
-        # window; 8 seqs x 32 positions is the noisiest window in the registry).
-        datasets=['gov_report'], n_sample=8, seqlen=8192, min_seqlen=8192,
-        loss_func='jsd', use_key_token=False, last_tokens=32,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
     'B_lt128': dict(  # gov_report — last-128-token JSD (shared by the
@@ -541,8 +543,7 @@ METRIC_TASKS = [
              stride=32, prefill_prompt=True, last_tokens=128)),
     ('wt2_jsd_pp32_s8',   'A_lt32', 'wikitext2',
         # Tightest answer-phase JSD: prefill 2016 tokens, then score the last 32
-        # in 8-token chunks (4 cache-appending steps ⇒ closest to real decode).
-        # Group A_lt32 supplies the last-32 pre-masked dense_logits.
+        # in 8-token chunks. Group A_lt32 supplies the last-32 pre-masked dense.
         dict(metric='loss', loss_func='jsd',
              stride=8, prefill_prompt=True, last_tokens=32)),
     ('wt2_jsd_lt128',     'A_lt128', 'wikitext2',
@@ -773,6 +774,7 @@ del _base, _grp, _ds, _lt, _name, _existing
 # different key set needs its own FP-teacher pass.
 _KT_EVALS = {           # name tag -> evaluator model (the `eval-` in the path)
     'q72b': 'Qwen2.5-72B-Instruct',
+    'q7b':  'Qwen2.5-7B-Instruct',   # same family as q72b, 10x cheaper to run
     'l8b':  'Llama-3.1-8B-Instruct',
 }
 
@@ -803,6 +805,49 @@ def key_token_root(base_dir, spec, target_model):
     import os
     return os.path.join(base_dir, f"kt_eval-{spec['key_token_eval']}"
                                   f"_tgt-{target_model}{spec['key_token_suffix']}")
+
+
+def key_token_archive_status(base_dir, spec, target_model, dataset=None):
+    """(ok, reason) — is a usable key-token archive present for this group?
+
+    Cheap and structural: the derived root exists, the per-corpus protocol
+    directory exists, it holds slices and a meta.json, and that manifest's
+    protocol matches the group. It deliberately does NOT open the loaders to
+    check the text hash — that needs the corpus built and is what the manifest
+    check does at measurement time.
+
+    Callers use it to SKIP a metric they cannot measure rather than abort the
+    whole run; `reason` is printed so a skip is never silent.
+    """
+    import os
+    from utils.data import key_token_dir, key_token_dirname
+    if not base_dir:
+        return False, 'no --key_token_path'
+    d = dataset or spec['datasets'][0]
+    root = key_token_root(base_dir, spec, target_model)
+    if not os.path.isdir(root):
+        return False, 'no archive root %s' % os.path.basename(root)
+    args = (spec['n_sample'], spec['seqlen'], spec['min_seqlen'], spec['trunc_len'],
+            spec['sliding_window'], spec['alpha'], spec['beta'],
+            spec.get('data_seed', 0))
+    path = key_token_dir(root, d, *args)
+    if not path or not os.path.isdir(path):
+        return False, 'missing %s/%s' % (os.path.basename(root),
+                                         key_token_dirname(d, *args))
+    if not any(f.startswith('slice_') for f in os.listdir(path)):
+        return False, '%s holds no slice files' % os.path.basename(path)
+    mp = os.path.join(path, 'meta.json')
+    if not os.path.exists(mp):
+        return False, '%s has no meta.json' % os.path.basename(path)
+    try:
+        man = json.load(open(mp))
+    except Exception as e:                                          # noqa: BLE001
+        return False, 'unreadable meta.json (%r)' % e
+    bad = [k for k in ('trunc_len', 'sliding_window', 'alpha', 'beta')
+           if man.get(k) is not None and man.get(k) != spec[k]]
+    if bad:
+        return False, 'manifest protocol differs on %s' % ','.join(bad)
+    return True, os.path.basename(path)
 
 
 METRIC_KEYS = [t[0] for t in METRIC_TASKS]
@@ -993,6 +1038,10 @@ def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto
     for g, spec in pending:
         r = out[g]
         if spec['use_key_token']:
+            # A pre-flight check cannot see a text-hash mismatch (that needs the
+            # loaders), so the BUILD is fail-soft too when the caller asked for
+            # it: one unusable archive becomes an error entry for its group
+            # instead of taking down every other metric in the run.
             # Two chat-corpus corrections, mirroring LlamaEvaluator:
             #  * the archive is computed on the RAW document, so it is filed under
             #    the BASE corpus -- `chat:gov_report` must look in
@@ -1002,7 +1051,8 @@ def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto
             #    template affixes shift every offset and the manifest check
             #    rejects the archive (which is the good failure, but a hard stop).
             _ans = spec.get('answer_span') or spec['last_tokens']
-            r['key_token_list'] = {
+            try:
+              r['key_token_list'] = {
                 d: get_key_token_list(
                     evaluator_model=fp, evaluator_tokenizer=tok, loader=loader,
                     trunc_len=spec['trunc_len'], sliding_window=spec['sliding_window'],
@@ -1019,6 +1069,19 @@ def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto
                     doc_spans=(None if spec.get('key_token_on_sample')
                                else chat_spans_for(d, tok, spec['seqlen'], _ans)))
                 for d, loader in r['train_loaders'].items()}
+            except Exception as e:                                # noqa: BLE001
+                # An archive can be structurally fine and still not match the
+                # documents this loader produced (the text-hash check). Callers
+                # that asked for fail_soft get an error entry for this group and
+                # keep every other metric; the rest still raise.
+                if not fail_soft:
+                    raise
+                import traceback
+                out[g] = dict(error=repr(e), traceback=traceback.format_exc())
+                print(f"[metric_specs] group '{g}' key-token build FAILED: {e!r} "
+                      f"— its metrics will be recorded as errors; the other "
+                      f"groups continue.")
+                continue
         if not r['dense_logits']:
             continue
         for d in list(r['dense_logits']):

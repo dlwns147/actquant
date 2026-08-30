@@ -1,0 +1,39 @@
+{
+  "evaluator_model": "/SSD/huggingface/Qwen/Qwen2.5-7B-Instruct",
+  "target_model": "/SSD/huggingface/meta-llama/Llama-3.1-8B-Instruct",
+  "dataset": "chat:wikitext2",
+  "train": true,
+  "n_sample": 128,
+  "seqlen": 2048,
+  "min_seqlen": 0,
+  "seed": 0,
+  "data_batch_size": 1,
+  "answer_tokens": 512,
+  "trunc_len": 64,
+  "sliding_window": 16,
+  "alpha": 1,
+  "beta": -1,
+  "n_slices": 4,
+  "slices": [
+    {
+      "sha256": "d09cb19dbb5c90b93b6b2ce28d9d49f88d64e5a682b91d171ae571c448c82ac8",
+      "chars": 9085,
+      "n_intervals": 53
+    },
+    {
+      "sha256": "833ba70c1e05f824ab65febca06f6fb386f4992a589f0d90394677400f905d22",
+      "chars": 9379,
+      "n_intervals": 27
+    },
+    {
+      "sha256": "b8b41986a9ba27159e1eee0d70bc0bd0df69165cf60d6ba2dc307d1cc82d8f38",
+      "chars": 9154,
+      "n_intervals": 46
+    },
+    {
+      "sha256": "84686b8e04654628452300ecdb13863fc8719f3f269602e7e2d82ff13f36cde8",
+      "chars": 8437,
+      "n_intervals": 41
+    }
+  ]
+}

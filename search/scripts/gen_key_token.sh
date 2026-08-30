@@ -1,4 +1,6 @@
 DEVICES=${1}
+# METRICS can also come from argv: bash scripts/gen_key_token.sh 0 "gov_jsd_kt_q7b …"
+METRICS_ARG=${2:-}
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
 # ── what the archive is FOR ────────────────────────────────────────────────
@@ -19,7 +21,7 @@ PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 # METRICS="wt2_jsd_kt_pp512_s128"
 # METRICS="gov_jsd_kt_pp512_s128_chat"   # chat needs an answer window -> _chat-a512
 # METRICS="wt2_jsd_kt_pp512_s128_chat"
-METRICS=""
+METRICS="${METRICS_ARG}"
 
 # correlation.py takes ONE --key_token_path and appends the corpus name, so all
 # corpora used in a run must live under the SAME root. With METRICS set the
@@ -33,9 +35,9 @@ KEY_TOKEN_ROOT=""
 # DTYPE=bfloat16
 
 MODEL_PATH=/SSD/huggingface/Qwen
-# MODEL_NAME=Qwen2.5-7B-Instruct
+MODEL_NAME=Qwen2.5-7B-Instruct
 # MODEL_NAME=Qwen2.5-14B-Instruct
-MODEL_NAME=Qwen2.5-72B-Instruct
+# MODEL_NAME=Qwen2.5-72B-Instruct
 CONFIG=config/qwen2.json
 DTYPE=float16
 # DTYPE=bfloat16

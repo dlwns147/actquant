@@ -74,6 +74,13 @@ def protocol_from_metrics(names, target_id=None):
             out['min_seqlen'] = max(0, int(out['min_seqlen']) - ov) if out['min_seqlen'] else 0
             print(f"[gen_key_token] chat group -> document budget {out['seqlen']} "
                   f"(total - {ov} affix tokens)")
+    # The layout suffix (_raw / _chat-a<N>) is what correlation.py's
+    # key_token_root() appends when it goes looking, and it is the ONLY thing
+    # separating the raw and chat archives of the same corpus: both use the same
+    # per-corpus protocol dirname, so without it the second run overwrites the
+    # first (MEASURED: generating gov raw then gov chat under one root left only
+    # the chat archive, and the raw key tokens were lost).
+    out['key_token_suffix'] = GROUPS[by_name[names[0]][1]].get('key_token_suffix', '')
     return out, names
 
 
@@ -82,9 +89,15 @@ def main(args):
         _tgt = (f'{args.target_model_path}/{args.target_model}'
                 if args.target_model_path else args.target_model) if args.target_model else None
         proto, served = protocol_from_metrics(args.metrics, _tgt)
+        # the layout is a PATH property, not a loader knob -- pop it before the
+        # rest is copied onto args
+        _layout = proto.pop('key_token_suffix', '') or ''
         for k, v in proto.items():
             if v is not None:
                 setattr(args, k, v)
+        if _layout and args.save_path and not args.save_path.rstrip('/').endswith(_layout):
+            args.save_path = args.save_path.rstrip('/') + _layout
+            print(f"[gen_key_token] layout {_layout} -> {args.save_path}")
         # every key-token group is a LOSS-side group -> train loader
         args.train = True
         print(f"[gen_key_token] --metrics {served} -> {proto}")
