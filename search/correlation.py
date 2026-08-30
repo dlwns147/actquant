@@ -840,16 +840,25 @@ def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
                      loss_func, use_key_token, key_token_path,
                      trunc_len, sliding_window, alpha, beta,
                      last_tokens=None, precomputed=None, sides=None,
-                     data_seed=None):
+                     data_seed=None, key_token_eval=None, key_token_suffix=None,
+                     key_token_on_sample=None):
     """One LlamaEvaluator with the requested data-side config. `last_tokens`
     here is set on the evaluator at init so dense_logits gets pre-masked to
     the last N positions — must match the eval_loss last_tokens used at
     metric-call time (eval_loss compares len-N logits vs len-N dense).
     Dense_logits is moved to CPU right after build (see _move_all_dense_logits_to_cpu).
-    `sides` (which loader sides to build) and `data_seed` (pinned document
-    selection for long-doc groups) are GROUP-spec keys consumed by
-    precompute_groups; accepted and ignored here because the loaders arrive
-    pre-built via `precomputed`."""
+    This is called as `_build_evaluator(args, ctx, precomputed=payload, **spec)`,
+    so EVERY key a GROUP spec can carry must appear here or the call raises
+    TypeError. Several are consumed by precompute_groups and are accepted and
+    ignored, because the loaders/teacher/key-tokens arrive pre-built via
+    `precomputed`:
+      `sides`                which loader sides to build
+      `data_seed`            pinned document selection for long-doc groups
+      `key_token_eval`       which model judged the key tokens (names the archive)
+      `key_token_suffix`     archive layout (_raw / _chat-a<N>)
+      `key_token_on_sample`  archive computed on the chat sample, not the document
+    tests/test_metric_specs.py asserts this signature covers every GROUP key, so
+    adding a group field without adding it here fails a test rather than a run."""
     model_id = f'{args.model_path}/{args.model_name}'
     quant_model_paths = args.quant_model_paths if 'hqq' in args.w_method else []
     # Scalar fallback for replace_kv_cache (per-arch arch['p'] overrides this
