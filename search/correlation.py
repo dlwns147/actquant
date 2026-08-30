@@ -57,7 +57,9 @@ utils/metric_specs.py; a few landmarks:
     their groups pin `data_seed=0`: the document set is a property of the metric
     name, not of --seed. Windows stop at 8192 by design.
     wt2_jsd_pp32_s8     tightest answer window: prefill, then 32 tokens in
-    gov_jsd_pp32_s8     8-token chunks (closest stand-in for decode)
+    gov_jsd_pp32_s8     8-token chunks (closest decode-shaped probe; note the
+                        window is inside residual_length so only the prefix
+                        carries quantised KV)
     wt2_jsd             wikitext2 JSD, n_sample=128 seqlen=2048,
                         prefill_prompt=False, stride=None
     wt2_jsd_s512        wikitext2 JSD, … stride=512
@@ -148,7 +150,8 @@ from utils.func import (init_run, build_expr_map, build_nd, comp_key_order,
                         configure_model_cache, get_net_info, clean_up,
                         set_seed, init_accelerator, process_dtype, RunCtx,
                         arch_sha8, bench_stamp, stamp_artifact_dir)
-from utils.metric_specs import key_token_root, spec_sha8, TASKS_BY_NAME as _TASKS
+from utils.metric_specs import (key_token_root, key_token_archive_status,
+                               spec_sha8, TASKS_BY_NAME as _TASKS)
 from utils.select import (build_arch, select_valid_nd_idx, assemble_F,
                           LazyPs, draw_random, quantile_select, axis_of_map,
                           coverage_subset_nsga2_extras, per_axis_metric)
@@ -696,6 +699,36 @@ def _archive_existing_results(args, result_path, results, rerunning_keys):
           f"artefact(s) → {archive_dir}\n"
           f"          rerunning: {overwriting}"
           + (f"  moved: {moved}" if moved else ""))
+
+
+def drop_key_token_tasks(tasks, key_token_path, target_model=None):
+    """(kept, [(name, reason), ...]) — drop key-token tasks we cannot measure.
+
+    A key-token metric needs an archive; without a usable one there is nothing
+    to measure, and aborting the run would take the other 60-odd metrics with
+    it. So it is skipped and NAMED — never silently dropped. Two causes:
+
+      * no --key_token_path at all (scripts/correlation_eval.sh documents
+        KEY_TOKEN_PATH='' as exactly this), and
+      * the derived archive is missing or its manifest protocol disagrees with
+        the group — validated by key_token_archive_status().
+
+    The check is structural. A text-hash mismatch still surfaces at measurement
+    time, where precompute_groups' fail_soft turns it into an error entry for
+    that group rather than an exception.
+    """
+    kept, dropped, seen = [], [], {}
+    for t in tasks:
+        spec = GROUPS[t[1]]
+        if not spec.get('use_key_token'):
+            kept.append(t)
+            continue
+        if t[1] not in seen:
+            seen[t[1]] = key_token_archive_status(key_token_path, spec,
+                                                  target_model, t[2])
+        ok, reason = seen[t[1]]
+        (kept if ok else dropped).append(t if ok else (t[0], reason))
+    return kept, dropped
 
 
 def rerun_decision(*, done, stale, force):
@@ -1301,6 +1334,23 @@ def cmd_eval(args):
 
     pending_calib = [t for t in METRIC_TASKS
                      if t[0] in requested and _should_run(t[0])]
+    # No --key_token_path -> DROP the key-token metrics and measure the rest.
+    # `--metrics all` should not be an all-or-nothing proposition just because a
+    # key-token archive is not on this box, and scripts/correlation_eval.sh
+    # already documents KEY_TOKEN_PATH='' as "skip every key-token metric" —
+    # this is that behaviour. Loud, never silent: a metric that was asked for and
+    # not measured is always named. A path that IS given but points nowhere stays
+    # a hard error — that is a wrong answer, not a missing one.
+    pending_calib, _kt_dropped = drop_key_token_tasks(
+        pending_calib, args.key_token_path, args.model_name)
+    if _kt_dropped:
+        print(f"[correlation/eval] SKIPPING {len(_kt_dropped)} key-token metric(s) "
+              f"— no usable archive:")
+        for _n, _why in _kt_dropped:
+            print(f"[correlation/eval]     {_n:<34} {_why}")
+        print(f"[correlation/eval]   the archive root is derived per metric from "
+              f"its evaluator suffix (_q72b / _q7b / _l8b); generate one with "
+              f"scripts/gen_key_token.sh.")
     pending_bench = [k for k in BENCH_KEYS
                      if k in requested and _should_run(k)]
     known = {t[0] for t in METRIC_TASKS} | set(BENCH_KEYS)
@@ -1373,13 +1423,16 @@ def cmd_eval(args):
         spec = dict(GROUPS[g])
         # any key-token GROUP, not just 'C' — a hardcoded name silently left a
         # second key-token group with key_token_path='' (groups_for() already
-        # keys off the flag; this is the same check)
+        # keys off the flag; this is the same check). Unreachable with an empty
+        # path: those tasks were dropped from pending_calib above, so no
+        # key-token group survives into groups_needed.
         if spec.get('use_key_token'):
-            if not args.key_token_path:
-                raise SystemExit(
-                    f"a key-token metric (group '{g}') was requested but "
-                    f"--key_token_path is empty. Either pass --key_token_path or "
-                    f"drop the *_kt metrics from --metrics.")
+            # unreachable without a VALIDATED archive: drop_key_token_tasks()
+            # removed every key-token task whose archive is missing, empty or
+            # protocol-mismatched, so no such group survives into groups_needed
+            assert args.key_token_path, (
+                f"key-token group '{g}' reached group building with an empty "
+                f"--key_token_path; it should have been dropped from pending_calib")
             # DERIVED, not configured: the evaluator comes from the metric
             # name (its group), the target is the model being measured, and the
             # layout from the group -- so a run cannot pair a metric with
@@ -1983,7 +2036,10 @@ def build_parser():
                    help='DIRECTORY the key-token archives live in. The root is '
                         'derived per metric: <dir>/kt_eval-<evaluator>_tgt-<target>'
                         '_<layout>, with the evaluator taken from the metric name '
-                        '(..._q72b / ..._l8b)')
+                        '(..._q72b / ..._q7b / ..._l8b). Pass an EMPTY string to '
+                        'skip every key-token metric and measure the rest — the '
+                        'skipped names are printed. A non-empty path that holds '
+                        'no matching archive is still an error.')
     # needle_nll prompt generation knobs — kept small (8 prompts × 2048 ctx
     # ≈ 16k tokens; ~3s on Llama-3.1-8B) so it doesn't dominate the suite.
     p.add_argument('--needle_n_sample', type=int, default=8,

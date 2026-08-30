@@ -81,6 +81,15 @@ N_TOKEN=16384
 # derived from the config below (see the header). Leave empty for the default.
 MEASURE_DIR=""
 
+# ── key tokens ─────────────────────────────────────────────────────────────
+# The DIRECTORY the archives live in, not a single archive: correlation.py
+# derives the root per metric as
+#   <dir>/kt_eval-<evaluator>_tgt-<target>_<layout>/<corpus>_<protocol>_s<seed>
+# with the evaluator read from the metric NAME (_q72b / _q7b / _l8b), so one
+# setting serves every key-token metric and none can be paired with the wrong
+# evaluator's archive. Set to '' to SKIP them all — correlation.py drops those
+# metrics, prints which ones, and measures the rest. A path that IS set but
+# holds no matching archive stays an error (a wrong answer, not a missing one).
 KEY_TOKEN_PATH=key_token
 
 # ── needle_nll knobs (kept small: 8 prompts × 2048 ctx ≈ 16k tokens, ~3s) ──
