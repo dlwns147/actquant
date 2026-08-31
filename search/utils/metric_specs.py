@@ -690,12 +690,22 @@ METRIC_TASKS = [
     ('wt2_jsd_pp512_s32_chat', 'A_pp_chat', 'chat:wikitext2',
         dict(metric='loss', loss_func='jsd',
              stride=32, prefill_prompt=True, last_tokens=512)),
+    ('wt2_jsd_pp512_s128_chat', 'A_pp_chat', 'chat:wikitext2',
+        # same group as _s32 -> shares its FP-teacher pass; only the chunk size
+        # differs (128 vs 32 cache-appending steps over the same 512 window).
+        # This is the chat twin of wt2_jsd_pp512_s128.
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
     ('gov_jsd_pp128_s32_chat', 'B_lt128_chat', 'chat:gov_report',
         dict(metric='loss', loss_func='jsd',
              stride=32, prefill_prompt=True, last_tokens=128)),
     ('gov_jsd_pp512_s32_chat', 'B_pp_chat', 'chat:gov_report',
         dict(metric='loss', loss_func='jsd',
              stride=32, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp512_s128_chat', 'B_pp_chat', 'chat:gov_report',
+        # chat twin of gov_jsd_pp512_s128; shares B_pp_chat's teacher with _s32.
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
     ('gov_jsd_kt_pp512_s128', 'C_pp', 'gov_report',
         # gov_jsd_pp512_s128's key-token twin. 119 of gov_report's 1729 key
         # tokens fall in the last 512 positions (7,10,29,11,24,11,4,23) --
