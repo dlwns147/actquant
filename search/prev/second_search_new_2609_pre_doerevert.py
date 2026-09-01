@@ -720,60 +720,90 @@ class FrontSearch(SecondSearch):
         return plan, mask, info
 
     # ───────────────── DOE ─────────────────
-    def _doe_cells(self):
-        """-> (rows, cells). ONE shape, controlled by the two budget knobs:
+    def _doe_lattice(self, rng, nW, nK):
+        """the no-row DOE: a LATIN pairing of the two axes' even grids — n_doe W targets and
+        n_doe KV targets, snapped to the nearest pool blocks and matched by a random
+        permutation, so both marginals are covered evenly and (almost) every arch is its own
+        W block. The four budget-box corners are pinned first: the cheapest one defines the
+        record staircase over the whole box before any prediction.
 
-          --doe_builds  = how many DISTINCT W allocations the DOE covers, picked evenly over
-                          the wbits range (nearest distinct pool block to each linspace
-                          target), so the design spans the W axis by construction.
-          --n_doe       = TOTAL archs. Cells per W row = n_doe // doe_builds, at least 1 —
-                          `1` is the no-multi-KV shape (every arch its own W allocation).
-
-        KV within a row is RANDOM by default. --doe_kv_extremes pins the two pool-extreme KV
-        blocks as that row's first two cells instead (the pre-2609 behaviour: it pins each
-        row's KV curve for the surrogate, and on the AWQ pool those extra cells ride the same
-        build). It is ignored when the row budget is 1, where forcing an extreme would put
-        EVERY DOE arch on the same KV block.
-
-        The four budget-box CORNER cells are always measured (4 archs, on the first and last
-        W rows, which are the wbits extremes by construction). That is not a knob: without
-        them the record staircase is undefined over part of the box and PSI has nothing to
-        improve on at iteration 1."""
-        rng = np.random.default_rng(self.args.seed)
-        nW, nK = len(self.Wg), len(self.KVg)
-        nrows = min(max(int(self.args.doe_builds), 1), nW, max(1, int(self.n_doe)))
-        rows, wc = [], np.asarray(self.w_comp, float)
-        for t in np.linspace(wc.min(), wc.max(), nrows):        # distinct blocks, even over W
-            for r in np.argsort(np.abs(wc - t)):
-                if int(r) not in rows:
-                    rows.append(int(r)); break
-        q = int(np.clip(self.n_doe // max(nrows, 1), 1, nK))    # KV cells per W row (>= 1)
-        ext = bool(getattr(self.args, 'doe_kv_extremes', False)) and q >= 2
-        out, seen, cnt = [], set(), {i: 0 for i in rows}
+        Used when builds are free, where pairing one W with many KV — and forcing both KV
+        extremes into every W — is pure overhead: a cartesian design would spend n_doe archs
+        on only sqrt(n_doe) distinct W allocations."""
+        n = max(4, int(self.n_doe))
+        wi = [int(np.argmin(np.abs(self.w_comp - t)))
+              for t in np.linspace(self.w_comp[0], self.w_comp[-1], n)]
+        ki = [int(np.argmin(np.abs(self.kv_comp - t)))
+              for t in np.linspace(self.kv_comp[0], self.kv_comp[-1], n)]
+        cells, seen = [], set()
 
         def add(i, j):
-            if (i, j) in seen or len(out) >= self.n_doe:
-                return False
-            seen.add((i, j)); out.append((i, j)); cnt[i] = cnt.get(i, 0) + 1
-            return True
+            if (i, j) not in seen and len(cells) < n:
+                seen.add((i, j)); cells.append((int(i), int(j)))
 
-        for i in {rows[0], rows[-1]}:                           # budget-box corners, always
-            add(i, 0); add(i, nK - 1)
+        for i in (wi[0], wi[-1]):                      # the four budget-box corners first
+            for j in (ki[0], ki[-1]):
+                add(i, j)
+        for t, u in enumerate(rng.permutation(n)):     # Latin pairing of the two grids
+            add(wi[t], ki[int(u)])
+        for _ in range(20 * n):                        # top up if the snap deduplicated short
+            if len(cells) >= n or len(seen) >= nW * nK:
+                break
+            add(int(rng.integers(nW)), int(rng.integers(nK)))
+        return sorted({i for i, _ in cells}), cells
+
+    def _doe_cells(self):
+        """W rows EVEN over the wbits range (linspace targets → nearest distinct pool rows,
+        so BOTH box corners are in the design and the record staircase is defined over the
+        whole box before any prediction) × (both KV extremes + random interior cells).
+
+        SIZE: --n_doe is the TOTAL number of DOE archs. The ITERATION budget
+        (--companion_kv) does not govern the DOE.
+
+        SHAPE: chosen by the DERIVED build cost, never by a flag.
+          build_cost > 0  (AWQ pool)  ROW design — --doe_builds rows evenly spaced over the
+            wbits range, n_doe/doe_builds KV cells each, both KV extremes first. One build
+            serves a whole row, so the row is the unit that amortises and the extremes pin
+            that row's KV curve for the surrogate.
+          build_cost == 0  (HQQ / in-process eval)  NO rows — every arch is rebuilt, so a row
+            design buys nothing and two KV extremes per W are not mandatory. n_doe cells on a
+            LATIN pairing of the two axes' even grids — ~one arch per W block, both marginals
+            covered — with the four budget-box corners pinned so the record staircase is
+            defined everywhere before any prediction. --doe_builds is unused in this shape."""
+        rng = np.random.default_rng(self.args.seed)
+        nW, nK = len(self.Wg), len(self.KVg)
+        if self._build_cost() <= 0:
+            return self._doe_lattice(rng, nW, nK)
+        # nrows is additionally capped at n_doe//2 so that q >= 2 (both KV extremes must fit
+        # in every row) can never push the TOTAL past --n_doe: with doe_builds >= n_doe/2 the
+        # old arithmetic silently doubled the DOE (measured: --n_doe 1000 --doe_builds 1000
+        # produced 2000 archs).
+        nrows = min(max(int(self.args.doe_builds), 1), nW, max(1, int(self.n_doe) // 2))
+        rows, wc = [], np.asarray(self.w_comp, float)
+        for t in np.linspace(wc.min(), wc.max(), nrows):
+            order = np.argsort(np.abs(wc - t))
+            for r in order:
+                if int(r) not in rows:
+                    rows.append(int(r)); break
+        q = int(np.clip(self.n_doe // max(nrows, 1), 2, nK))
+        out = []
         for i in rows:
-            if ext:
-                add(i, 0); add(i, nK - 1)
-            for j in rng.permutation(nK):                       # fill the row to q, randomly
-                if cnt[i] >= q or not add(i, int(j)):
-                    if cnt[i] >= q:
-                        break
-        for i in rows:                                          # spend any remainder evenly
+            cells = [0, nK - 1]
+            if q > 2 and nK > 2:
+                cells += [int(x) for x in rng.choice(np.arange(1, nK - 1),
+                                                     size=min(q - 2, nK - 2), replace=False)]
+            out += [(int(i), int(j)) for j in cells]
+        # spend any remainder (n_doe - nrows*q) on extra random cells, spread over the rows
+        for i in rows:
             if len(out) >= self.n_doe:
                 break
-            for j in rng.permutation(min(nK, 8)):
-                if not add(i, int(j)) and len(out) >= self.n_doe:
-                    break
-        return rows, out
+            for _ in range(4):
+                j = int(rng.integers(nK))
+                if (int(i), j) not in set(out):
+                    out.append((int(i), j)); break
+        return rows, out[:int(self.n_doe)]
 
+    # ───────────────── debug figure ─────────────────
     def _save_viz_nd(self, it, archive, plan, mask, n_doe):
         try:
             import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
@@ -828,12 +858,16 @@ class FrontSearch(SecondSearch):
                         planned.add(k)
                         archs.append(self.ss.decode(np.array(k, int)))
                 cached = f" (+{len(seeded)} cached)" if seeded else ""
-                q = max(1, self.n_doe // max(len(rows), 1))
-                acc.print(f"[DOE] {len(rows)} W allocations (--doe_builds) × ~{q} KV cells "
-                          f"→ {len(archs)} archs (--n_doe {self.n_doe})"
-                          + ("; KV extremes pinned per row" if getattr(self.args, 'doe_kv_extremes', False)
-                             and q >= 2 else "; KV random per row")
-                          + f"; 4 budget-box corners{cached}")
+                if self._build_cost() > 0:
+                    acc.print(f"[DOE] ROW design: {len(rows)} even-W builds × "
+                              f"{max(2, round(self.n_doe / max(len(rows), 1)))} KV cells "
+                              f"(2 extremes + rest random) → {len(archs)} archs "
+                              f"(--n_doe {self.n_doe} over --doe_builds {len(rows)})" + cached)
+                else:
+                    acc.print(f"[DOE] LATIN design: {len(archs)} archs over {len(rows)} "
+                              f"distinct W blocks (--n_doe {self.n_doe}; build_cost=0, so a "
+                              f"build amortises nothing — no rows, no forced KV extremes, "
+                              f"--doe_builds unused)" + cached)
             else:
                 archs, seeded = [], []
             archs = acc.gather_for_metrics(archs, use_gather_object=True)
@@ -1024,23 +1058,12 @@ def build_parser_new():
     _strip_flags(p, _DEAD_FLAGS)              # delete the inherited NSGA-only flags
     for a in p._actions:
         if a.dest == 'n_doe':                 # same flag, entry-point-specific meaning
-            a.help = ('TOTAL DOE archs, spread over --doe_builds distinct W allocations, so '
-                      'cells per W row = n_doe / doe_builds (>= 1; 1 = one arch per W, the '
-                      'no-multi-KV shape). The per-iteration --companion_kv does not govern '
-                      'the DOE.')
+            a.help = ('TOTAL DOE archs, spread over --doe_builds W rows (so cells per DOE '
+                      'row = n_doe / doe_builds, at least 2 so both KV extremes always fit). '
+                      'The per-iteration --companion_kv does not govern the DOE.')
     p.add_argument('--doe_builds', type=int, default=12,
                    help='DOE W builds, evenly spaced over the wbits range, each × '
                         '(both KV extremes + random KV cells)')
-    p.add_argument('--doe_kv_extremes', action='store_true',
-                   help='pin the two pool-extreme KV blocks as the first two cells of every '
-                        'DOE W row (the pre-2609 behaviour). Off by default: KV is drawn at '
-                        'random within each row, which spends the same budget on more '
-                        'distinct KV blocks. Worth turning on when a row sweeps many KV and '
-                        "the extremes ride the same build (AWQ pool) — it pins each row's KV "
-                        'curve for the surrogate. Ignored when the per-row budget '
-                        '(--n_doe / --doe_builds) is 1, where it would put every DOE arch on '
-                        'the same KV block. The four budget-box corners are measured either '
-                        'way.')
     p.add_argument('--sampler', default='psi', choices=['psi', 'front', 'product'],
                    help="psi = cost-aware greedy on the predicted staircase improvement "
                         "(default); front = the legacy predicted-new-front + W-gap/plane-spread "
