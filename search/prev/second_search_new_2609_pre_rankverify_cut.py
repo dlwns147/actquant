@@ -66,12 +66,31 @@ ORDINAL, ALWAYS
     variant weighting the area by (R − μ)₊ was implemented and removed: it has neither
     invariance and would need a within-cell ρ this problem does not have — measured 0.215.)
 
-SATURATION is REPORTED, never acted on. The staircase utility saturates long before the
-    iteration budget (on this codebase's stage-2 runs, 99% of the final U by iteration 4 of
-    15), so U and ΔU/U are logged every iteration against a frozen y_ref and stored in
-    iter_<it>.stats — but the run always completes --iterations. Stopping early is the
-    operator's call, not the sampler's: an archive truncated by a rule is no longer
-    comparable with one that ran its full budget.
+BUDGET SHAPE — three measured facts, two opt-in switches (both default OFF)
+    1. RANK CAP (--rank_cap). The (W-block × KV-block) loss table is measured near rank-2:
+       on this repo's own stage-2 archive (2608231515, 99 W × 414 KV blocks, 2608 observed
+       cells) ALS explains 94.5 / 98.7 / 99.5 / 99.7% of the centred variance at rank
+       1/2/3/4 — an additive a(w)+b(kv) surface IS rank 2 — so r* = 2 at _RANK_TOL. A rank-r
+       surface is pinned by r+1 swept rows, so builds beyond that cannot reveal a new
+       direction of the surface. Each iteration re-estimates r* from the MEASURED table and
+       caps builds at r*+1; the cell budget is untouched, so the saved builds become extra
+       cells inside the rows that ARE open. The flag also raises the per-row skeleton to
+       _RANK_SKELETON shared KV columns, without which the column factors are
+       unidentifiable and the estimate can never form. Fails OPEN (no cap) while the table
+       is too thin — a cap has to be earned by evidence.
+    2. VERIFICATION QUOTA (--verify_frac). Between budget cells the surface is cheap to pin;
+       INSIDE one it is not. Measured on the same archive: within-cell loss spread (median
+       0.0032) is 0.82× a whole budget-bin step (0.0038), and best-in-cell beats
+       mean-in-cell by 0.0042 — more than moving a bin. The surrogate cannot rank inside a
+       cell (δ̂ ρ≈0.215), so that comparison must be MEASURED: the quota spends cells on
+       direct competitors of the incumbent record points, inside rows already open (free-ish
+       KV swaps). This is best-arm identification, not front construction.
+    3. SATURATION is REPORTED, never acted on. The staircase utility saturates long before
+       the iteration budget (on that same run, 99% of the final U by iteration 4 of 15), so
+       U and ΔU/U are logged every iteration against a frozen y_ref and stored in
+       iter_<it>.stats — but the run always completes --iterations. Stopping early is the
+       operator's call, not the sampler's: an archive truncated by a rule is no longer
+       comparable with one that ran its full budget.
 
 BUDGET COST is DERIVED, not configured: see _build_cost(). 0 without the AWQ pool (the
     in-process evaluator rebuilds every arch, so a shared W allocation amortises nothing),
@@ -79,15 +98,10 @@ BUDGET COST is DERIVED, not configured: see _build_cost(). 0 without the AWQ poo
 
 KNOBS — budgets (--n_doe / --doe_builds / --iterations / --n_iter / --companion_kv)
     + --seed, plus
-    exactly one: --sampler. Everything that used to be a flag (psi_mode / psi_grid /
-    gap_rows / row_skeleton / rank_tol / rank_cap / verify_frac / verify_k / greedy_eps /
-    stop_du / stop_saturated / build_cost) is now a constant at the top of the class,
-    derived from the run, or gone — none of them had a value a user could calibrate, and
-    the two that were real bets (a rank cap on builds, a within-cell verification quota)
-    were removed as unvalidated: they live in prev/second_search_new_2609_pre_rankverify_cut.py
-    if an A/B ever asks for them back. The ~18 inherited flags that only drive
-    second_search.py's NSGA machinery are DELETED from this parser too (_strip_flags): they
-    are gone from --help and a hard error if passed, rather than silently inert.
+    exactly three: --sampler, --verify_frac, --rank_cap. Everything else that used to be a
+    flag (psi_mode / psi_grid / gap_rows / row_skeleton / rank_tol / verify_k / greedy_eps /
+    stop_du / build_cost) is now a constant at the top of the class or derived from the run,
+    because none of them had a value a user could calibrate.
     --companion_kv 0 or 1 = one cell per build (the skeleton switches itself off): the
     no-W-anchoring mode for HQQ, where every arch is rebuilt anyway.
 
@@ -107,7 +121,7 @@ Inherits SecondSearch's infrastructure (space/options derivation, evaluator/AWQ 
 predictor stack, DOE cache, encode cache, stats format); the NSGA candidate machinery
 (_next/_nsga/_companion_kv) is unused here.
 """
-import os, json
+import os, json, argparse
 import numpy as np
 from time import time
 
@@ -128,6 +142,10 @@ class FrontSearch(SecondSearch):
     _PSI_GRID = 128             # quadrature grid side for the staircase integral
     _GAP_ROWS = 1               # W-maximin rows forced per iteration (anti-lock-in)
     _SKELETON = 2               # KV cells reserved per opened row = both pool extremes
+    _RANK_SKELETON = 6          # ... raised to this under --rank_cap: the shared columns
+    _RANK_TOL = 0.05            # the rank estimate needs to be identifiable at all
+    _RANK_MAX = 4               # highest rank the ALS fit considers
+    _VERIFY_K = 8               # incumbent record points the verify quota is spread over
     _BUILD_COST_BOOT = 5.0      # AWQ pool bootstrap: ~7.7 min build vs ~1.5 min JSD pass
 
     # ───────────────── pools: FULL ε-band + stage-1 y (overrides SecondSearch) ─────────────────
@@ -312,6 +330,115 @@ class FrontSearch(SecondSearch):
         y_ref = getattr(self, '_y_ref', None) or float(Rg.max())
         return float(np.sum(pi * (y_ref - Rg)))
 
+    def _surface_rank(self, archive, tol=None, rmax=None):
+        """numerical rank of the MEASURED loss surface over the pool grid.
+
+        The (W-block × KV-block) losses form a matrix; measured on this codebase's own
+        archive it is essentially rank-2 in √y (top-2 singular energy 99.98%, an additive
+        a(w)+b(kv) fit explains 99.8% of the between-cell variance — the ANOVA main-effect
+        result seen from the matrix side). A rank-r surface is pinned by r+1 swept rows, so
+        opening more builds than that cannot reveal a new direction: the budget belongs on
+        cells inside the rows already open. Returns (r*, evr) with evr[r] = fraction of the
+        surface variance explained at rank r; r* = smallest r with 1 − evr[r] ≤ tol.
+
+        Fit = ALS on the OBSERVED entries only (the table is very sparse), on rows/cols
+        carrying ≥3 measurements so a rank-r row is not fit from r points. `tol`/`rmax`
+        default to _RANK_TOL / _RANK_MAX.
+
+        FAILS OPEN: returns (None, []) whenever the archive cannot support the estimate
+        (too few usable cells, or fewer than rmax+2 usable rows/cols — a rank read off 3
+        rows is bounded by 3 and means nothing). A cap on builds has to be EARNED by
+        evidence; the early-run alternative would throttle builds on no data at all.
+        `self._rank_diag = (usable_rows, usable_cols, cells)` records why it declined.
+
+        IDENTIFIABILITY — the column side is the binding one, and it is a CONFIGURATION
+        requirement, not a data accident: each opened row picks its own KV cells, so two
+        rows share a KV block only where the per-row skeleton puts one. Those columns are
+        the same indices in every row (that is what makes them a cross-approximation
+        SKELETON), so the estimate needs _RANK_SKELETON >= rmax+2 columns — which is why
+        --rank_cap raises the skeleton to that automatically. With the plain 2-cell skeleton
+        the estimator keeps declining: measured in the 2609 debug runs, where 5-7 rows had
+        >=3 observations but only 2 columns did."""
+        tol = self._RANK_TOL if tol is None else tol
+        rmax = self._RANK_MAX if rmax is None else rmax
+        cells = {}
+        for g, x in zip(self._encode_archive(archive), archive):
+            i = self._wi.get(tuple(np.asarray(g)[:self.nw].tolist()))
+            j = self._ki.get(tuple(np.asarray(g)[self.nw:].tolist()))
+            if i is not None and j is not None and np.isfinite(x[1]):
+                cells[(i, j)] = min(cells.get((i, j), np.inf), float(x[1]))
+        self._rank_diag = (0, 0, len(cells))
+        if len(cells) < 4 * (rmax + 2):
+            return None, []
+        ii = np.array([c[0] for c in cells]); jj = np.array([c[1] for c in cells])
+        z = np.sqrt(np.array(list(cells.values()), float))          # the head's scale
+        ru, rc = np.unique(ii, return_counts=True); cu, cc = np.unique(jj, return_counts=True)
+        keep = np.isin(ii, ru[rc >= 3]) & np.isin(jj, cu[cc >= 3])
+        ii, jj, z = ii[keep], jj[keep], z[keep]
+        self._rank_diag = (len(np.unique(ii)), len(np.unique(jj)), len(z))
+        if len(z) < 4 * (rmax + 2) or len(np.unique(ii)) < rmax + 2 \
+                or len(np.unique(jj)) < rmax + 2:
+            return None, []
+        ri = {r: n for n, r in enumerate(np.unique(ii))}
+        ci = {c: n for n, c in enumerate(np.unique(jj))}
+        a = np.array([ri[r] for r in ii]); b = np.array([ci[c] for c in jj])
+        nR, nC = len(ri), len(ci)
+        z0 = z - z.mean()
+        tot = float((z0 ** 2).sum()) or 1.0
+        evr, rng = [], np.random.default_rng(0)
+        U = np.zeros((nR, 0)); V = np.zeros((nC, 0))
+        for r in range(1, rmax + 1):
+            U = np.column_stack([U, rng.normal(0, .1, nR)])
+            V = np.column_stack([V, rng.normal(0, .1, nC)])
+            for _ in range(30):                                     # ALS on observed entries
+                for M, idx, other, oidx, n in ((U, a, V, b, nR), (V, b, U, a, nC)):
+                    for t in range(n):
+                        m = idx == t
+                        if m.sum() >= r:
+                            A = other[oidx[m]]
+                            M[t] = np.linalg.lstsq(A, z0[m], rcond=None)[0]
+            res = float(((z0 - np.einsum('ij,ij->i', U[a], V[b])) ** 2).sum())
+            evr.append(max(0.0, 1.0 - res / tot))
+        r_star = next((r for r in range(1, rmax + 1) if 1.0 - evr[r - 1] <= tol), rmax)
+        return r_star, evr
+
+    def _verify_cells(self, rows, archive, n, planned, meas):
+        """--verify_frac quota: cells inside the rows ALREADY OPENED this iteration that sit
+        closest to the incumbent record points — direct competitors at the same operating
+        budget, i.e. best-arm identification for 'which allocation ships at this budget'.
+
+        Why this is where the money is (measured on this repo's own stage-2 archive): the
+        surface between budget cells is nearly rank-2 and cheap to pin, but WITHIN a budget
+        cell the loss spread (median 0.0032) is 0.82× a whole budget-bin step (0.0038), and
+        picking best-in-cell over average-in-cell is worth 0.0042 — more than moving a bin.
+        The surrogate cannot rank inside a cell (measured δ̂ ρ≈0.215), so these have to be
+        MEASURED. Cheap here because an opened row's KV swaps need no rebuild."""
+        if n <= 0 or not rows:
+            return []
+        F = np.column_stack([[x[c] for x in archive] for c in (1, 2, 3)])
+        nd = NonDominatedSorting().do(F, only_non_dominated_front=True)
+        fr = F[nd][:, 1:]
+        o = np.argsort(fr[:, 0])
+        k = self._VERIFY_K
+        anchors = fr[o][np.unique(np.linspace(0, len(o) - 1, min(k, len(o))).round().astype(int))]
+        ws = max(self.comp_obj_max[0] - self.comp_obj_min[0], 1e-9)
+        ks = max(self.comp_obj_max[1] - self.comp_obj_min[1], 1e-9)
+        cand = [(i, j) for i in rows for j in range(len(self.KVg))
+                if (i, j) not in planned and not meas[i, j]]
+        if not cand:
+            return []
+        cw = np.array([self.w_comp[i] / ws for i, _ in cand])
+        ck = np.array([self.kv_comp[j] / ks for _, j in cand])
+        out, taken = [], np.zeros(len(cand), bool)
+        for t in range(n):                                          # round-robin over anchors
+            aw, ak = anchors[t % len(anchors)] / (ws, ks)
+            d = np.where(taken, np.inf, (cw - aw) ** 2 + (ck - ak) ** 2)
+            x = int(np.argmin(d))
+            if not np.isfinite(d[x]):
+                break
+            taken[x] = True; out.append(cand[x])
+        return out
+
     def _build_cost(self):
         """cost of OPENING a W row, in units of one cell evaluation — DERIVED, never a flag.
 
@@ -391,14 +518,16 @@ class FrontSearch(SecondSearch):
 
     def _skeleton_cols(self, nK):
         """the per-opened-row reserve: both KV pool extremes (+ evenly spaced interior
-        points). Protects the row's curve / the surrogate's KV extrapolation; the
-        front-chasing budget is spent by PSI on top of it.
+        points under --rank_cap). Protects the row's curve / the surrogate's KV
+        extrapolation; the front-chasing budget is spent by PSI on top of it.
 
-        SIZE IS A CONSTANT (_SKELETON), not a flag. Disabled when --companion_kv <= it: with
+        SIZE IS DERIVED, not a flag: 2 (both extremes) normally, _RANK_SKELETON under
+        --rank_cap because the rank estimate needs that many KV columns measured across
+        several rows to be identifiable at all. Disabled when --companion_kv <= that: with
         a per-row budget that small the reserve would BE the whole batch and PSI would
         never choose anything (--companion_kv 0 or 1 = 'one cell per build', the
         no-W-anchoring mode an HQQ run wants, where every arch costs the same)."""
-        s = self._SKELETON
+        s = self._RANK_SKELETON if getattr(self.args, 'rank_cap', False) else self._SKELETON
         if int(getattr(self.args, 'companion_kv', 0)) <= s:
             return []
         if s <= 0 or nK == 0:
@@ -427,6 +556,8 @@ class FrontSearch(SecondSearch):
         # they turn into more cells inside the rows that ARE open.
         max_rows = max(1, int(self.n_iter) if max_rows is None else int(max_rows))
         build_cost = self._build_cost()
+        verify_n = int(round(max(0.0, min(0.5, float(getattr(self.args, 'verify_frac', 0.0))))
+                             * cell_budget))
         ws = max(self.comp_obj_max[0] - self.comp_obj_min[0], 1e-9)
         ks = max(self.comp_obj_max[1] - self.comp_obj_min[1], 1e-9)
 
@@ -436,7 +567,7 @@ class FrontSearch(SecondSearch):
             meas[mij[:, 0], mij[:, 1]] = True
         mask = (P < self._record_pool(archive)) & ~meas          # "can beat the previous front"
         info = {'front_cells': int(mask.sum()), 'front_rows': int(mask.any(1).sum()),
-                'rows': [], 'row_cells': [], 'skeleton': 0, 'fill': 0,
+                'rows': [], 'row_cells': [], 'skeleton': 0, 'fill': 0, 'verify': 0,
                 'psi': 0, 'psi_gain': 0.0, 'max_rows': int(max_rows)}
         mi, mj = (a.astype(np.int32) for a in np.where(mask))   # int32: a 20M-cell mask
         if len(mi) == 0:                                        # costs 320MB as int64
@@ -462,7 +593,7 @@ class FrontSearch(SecondSearch):
         pos = {(int(a), int(b)): n for n, (a, b) in enumerate(zip(ci, cj))}
 
         plan, planned, rows = [], set(), []
-        state = {'psi': 0, 'skeleton': 0, 'fill': 0, 'psi_gain': 0.0}
+        state = {'psi': 0, 'skeleton': 0, 'fill': 0, 'verify': 0, 'psi_gain': 0.0}
 
         rc = {}                                                  # cells placed per opened row
 
@@ -536,8 +667,9 @@ class FrontSearch(SecondSearch):
             near = [c for c, dd in zip(cand, d) if dd >= d.max() - 1e-12]
             open_row(max(near, key=lambda r: row_gain[r]))           # tie-break: richest row
 
-        # main cost-benefit greedy
-        while len(plan) < cell_budget and len(ci):
+        # main cost-benefit greedy (stops early by verify_n so the verification quota,
+        # which the surrogate cannot rank, is not eaten by front-chasing cells)
+        while len(plan) < cell_budget - verify_n and len(ci):
             SP = self._psi_tables(Rg, pi, levels)
             g = self._psi_gain(SP, clev, iu[ci], iv[cj])
             g = np.where(taken, -1.0, g)
@@ -555,6 +687,11 @@ class FrontSearch(SecondSearch):
             if i not in rows:
                 open_row(i)
             place(i, j, 'psi')
+
+        # --verify_frac: within-cell best-arm identification at the incumbent budgets
+        if verify_n > 0 and rows:
+            for vi, vj in self._verify_cells(rows, archive, verify_n, planned, meas):
+                place(int(vi), int(vj), 'verify')
 
         # leftover budget → lowest-priority objective: even coverage inside the opened rows
         if len(plan) < cell_budget and rows:
@@ -580,6 +717,7 @@ class FrontSearch(SecondSearch):
         info['rows'] = [int(r) for r in rows]
         info['row_cells'] = [int(rc.get(r, 0)) for r in rows]
         info['skeleton'], info['fill'] = state['skeleton'], state['fill']
+        info['verify'] = state['verify']
         info['max_rows'] = int(max_rows)
         info['psi'] = int(state['psi'])            # cells the greedy chose on PSI value
         info['psi_gain'] = float(state['psi_gain'])   # their accumulated predicted improvement
@@ -619,7 +757,7 @@ class FrontSearch(SecondSearch):
                 draw(int(r), 1)
         info = {'front_cells': 0, 'front_rows': 0, 'rows': [int(r) for r in rows],
                 'row_cells': [int(sum(1 for a, _ in plan if a == int(r))) for r in rows],
-                'skeleton': 0, 'fill': 0, 'psi': 0, 'psi_gain': 0.0}
+                'skeleton': 0, 'fill': 0, 'verify': 0, 'psi': 0, 'psi_gain': 0.0}
         return plan, np.zeros((nW, nK), bool), info
 
     # ═════════ legacy sampler (--sampler front): predicted-new-front + spread ═════════
@@ -716,76 +854,29 @@ class FrontSearch(SecondSearch):
         info = {'front_cells': int(mask.sum()), 'front_rows': int(mask.any(1).sum()),
                 'rows': [int(i) for i in picks],
                 'row_cells': [int(sum(1 for a, _ in plan if a == int(i))) for i in picks],
-                'skeleton': 0, 'fill': 0, 'psi': 0, 'psi_gain': 0.0}
+                'skeleton': 0, 'fill': 0, 'verify': 0, 'psi': 0, 'psi_gain': 0.0}
         return plan, mask, info
 
     # ───────────────── DOE ─────────────────
-    def _doe_lattice(self, rng, nW, nK):
-        """the no-row DOE: a LATIN pairing of the two axes' even grids — n_doe W targets and
-        n_doe KV targets, snapped to the nearest pool blocks and matched by a random
-        permutation, so both marginals are covered evenly and (almost) every arch is its own
-        W block. The four budget-box corners are pinned first: the cheapest one defines the
-        record staircase over the whole box before any prediction.
-
-        Used when builds are free, where pairing one W with many KV — and forcing both KV
-        extremes into every W — is pure overhead: a cartesian design would spend n_doe archs
-        on only sqrt(n_doe) distinct W allocations."""
-        n = max(4, int(self.n_doe))
-        wi = [int(np.argmin(np.abs(self.w_comp - t)))
-              for t in np.linspace(self.w_comp[0], self.w_comp[-1], n)]
-        ki = [int(np.argmin(np.abs(self.kv_comp - t)))
-              for t in np.linspace(self.kv_comp[0], self.kv_comp[-1], n)]
-        cells, seen = [], set()
-
-        def add(i, j):
-            if (i, j) not in seen and len(cells) < n:
-                seen.add((i, j)); cells.append((int(i), int(j)))
-
-        for i in (wi[0], wi[-1]):                      # the four budget-box corners first
-            for j in (ki[0], ki[-1]):
-                add(i, j)
-        for t, u in enumerate(rng.permutation(n)):     # Latin pairing of the two grids
-            add(wi[t], ki[int(u)])
-        for _ in range(20 * n):                        # top up if the snap deduplicated short
-            if len(cells) >= n or len(seen) >= nW * nK:
-                break
-            add(int(rng.integers(nW)), int(rng.integers(nK)))
-        return sorted({i for i, _ in cells}), cells
-
     def _doe_cells(self):
         """W rows EVEN over the wbits range (linspace targets → nearest distinct pool rows,
         so BOTH box corners are in the design and the record staircase is defined over the
         whole box before any prediction) × (both KV extremes + random interior cells).
 
-        SIZE: --n_doe is the TOTAL number of DOE archs. The ITERATION budget
-        (--companion_kv) does not govern the DOE.
-
-        SHAPE: chosen by the DERIVED build cost, never by a flag.
-          build_cost > 0  (AWQ pool)  ROW design — --doe_builds rows evenly spaced over the
-            wbits range, n_doe/doe_builds KV cells each, both KV extremes first. One build
-            serves a whole row, so the row is the unit that amortises and the extremes pin
-            that row's KV curve for the surrogate.
-          build_cost == 0  (HQQ / in-process eval)  NO rows — every arch is rebuilt, so a row
-            design buys nothing and two KV extremes per W are not mandatory. n_doe cells on a
-            LATIN pairing of the two axes' even grids — ~one arch per W block, both marginals
-            covered — with the four budget-box corners pinned so the record staircase is
-            defined everywhere before any prediction. --doe_builds is unused in this shape."""
+        SIZE: --n_doe is the TOTAL number of DOE archs and --doe_builds is how many W rows
+        to spread them over, so cells-per-row = n_doe / doe_builds (at least 2, so both KV
+        extremes always fit). The ITERATION budget (--companion_kv) does not govern the
+        DOE."""
         rng = np.random.default_rng(self.args.seed)
         nW, nK = len(self.Wg), len(self.KVg)
-        if self._build_cost() <= 0:
-            return self._doe_lattice(rng, nW, nK)
-        # nrows is additionally capped at n_doe//2 so that q >= 2 (both KV extremes must fit
-        # in every row) can never push the TOTAL past --n_doe: with doe_builds >= n_doe/2 the
-        # old arithmetic silently doubled the DOE (measured: --n_doe 1000 --doe_builds 1000
-        # produced 2000 archs).
-        nrows = min(max(int(self.args.doe_builds), 1), nW, max(1, int(self.n_doe) // 2))
+        nrows = min(max(int(self.args.doe_builds), 1), nW)
         rows, wc = [], np.asarray(self.w_comp, float)
         for t in np.linspace(wc.min(), wc.max(), nrows):
             order = np.argsort(np.abs(wc - t))
             for r in order:
                 if int(r) not in rows:
                     rows.append(int(r)); break
-        q = int(np.clip(self.n_doe // max(nrows, 1), 2, nK))
+        q = int(np.clip(round(self.n_doe / max(nrows, 1)), 2, nK))
         out = []
         for i in rows:
             cells = [0, nK - 1]
@@ -793,15 +884,7 @@ class FrontSearch(SecondSearch):
                 cells += [int(x) for x in rng.choice(np.arange(1, nK - 1),
                                                      size=min(q - 2, nK - 2), replace=False)]
             out += [(int(i), int(j)) for j in cells]
-        # spend any remainder (n_doe - nrows*q) on extra random cells, spread over the rows
-        for i in rows:
-            if len(out) >= self.n_doe:
-                break
-            for _ in range(4):
-                j = int(rng.integers(nK))
-                if (int(i), j) not in set(out):
-                    out.append((int(i), j)); break
-        return rows, out[:int(self.n_doe)]
+        return rows, out
 
     # ───────────────── debug figure ─────────────────
     def _save_viz_nd(self, it, archive, plan, mask, n_doe):
@@ -857,17 +940,10 @@ class FrontSearch(SecondSearch):
                     if k not in planned:
                         planned.add(k)
                         archs.append(self.ss.decode(np.array(k, int)))
-                cached = f" (+{len(seeded)} cached)" if seeded else ""
-                if self._build_cost() > 0:
-                    acc.print(f"[DOE] ROW design: {len(rows)} even-W builds × "
-                              f"{max(2, round(self.n_doe / max(len(rows), 1)))} KV cells "
-                              f"(2 extremes + rest random) → {len(archs)} archs "
-                              f"(--n_doe {self.n_doe} over --doe_builds {len(rows)})" + cached)
-                else:
-                    acc.print(f"[DOE] LATIN design: {len(archs)} archs over {len(rows)} "
-                              f"distinct W blocks (--n_doe {self.n_doe}; build_cost=0, so a "
-                              f"build amortises nothing — no rows, no forced KV extremes, "
-                              f"--doe_builds unused)" + cached)
+                acc.print(f"[DOE] {len(rows)} even-W builds × "
+                          f"{max(2, round(self.n_doe / max(len(rows), 1)))} KV cells "
+                          f"(2 extremes + rest random) → {len(archs)} archs "
+                          f"(--n_doe {self.n_doe} over --doe_builds {len(rows)})" + (f" (+{len(seeded)} cached)" if seeded else ""))
             else:
                 archs, seeded = [], []
             archs = acc.gather_for_metrics(archs, use_gather_object=True)
@@ -896,16 +972,17 @@ class FrontSearch(SecondSearch):
             self._y_ref = float(np.nanmax([x[1] for x in archive if np.isfinite(x[1])]))
             U_prev = self._utility(archive)
             acc.print(f"[utility] y_ref {self._y_ref:.4f}  U(DOE) = {U_prev:.4f}")
-            if self.n_doe < 32:
-                # the surrogate is fit on the DOE at iteration 1; rbf needs n >= ntail
-                # (~21 for this space) and the GP heads want more. Say so BEFORE the DOE is
-                # paid for rather than dying in _fit_predictor after it.
-                acc.print(f"[warn] --n_doe {self.n_doe} is small: the surrogate is fit on the "
-                          f"DOE at iteration 1 and most heads need >= ~30 points "
-                          f"(rbf asserts at ~21). Raise --n_doe or expect the first fit to fail.")
             acc.print(f"[sampler] {sampler}"
-                      + (f" | build_cost={self._build_cost():.2f} (derived)"
+                      + (f" | build_cost={self._build_cost():.2f} (derived), "
+                         f"rank_cap={'on' if self.args.rank_cap else 'off'}, "
+                         f"verify_frac={self.args.verify_frac}"
                          if sampler == 'psi' else ""))
+            if (self.args.rank_cap and sampler == 'psi'
+                    and int(self.args.companion_kv) < 3 * self._RANK_SKELETON):
+                acc.print(f"[rank] WARNING --rank_cap reserves {self._RANK_SKELETON} shared KV "
+                          f"columns per opened row for identifiability, which is most of a "
+                          f"--companion_kv {self.args.companion_kv} per-row budget; give it "
+                          f">= {3 * self._RANK_SKELETON} or leave --rank_cap off")
         acc.wait_for_everyone()
 
         for it in range(start_it, self.iterations + 1):
@@ -916,8 +993,28 @@ class FrontSearch(SecondSearch):
                 P = self._predict_pool(pred)
                 predictor_time = time() - tp
                 tn = time()
+                cap = None
+                if sampler == 'psi' and getattr(self.args, 'rank_cap', False):
+                    r_star, evr = self._surface_rank(archive)
+                    if r_star is None:
+                        nr, nc, ncell = getattr(self, '_rank_diag', (0, 0, 0))
+                        hint = ("; --rank_cap already reserves a shared KV column skeleton, "
+                                "so this should resolve once a few rows have been built"
+                                if nc < self._RANK_SKELETON else "")
+                        acc.print(f"[rank] cannot estimate the surface rank yet "
+                                  f"({ncell} usable cells over {nr} rows x {nc} cols, need "
+                                  f">=6 of each) — no build cap this iteration (fail-open)"
+                                  + hint)
+                    else:
+                        cap = min(int(self.n_iter), r_star + 1)
+                        acc.print(f"[rank] measured surface rank r*={r_star} "
+                                  f"(explained {[round(e, 4) for e in evr]}) → builds capped "
+                                  f"at r*+1 = {cap}"
+                                  + (" (cell budget unchanged: the saved builds become cells "
+                                     "inside the open rows)" if cap < int(self.n_iter)
+                                     else " — not binding (>= --n_iter)"))
                 if sampler == 'psi':
-                    plan, mask, binfo = self._next_psi(P, archive)
+                    plan, mask, binfo = self._next_psi(P, archive, max_rows=cap)
                 elif sampler == 'front':
                     plan, mask, binfo = self._next_front(P, archive)
                 else:
@@ -932,7 +1029,8 @@ class FrontSearch(SecondSearch):
                           f"{[f'{self.w_comp[i]:.2f}' for i in binfo['rows']]} "
                           f"cells/build {binfo['row_cells']} → {len(plan)} cells "
                           f"(psi {binfo['psi']} [gain {binfo.get('psi_gain', 0.0):.4f}], "
-                          f"skeleton {binfo['skeleton']}, fill {binfo['fill']})"
+                          f"skeleton {binfo['skeleton']}, verify {binfo['verify']}, "
+                          f"fill {binfo['fill']})"
                           + (f" [short of {budget}]" if len(plan) < budget else ""))
             else:
                 cands = []
@@ -1015,37 +1113,24 @@ class FrontSearch(SecondSearch):
 
 
 # flags second_search's parser defines for the NSGA candidate machinery (_next / _nsga /
-# _downselect / _companion_kv / _initialize) and for the pool/knowledge builders FrontSearch
-# OVERRIDES — nothing on this entry point reads them, so they are DELETED from the CLI:
-# absent from --help and a hard error if passed, instead of silently doing nothing.
+# _downselect / _companion_kv / _initialize) and the pool/knowledge builders FrontSearch
+# OVERRIDES — none of them is read on this entry point, so advertising them in --help is
+# just noise that invites tuning something inert. Hidden from help, still present in
+# vars(args) (protocol_dict and the inherited __init__ read the namespace), and a warning
+# fires if one is actually set.
 _DEAD_FLAGS = ('agree_frac', 'div_k', 'pop', 'mut_p_val', 'mut_p_mod', 'l0_repair',
                'pool_escape', 'grid_seed', 'cand_grid', 'subset_pop_size', 'anchor_k',
                'anchor_grid', 'decision_frac', 'decision_grid', 'companion_method',
                'companion_true_ends', 'companion_front_ends', 'companion_gap')
 
 
-def _strip_flags(p, dests):
-    """Remove these actions from the parser but KEEP their defaults in the namespace.
-
-    The flag disappears (no --help entry, `unrecognized arguments` if passed) while
-    `args.<dest>` still resolves, because inherited second_search code reads a few of them
-    off the namespace regardless of this entry point's pipeline (SecondSearch.__init__ does
-    `self.ga_pop_size = args.pop`, and protocol_dict/_write_results walk vars(args)).
-    argparse's set_defaults injects a value with no action attached, which is exactly the
-    'no flag, still an attribute' shape this needs."""
-    keep = {}
-    for a in list(p._actions):
-        if a.dest not in dests:
-            continue
-        keep[a.dest] = a.default
-        for opt in a.option_strings:
-            p._option_string_actions.pop(opt, None)
-        for g in p._action_groups:
-            if a in g._group_actions:
-                g._group_actions.remove(a)
-        p._remove_action(a)
-    p.set_defaults(**keep)
-    return keep
+def warn_dead_flags(args, parser, log=print):
+    """report any inherited NSGA-machinery flag the user set that this entry point ignores."""
+    d = {a.dest: a.default for a in parser._actions}
+    set_ = [f for f in _DEAD_FLAGS if f in d and getattr(args, f, d[f]) != d[f]]
+    if set_:
+        log(f"[args] IGNORED (not read by --sampler {args.sampler}; they belong to "
+            f"second_search.py's NSGA machinery): " + ', '.join(f'--{f}' for f in set_))
 
 
 def build_parser_new():
@@ -1055,9 +1140,10 @@ def build_parser_new():
     # surrogate/surrogate_input inherit second_search's production defaults (rbf/genome);
     # the sh's awq branch opts into sqrty_ard_gp+plstyp, mirroring scripts/second_search.sh.
     p.set_defaults(companion_kv=40, iterations=16, n_iter=5, save='save/second_search_new/run')
-    _strip_flags(p, _DEAD_FLAGS)              # delete the inherited NSGA-only flags
-    for a in p._actions:
-        if a.dest == 'n_doe':                 # same flag, entry-point-specific meaning
+    for a in p._actions:                      # hide the inherited NSGA-only flags
+        if a.dest in _DEAD_FLAGS:
+            a.help = argparse.SUPPRESS
+        elif a.dest == 'n_doe':               # same flag, entry-point-specific meaning
             a.help = ('TOTAL DOE archs, spread over --doe_builds W rows (so cells per DOE '
                       'row = n_doe / doe_builds, at least 2 so both KV extremes always fit). '
                       'The per-iteration --companion_kv does not govern the DOE.')
@@ -1069,14 +1155,35 @@ def build_parser_new():
                         "(default); front = the legacy predicted-new-front + W-gap/plane-spread "
                         "sampler; product = uniform block-product CONTROL ARM (cost-matched: "
                         "n_iter random rows × companion_kv random cells)")
+    p.add_argument('--verify_frac', type=float, default=0.0,
+                   help='fraction of the cell budget (0-0.5) reserved for WITHIN-CELL best-arm '
+                        'identification: cells in the already-opened rows nearest the incumbent '
+                        'record points, i.e. direct competitors at the same operating budget. '
+                        'Measured motivation: within a budget cell the loss spread (median 0.0032) '
+                        'is 0.82x a whole budget-bin step (0.0038) and best-in-cell beats '
+                        'mean-in-cell by 0.0042, while the surrogate cannot rank inside a cell '
+                        '(delta-hat rho ~0.215) — so it must be measured. Free-ish: an opened row '
+                        'sweeps KV with no rebuild. 0.25 is a sane setting.')
+    p.add_argument('--rank_cap', action='store_true',
+                   help='cap builds at the numerical rank of the MEASURED loss surface + 1. The '
+                        '(W-block x KV-block) table is measured near rank-2 on this codebase '
+                        '(ALS explains 94.5/98.7/99.5%% at rank 1/2/3; an additive a(w)+b(kv) '
+                        'surface IS rank 2), and a rank-r surface is pinned by r+1 swept rows, so '
+                        'further builds cannot reveal a new direction. The cell budget is '
+                        'unchanged, so saved builds become extra cells inside the open rows. '
+                        'Also raises the per-row KV skeleton to the shared column set the rank '
+                        'estimate needs to be identifiable; fails open (no cap) until the table '
+                        'can support an estimate.')
     return p
 
 
-def main(args):
+def main(args, parser=None):
     set_seed(args.seed)
+    warn_dead_flags(args, parser or build_parser_new())
     config = json.load(open(args.config))[args.model_name]
     FrontSearch(config, args).search()
 
 
 if __name__ == '__main__':
-    main(build_parser_new().parse_args())
+    _p = build_parser_new()
+    main(_p.parse_args(), _p)
