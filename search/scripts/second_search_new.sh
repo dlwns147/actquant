@@ -8,10 +8,11 @@ PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 #    greedy, so FEW W builds get MANY, UNEQUAL KV cells; leftovers go to KV-extreme skeleton
 #    + even coverage inside the opened rows.
 #    BUDGETS ONLY (this file has exactly one non-budget knob, SAMPLER):
-#      DOE       = N_DOE archs. SHAPE derives from the build cost: with the AWQ pool it is a
-#                  ROW design (DOE_BUILDS even-wbits rows × N_DOE/DOE_BUILDS KV cells, both
-#                  KV extremes per row); without it (HQQ) a Latin design, ~one arch per W
-#                  block. COMPANION_KV does NOT govern the DOE either way.
+#      DOE       = N_DOE archs over DOE_BUILDS distinct W allocations (evenly spaced across
+#                  the wbits range), i.e. N_DOE/DOE_BUILDS KV cells per W — 1 is legal and is
+#                  the no-multi-KV shape. KV within a row is random unless DOE_KV_EXTREMES
+#                  pins the two pool extremes. The four budget-box corners are always
+#                  measured. COMPANION_KV does NOT govern the DOE.
 #      per iter  = up to N_BUILDS W builds and N_BUILDS × COMPANION_KV KV cells; per-row
 #                  counts are emergent, and the greedy stops early when no cell still beats
 #                  the record (the shortfall is logged as "[short of N]").
@@ -55,8 +56,8 @@ if [ "${W_METHOD}" == "awq" ]; then   # awq branch mirrors second_search.sh (260
     SURROGATE_KERNEL=tps
     SURROGATE_INPUT=plstyp
 
-    N_DOE=1000                  # TOTAL DOE archs, spread over DOE_BUILDS rows (1000/25 = 40/row)
-    DOE_BUILDS=25               # DOE W builds, evenly spaced over the wbits range
+    N_DOE=1000                  # TOTAL DOE archs
+    DOE_BUILDS=25               # distinct W allocations in the DOE -> 1000/25 = 40 KV cells each
     ITERATIONS=15               # search iterations
     SAVE_ITER=1
     COMPANION_KV=40             # avg KV cells per build (total/iter = N_BUILDS × this; time knob)
@@ -72,8 +73,8 @@ if [ "${W_METHOD}" == "hqq" ]; then   # pre-quantized banks are HQQ-only
     done
     QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
 
-    N_DOE=1000                  # TOTAL DOE archs, spread over DOE_BUILDS rows (1000/25 = 40/row)
-    DOE_BUILDS=1000               # DOE W builds, evenly spaced over the wbits range
+    N_DOE=1000                  # TOTAL DOE archs
+    DOE_BUILDS=100              # distinct W allocations in the DOE -> 1000/100 = 10 KV cells each
     ITERATIONS=200               # search iterations
     SAVE_ITER=10                 # dump iter_<it>.stats + iter_<it>.png (via --debug) every SAVE_ITER iters (and the last)
     COMPANION_KV=10             # avg KV cells per build (total/iter = N_BUILDS × this; time knob)
@@ -83,6 +84,9 @@ fi
 SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}
 [ -n "${SURROGATE_KERNEL}" ] && SURR_TAG+=${SURROGATE_KERNEL}   # e.g. rbftps / sqrty_ard_gpplstyprq
 SAMPLER=psi                 # psi | front | product   (the ONLY non-budget knob)
+DOE_KV_EXTREMES=False       # pin both pool-extreme KV blocks in every DOE W row (else random
+                            # KV per row). Ignored when N_DOE/DOE_BUILDS is 1. The four
+                            # budget-box corners are measured either way.
 
 
 
@@ -171,6 +175,7 @@ ARGS="--config ${CONFIG} \
 --save ${SAVE}"
 [ -n "${SURROGATE_KERNEL}" ] && ARGS+=" --surrogate_kernel ${SURROGATE_KERNEL}"
 [ "${DEBUG}" == "True" ] && ARGS+=" --debug"
+[ "${DOE_KV_EXTREMES}" == "True" ] && ARGS+=" --doe_kv_extremes"
 
 [ -n "${QMODEL_PATHS}" ] && ARGS+=" --quant_model_paths ${QMODEL_PATHS}"
 GPU_ID=${DEVICES}
