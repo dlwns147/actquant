@@ -2,25 +2,11 @@ DEVICES=${1:-0}
 TODAY=`date +%y%m%d%H%M`
 PORT_NUM=$(( ( RANDOM % 10000 )  + 10000 ))
 
-# ── 2nd-stage joint W×eff_kvbits search (second_search_new.py), SAMPLER=psi:
-#    full-pool prediction → PSI (predicted staircase improvement: how much of the measured
-#    record staircase over the (wbits, eff_kv) budget plane a cell would remove) → cost-aware
-#    greedy, so FEW W builds get MANY, UNEQUAL KV cells; leftovers go to KV-extreme skeleton
-#    + even coverage inside the opened rows.
-#    BUDGETS ONLY (this file has exactly one non-budget knob, SAMPLER):
-#      DOE       = N_DOE archs. SHAPE derives from the build cost: with the AWQ pool it is a
-#                  ROW design (DOE_BUILDS even-wbits rows × N_DOE/DOE_BUILDS KV cells, both
-#                  KV extremes per row); without it (HQQ) a Latin design, ~one arch per W
-#                  block. COMPANION_KV does NOT govern the DOE either way.
-#      per iter  = up to N_BUILDS W builds and N_BUILDS × COMPANION_KV KV cells; per-row
-#                  counts are emergent, and the greedy stops early when no cell still beats
-#                  the record (the shortfall is logged as "[short of N]").
-#      SAMPLER   = psi (default) | front (the previous sampler, A/B baseline — it starves on
-#                  real pools) | product (uniform block-product CONTROL ARM, cost-matched:
-#                  any PSI gain must beat it, compared in GPU-HOURS, not evals).
-#    Everything else that used to be a flag is a constant in the class or derived from the
-#    run (e.g. the W-build cost is measured, not configured). U / ΔU are logged per iteration
-#    so a saturated run is visible; the run always completes ITERATIONS.
+# ── predicted-new-front 2nd-stage search (second_search_new.py): full-pool prediction →
+#    predicted new Pareto front (pure dominance) → W picks by union W-gap filling →
+#    KV cells = extremes + plane-gap spread over the picked rows' front cells.
+#    Budgets only: ITERATIONS × N_BUILDS W builds; N_BUILDS × COMPANION_KV KV cells/iter
+#    (COMPANION_KV = per-model time knob; per-row counts are emergent).
 
 MODEL_PATH=/SSD/huggingface/meta-llama
 MODEL_NAME=Llama-3.1-8B-Instruct
@@ -37,9 +23,11 @@ for VAR_NAME in W_EXPR EFF_KV_EXPR; do
     fi
 done
 
-# W_METHOD=awq
-W_METHOD=hqq
-
+# W_METHOD=awq enters the AWQ-setting branch (plstyp+sqrty_ard_gp surrogate, worker pool);
+# the flip inside it switches ONLY the eval method to hqq for fast-eval debugging of the
+# AWQ configuration. Comment the flip out for a real AWQ run; W_METHOD=hqq here for the
+# plain production-hqq (rbf+genome) run.
+W_METHOD=awq
 W_BITS="2 3 4"; W_GROUP_SIZE=128; AXIS=1
 KV_METHOD="kivi think"
 
@@ -54,13 +42,6 @@ if [ "${W_METHOD}" == "awq" ]; then   # awq branch mirrors second_search.sh (260
     SURROGATE=rbf
     SURROGATE_KERNEL=tps
     SURROGATE_INPUT=plstyp
-
-    N_DOE=1000                  # TOTAL DOE archs, spread over DOE_BUILDS rows (1000/25 = 40/row)
-    DOE_BUILDS=25               # DOE W builds, evenly spaced over the wbits range
-    ITERATIONS=15               # search iterations
-    SAVE_ITER=1
-    COMPANION_KV=40             # avg KV cells per build (total/iter = N_BUILDS × this; time knob)
-    N_BUILDS=5                  # max W builds per iteration (the row cap)
 fi
 W_METHOD_TEXT=${W_METHOD}
 KV_METHOD_TEXT=${KV_METHOD// /_}
@@ -71,23 +52,16 @@ if [ "${W_METHOD}" == "hqq" ]; then   # pre-quantized banks are HQQ-only
         QMODEL_PATHS_LIST+=( "/SSD/hqq/${MODEL_NAME}_${B}bit_${W_GROUP_SIZE}gs_${AXIS}axis_${DTYPE}" )
     done
     QMODEL_PATHS=$(IFS=" " ; echo "${QMODEL_PATHS_LIST[*]}")
-
-    N_DOE=1000                  # TOTAL DOE archs, spread over DOE_BUILDS rows (1000/25 = 40/row)
-    DOE_BUILDS=1000               # DOE W builds, evenly spaced over the wbits range
-    ITERATIONS=200               # search iterations
-    SAVE_ITER=10                 # dump iter_<it>.stats + iter_<it>.png (via --debug) every SAVE_ITER iters (and the last)
-    COMPANION_KV=10             # avg KV cells per build (total/iter = N_BUILDS × this; time knob)
-    N_BUILDS=5                  # max W builds per iteration (the row cap)
 fi
 
 SURR_TAG=${SURROGATE}; [ "${SURROGATE_INPUT}" != "genome" ] && SURR_TAG+=${SURROGATE_INPUT}
 [ -n "${SURROGATE_KERNEL}" ] && SURR_TAG+=${SURROGATE_KERNEL}   # e.g. rbftps / sqrty_ard_gpplstyprq
-SAMPLER=psi                 # psi | front | product   (the ONLY non-budget knob)
-
-
-
+DOE_BUILDS=25               # random DOE W builds, each × (2 KV extremes + random cells)
+ITERATIONS=15               # search iterations
+N_BUILDS=5                  # W builds per iteration (union W-gap filling)
+COMPANION_KV=40             # avg KV cells per build (total/iter = N_BUILDS × this; time knob)
 SEED=0
-
+SAVE_ITER=1
 DEBUG=True                  # save per-iter figures: iter_<it>.png (save_viz) + iter_<it>_nd.png
 FRONT_EPS_REL=0.05          # ε-band width (the pool IS the search space)
 WORKER_RECYCLE=32
@@ -143,13 +117,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/metric_tag.sh"
 MTAG=$(metric_tag_from_knobs "${DATASET##chat*:}" "${LOSS_FUNC}" "loss" \
                              "${N_SAMPLE}" "${SEQLEN}" "${MIN_SEQLEN:-0}")
 
-# sampler in the dir name only when it is NOT the default, so psi runs keep the existing
-# naming and an A/B arm can never overwrite them (SINK_TAG/PP_TAG pattern).
-SMP_TAG=""; [ "${SAMPLER}" != "psi" ] && SMP_TAG="_${SAMPLER}"
+SAVE=save/second_search_new/${TODAY}_${MODEL_NAME}_ndf_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${DOE_BUILDS}_it${ITERATIONS}b${N_BUILDS}_ckv${COMPANION_KV}_eps${FRONT_EPS_REL}_st${STRIDE}${PP_TAG}${SINK_TAG}${MTAG}${CHAT_TAG}_s${SEED}
 
-SAVE=save/second_search_new/${TODAY}_${MODEL_NAME}_ndf${SMP_TAG}_${W_METHOD_TEXT}_${KV_METHOD_TEXT}_${SURR_TAG}_doe${DOE_BUILDS}x${N_DOE}_it${ITERATIONS}b${N_BUILDS}_ckv${COMPANION_KV}_eps${FRONT_EPS_REL}_st${STRIDE}${PP_TAG}${SINK_TAG}${MTAG}${CHAT_TAG}_s${SEED}
-
-echo "SECOND-SEARCH-NEW (${SAMPLER}) -> ${SAVE}"
+echo "SECOND-SEARCH-NEW (claim) -> ${SAVE}"
 
 ARGS="--config ${CONFIG} \
 --model_name ${MODEL_NAME} \
@@ -157,8 +127,6 @@ ARGS="--config ${CONFIG} \
 --eff_kv_expr ${EFF_KV_EXPR} \
 --surrogate ${SURROGATE} \
 --surrogate_input ${SURROGATE_INPUT} \
---sampler ${SAMPLER} \
---n_doe ${N_DOE} \
 --doe_builds ${DOE_BUILDS} \
 --iterations ${ITERATIONS} \
 --n_iter ${N_BUILDS} \
