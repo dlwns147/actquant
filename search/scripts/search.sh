@@ -18,6 +18,32 @@ CONFIG=config/llama.json
 # CONFIG=config/mistral.json
 
 
+# ── Named calibration metric (the ONE registry, utils/metric_specs.py) ─────
+# METRIC_TASK=<name> takes the ENTIRE measurement protocol from the registry --
+# the same names correlation.py --metrics and post_search.py --metric_tasks
+# resolve -- so this archive and the correlation table that judges it are the
+# same measurement by construction instead of by retyping stride / last_tokens /
+# n_sample correctly in two scripts. It overrides DATASET / USE_CHAT_TEMPLATE /
+# N_SAMPLE / SEQLEN / MIN_SEQLEN / METRIC / LOSS_FUNC / STRIDE / PREFILL_PROMPT /
+# LAST_TOKENS / SCORE / USE_KEY_TOKEN (+ the key-token protocol and archive
+# path) BELOW, so the SAVE-dir tags are derived from the registry too -- a
+# hand-set run and its METRIC_TASK twin land in the SAME directory name.
+# The resolution happens HERE, not in search.py: search.py keeps taking raw knobs
+# and knows nothing about metric names, so the measurement and the SAVE-dir tags
+# both come from this one lookup. A knob set by hand below is OVERRIDDEN by the
+# name (and the override is printed) — the two are alternatives, not layers.
+# The name + its spec hash are written to <SAVE>/metric_task.json.
+# Empty = the hand-set knobs below (unchanged legacy behaviour).
+# `python -m utils.metric_specs` lists every valid name.
+METRIC_TASK=""
+# METRIC_TASK=wt2_jsd_pp512_s128_chat     # == the hand-set defaults below
+# METRIC_TASK=wt2_jsd_pp128_s32_chat
+# METRIC_TASK=gov_jsd_pp512_s32_chat
+# BASE key-token archive dir; the kt_eval-<evaluator>_tgt-<model> root is
+# DERIVED from the metric name (its _l8b/_q7b/_q72b suffix), so this is only
+# used when METRIC_TASK names a key-token metric.
+KEY_TOKEN_BASE=key_token
+
 # COMP_OBJ=wbits
 # COMP_OBJ=kvbits
 # COMP_OBJ=kvdim
@@ -317,7 +343,20 @@ GA_POP_SIZE=200
 METRIC=loss
 # METRIC=ppl
 
-if [ ${LOSS_FUNC} == 'cross_entropy' ]; then
+# METRIC_TASK -> overwrite every knob the registry owns (see the block at the
+# top). Done HERE: after the hand-set knobs so it wins, before MAX_VALUE and the
+# dir tags so they follow the resolved protocol. A bad name / an unmeasurable
+# task (needle_*, gsm8k_unpad_pp) / a missing key-token archive aborts with the
+# valid list or the gen_key_token command, before any GPU work.
+source "$(dirname "${BASH_SOURCE[0]}")/metric_task.sh"
+metric_task_apply "${METRIC_TASK}" "${MODEL_NAME}" "${KEY_TOKEN_BASE}"
+
+# PPL is unbounded, so the cross_entropy clamp (5) would flatten every arch onto
+# the cap -- max_value only exists to keep a NaN/diverged eval out of the
+# archive. Checked before LOSS_FUNC because a PPL task carries cross_entropy.
+if [ ${METRIC} == 'ppl' ]; then
+    MAX_VALUE=1e4
+elif [ ${LOSS_FUNC} == 'cross_entropy' ]; then
     MAX_VALUE=5
 elif [ ${LOSS_FUNC} == 'jsd' ]; then
     MAX_VALUE=0.7
@@ -337,6 +376,11 @@ SENSITIVITY_RESULT_PATH=/NAS/SJ/actquant/search/csv/sensitivity/${MODEL_NAME}_w_
 PP_TAG=""
 if [ ${PREFILL_PROMPT} == 'True' ]; then
     PP_TAG="_pp${LAST_TOKENS}"
+    [ ${SCORE} == 'full' ] && PP_TAG="${PP_TAG}full"
+elif [ -n "${METRIC_TASK}" ] && [ ${LAST_TOKENS} -gt 0 ]; then
+    # registry tasks that score only a window with NO prefill/answer split
+    # (e.g. gov_jsd_lt128): not _pp, but the window must still be in the name.
+    PP_TAG="_lt${LAST_TOKENS}"
     [ ${SCORE} == 'full' ] && PP_TAG="${PP_TAG}full"
 fi
 
@@ -385,7 +429,12 @@ fi
 # document is SEQLEN minus the model's affix overhead, so the archive must have
 # been generated at THAT length -- ask utils.data for it rather than hardcoding
 # a per-model constant.
-if [ ${USE_KEY_TOKEN} == 'True' ]; then
+if [ ${USE_KEY_TOKEN} == 'True' ] && [ -n "${METRIC_TASK}" ]; then
+    # KEY_TOKEN_PATH (and trunc/sw/alpha/beta) came from the registry, which
+    # derived the kt_eval-*_tgt-* root from the metric name and already verified
+    # the archive is there -- nothing to rebuild or re-check here.
+    echo "[search.sh] key-token archive: ${KEY_TOKEN_PATH}"
+elif [ ${USE_KEY_TOKEN} == 'True' ]; then
     # Archive layout: `raw`, or `chat-a<answer window>` -- under a chat layout
     # the sample text depends on where the assistant header falls, so each
     # window is a different input with its own archive. The evaluator and the
@@ -465,6 +514,8 @@ ARGS="--gpu_id ${DEVICES} \
 --dataset ${DATASET} \
 --save_iter ${SAVE_ITER}"
 
+metric_task_stamp "${SAVE}"
+
 # QEFT outlier-column axis (wbits search): searchable per-layer FP16 outlier
 # counts + the multi-rank outlier dict from extract_outidx.py. The dataset/ranks
 # in the path must match how extract_outidx.sh was run. (w_method stays hqq.)
@@ -502,12 +553,22 @@ else
     ARGS+=" --quant_kv_output "
 fi
 
+if [ ${PREFILL_PROMPT} != 'True' ] && [ -n "${METRIC_TASK}" ] && [ ${LAST_TOKENS} -gt 0 ]; then
+    # see PP_TAG above: a scored window with no prefill. The legacy path ties
+    # --last_tokens to --prefill_prompt (PREFILL_PROMPT=False expects
+    # LAST_TOKENS=0), so this is added only under METRIC_TASK.
+    ARGS+=" --last_tokens ${LAST_TOKENS} --score ${SCORE} "
+fi
+
 if [ ${PREFILL_PROMPT} == 'True' ]; then
     if [ ${USE_KEY_TOKEN} == 'True' ] && [ ${SCORE} == 'last' ]; then
         echo "[search.sh] WARNING: USE_KEY_TOKEN=True with SCORE=last — key tokens are"
         echo "  ANDed with the last ${LAST_TOKENS} positions (measured coverage 4-20%, and 0 on"
         echo "  some documents, which drops them from the average). Set SCORE=full to score"
         echo "  every key token while keeping the prefill/answer split."
+        [ -n "${METRIC_TASK}" ] && echo "  (SCORE came from METRIC_TASK=${METRIC_TASK};" \
+            "the registry picked 'last' for it deliberately — changing SCORE makes this" \
+            "run a DIFFERENT measurement than that name, so clear METRIC_TASK if you do.)"
     fi
     ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} --score ${SCORE} "
 fi
