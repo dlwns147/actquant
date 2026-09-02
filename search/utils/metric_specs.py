@@ -907,6 +907,117 @@ def resolve_tasks(names):
     return out
 
 
+# ── one named metric → the flat knobs a single-metric script takes ──────────
+# correlation.py / post_search.py measure MANY names per run, so they drive the
+# evaluator through groups_for → precompute_groups → apply_group → run_task.
+# The single-metric scripts (search.py, second_search*.py, baseline_search.py,
+# sample_surrogate.py) instead carry ONE protocol on the CLI
+# (--dataset/--n_sample/--seqlen/--stride/--last_tokens/…), and the protocol had
+# to be retyped by hand in each wrapper — which is exactly how a search archive
+# ends up not being the measurement the correlation table judging it reports.
+#
+# `task_knobs` closes that WITHOUT touching those entry points: it reads the same
+# registry entry out as flat knobs, and `scripts/metric_task.sh` (via the
+# __main__ emitter at the bottom of this file) turns them into the wrapper's own
+# shell variables. So the python CLIs stay exactly as they are — they still take
+# only knobs — and `METRIC_TASK=wt2_jsd_pp512_s128_chat` in a script is the same
+# measurement as the hand-set knobs by construction, dir tags included.
+KNOB_KEYS = ('dataset', 'n_sample', 'seqlen', 'min_seqlen', 'metric', 'loss_func',
+             'stride', 'prefill_prompt', 'last_tokens', 'score', 'use_key_token',
+             'trunc_len', 'sliding_window', 'alpha', 'beta', 'key_token_path')
+
+
+def task_knobs(name, *, key_token_path='', target_model=None,
+               require=None, context='this entry point'):
+    """One registry name → `{knob: value}` for a single-metric CLI.
+
+    Consumed by `scripts/metric_task.sh` (through this module's `--shell`
+    emitter), which assigns them to the wrapper script's variables before it
+    builds its arg list. Nothing in search.py / second_search*.py resolves a
+    metric name: they keep taking raw knobs, and the shell is what knows the
+    registry.
+
+    Mirrors apply_group + run_task exactly: the GROUP owns the data side
+    (dataset / n_sample / seqlen / min_seqlen / use_key_token + the key-token
+    protocol), the TASK owns the forward side (metric / loss_func / stride /
+    prefill_prompt / last_tokens / score, defaulting to 'last' as run_task
+    does). `0` is the CLI's OFF for stride/last_tokens — argparse cannot pass
+    None — matching utils/func.metric_protocol and LlamaEvaluator.
+
+    Also returned, as metadata rather than knobs: `metric_task` (the name),
+    `metric_spec` (spec_sha8 — the DEFINITION hash of what the name meant when
+    it was resolved; the wrapper prints it), `group` and `data_seed`.
+
+    Two things it refuses rather than mis-measure:
+      * custom-loader tasks (`kind=needle_*` / `gsm8k_unpad_pp`) — they build
+        their own prompts inside correlation.py and are not expressible as a
+        dataset + protocol (post_search rejects them for the same reason);
+      * a key-token metric whose archive is missing — the evaluator would
+        otherwise fail deep inside the FP-teacher pass. `key_token_path` is the
+        BASE directory here (e.g. `key_token`); the per-metric root
+        `kt_eval-<evaluator>_tgt-<target>_<layout>` is DERIVED from the group
+        (the evaluator comes from the name's `_q72b`/`_q7b`/`_l8b` suffix), so a
+        run cannot pair a metric with another evaluator's archive.
+    """
+    (key, g, ds, kw), = resolve_tasks([name])
+    if kw.get('kind'):
+        raise SystemExit(
+            f"metric task '{key}' is a custom-loader task (kind={kw['kind']}): it "
+            f"generates its own prompts inside correlation.py and has no "
+            f"--dataset + protocol form. Measure it with correlation.py.")
+    spec = GROUPS[g]
+    # `require` = what the CALLER can honour, checked HERE — before the key-token block
+    # below asks for an archive — so an entry point with no key-token plumbing says
+    # exactly that instead of demanding a path it would refuse to use anyway.
+    for rk, want in (require or {}).items():
+        got = (bool(spec.get('use_key_token')) if rk == 'use_key_token'
+               else kw.get(rk, spec.get(rk)))
+        if rk == 'metric':
+            got = kw.get('metric', 'loss')
+        if got != want:
+            raise SystemExit(
+                f"metric task '{key}' has {rk}={got!r}, but {context} can only measure "
+                f"{rk}={want!r}. Pick a metric with {rk}={want!r} "
+                f"(`python -m utils.metric_specs` lists them), or measure this one with "
+                f"correlation.py / post_search.py.")
+    out = dict(
+        metric_task=key, metric_spec=spec_sha8(key), group=g,
+        data_seed=int(spec.get('data_seed', 0)),
+        dataset=ds,
+        n_sample=int(spec['n_sample']),
+        seqlen=int(spec['seqlen']),
+        min_seqlen=int(spec['min_seqlen']),
+        metric=kw.get('metric', 'loss'),
+        loss_func=kw.get('loss_func', spec.get('loss_func', 'cross_entropy')),
+        stride=int(kw.get('stride') or 0),
+        prefill_prompt=bool(kw.get('prefill_prompt')),
+        last_tokens=int(kw.get('last_tokens') or 0),
+        score=kw.get('score', 'last'),
+        use_key_token=bool(spec.get('use_key_token')),
+        trunc_len=int(spec.get('trunc_len', 512)),
+        sliding_window=int(spec.get('sliding_window', 128)),
+        alpha=int(spec.get('alpha', 2)),
+        beta=int(spec.get('beta', -2)),
+        key_token_path='',
+    )
+    if out['use_key_token']:
+        if not (key_token_path and target_model):
+            raise SystemExit(
+                f"metric task '{key}' is key-token weighted: pass --key_token_path "
+                f"(the BASE archive directory, e.g. 'key_token'; the "
+                f"kt_eval-<evaluator>_tgt-<model> root is derived from the metric "
+                f"name)" + ('' if target_model else " and --model_name"))
+        out['key_token_path'] = key_token_root(key_token_path, spec, target_model)
+        ok, why = key_token_archive_status(key_token_path, spec, target_model, ds)
+        if not ok:
+            raise SystemExit(
+                f"metric task '{key}': no usable key-token archive ({why}).\n"
+                f"  generate it with gen_key_token.py --metrics {key} "
+                f"--model_name {spec['key_token_eval']} --target_model {target_model} "
+                f"--save_path {key_token_path}")
+    return out
+
+
 def groups_for(tasks, key_token_path='', target_model=None):
     """The group specs `tasks` need, as [(group_name, spec)] in first-use order.
 
@@ -1213,3 +1324,76 @@ def protocol_dict(args):
     keys the caller doesn't have."""
     get = args.get if hasattr(args, 'get') else (lambda k, d=None: getattr(args, k, d))
     return {k: get(k) for k in PROTOCOL_KEYS if get(k) is not None}
+
+
+# ── CLI: name → knobs, for shells that must name the same metric ────────────
+# `python -m utils.metric_specs --shell <name>` prints the search.sh variables
+# for one metric, so the SAVE-dir name is DERIVED from the registry instead of
+# being hand-typed next to it (a dir name that disagrees with the measurement is
+# the failure mode this whole module exists to prevent). `--json` gives the raw
+# knob dict; no argument lists every valid name.
+if __name__ == '__main__':
+    import argparse
+
+    _ap = argparse.ArgumentParser(
+        description='resolve a named calibration metric into flat CLI knobs')
+    _ap.add_argument('name', nargs='?', help='metric name (omit to list them all)')
+    _ap.add_argument('--shell', action='store_true',
+                     help='emit KEY=VALUE lines for `eval` in scripts/search.sh')
+    _ap.add_argument('--json', action='store_true', help='emit the knob dict as JSON')
+    _ap.add_argument('--key_token_path', default='',
+                     help='BASE key-token archive dir (the kt_eval-*_tgt-* root is derived)')
+    _ap.add_argument('--model_name', default='', help='target model (key-token metrics)')
+    _ap.add_argument('--loss_only', action='store_true',
+                     help="refuse anything the 2nd-stage entry points cannot measure "
+                          "(metric='loss', no key tokens) — scripts/second_search*.sh")
+    _a = _ap.parse_args()
+
+    if not _a.name:
+        print('\n'.join(METRIC_KEYS))
+        raise SystemExit(0)
+
+    _k = task_knobs(_a.name, key_token_path=_a.key_token_path,
+                    target_model=_a.model_name or None,
+                    require={'metric': 'loss', 'use_key_token': False} if _a.loss_only else None,
+                    context='the 2nd-stage search')
+    if _a.shell and _k['data_seed'] != 0:
+        # The wrapper scripts build their loaders at LlamaEvaluator's default seed (none
+        # of them passes one), so a group pinning a different document-selection seed
+        # cannot be honoured from a shell. No group does today (LONG_DOC_DATA_SEED = 0);
+        # this is the guard for the one that gets added. correlation.py/post_search.py
+        # DO honour data_seed, hence the check lives on the shell path only.
+        raise SystemExit(
+            f"metric task '{_a.name}' pins data_seed={_k['data_seed']}, but the wrapper "
+            f"scripts build their loaders at seed 0. Measure it with correlation.py / "
+            f"post_search.py, which honour the group's data_seed.")
+    if _a.json or not _a.shell:
+        print(json.dumps(_k, indent=2, sort_keys=True))
+        raise SystemExit(0)
+
+    # search.sh keeps the RAW corpus and the chat layout in two variables (the
+    # dir tag `_ct` and the key-token archive layout both key off the latter),
+    # so the `chat:` prefix is split back out here rather than in the shell.
+    _ds, _chat = _k['dataset'], False
+    if _ds.startswith('chat:'):
+        _ds, _chat = _ds[len('chat:'):], True
+    _sh = [
+        ('DATASET', _ds), ('USE_CHAT_TEMPLATE', _chat),
+        ('N_SAMPLE', _k['n_sample']), ('SEQLEN', _k['seqlen']),
+        ('MIN_SEQLEN', _k['min_seqlen']),
+        ('METRIC', _k['metric']), ('LOSS_FUNC', _k['loss_func']),
+        ('STRIDE', _k['stride']), ('PREFILL_PROMPT', _k['prefill_prompt']),
+        ('LAST_TOKENS', _k['last_tokens']), ('SCORE', _k['score']),
+        ('USE_KEY_TOKEN', _k['use_key_token']),
+        ('TRUNC_LEN', _k['trunc_len']), ('SLIDING_WINDOW', _k['sliding_window']),
+        ('ALPHA', _k['alpha']), ('BETA', _k['beta']),
+        # the DERIVED kt_eval-<evaluator>_tgt-<model> root — what the script passes
+        # as --key_token_path (no python entry point resolves the name, so nothing
+        # downstream would derive it)
+        ('KEY_TOKEN_PATH', _k['key_token_path']),
+        ('METRIC_SPEC', _k['metric_spec']),
+    ]
+    for _n, _v in _sh:
+        if isinstance(_v, bool):
+            _v = 'True' if _v else 'False'
+        print(f"{_n}='{_v}'")

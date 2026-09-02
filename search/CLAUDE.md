@@ -108,7 +108,33 @@ rows (see `post_search.load_sample_csv`).
 `METRIC_TASKS` (87 names: `wt2_jsd_pp512_s32`, `gov_jsd_pp128_s32`, `c4_ppl`, …)
 live here; `correlation.py` imports them under their original names and
 `post_search.py --metric_tasks <name>...` resolves the same ones, so a number
-reported by one script IS the number reported by the other. A **group** owns the
+reported by one script IS the number reported by the other. **The wrapper scripts
+name the same metrics** (`scripts/metric_task.sh` + `metric_specs.task_knobs`):
+`METRIC_TASK=<name>` in `search.sh` / `second_search.sh` / `second_search_new.sh`
+resolves the name into that script's own knobs
+(`DATASET/USE_CHAT_TEMPLATE/N_SAMPLE/SEQLEN/MIN_SEQLEN/METRIC/LOSS_FUNC/STRIDE/
+PREFILL_PROMPT/LAST_TOKENS/SCORE/USE_KEY_TOKEN` + the key-token protocol, whose
+`kt_eval-<evaluator>_tgt-<model>` archive root is DERIVED from the name and
+verified before any GPU work) via `python -m utils.metric_specs --shell <name>`.
+**The resolution is shell-only by design: `search.py` / `second_search*.py` take
+raw knobs and know nothing about metric names.** One lookup then feeds BOTH the
+arg list and the SAVE-dir tags, so the measurement and the directory name cannot
+disagree — `METRIC_TASK=wt2_jsd_pp512_s128_chat` reproduces search.sh's hand-set
+defaults' dir name byte-for-byte, and an empty `METRIC_TASK` leaves all three
+scripts byte-identical to their pre-registry behaviour. A knob set by hand next
+to a `METRIC_TASK` is OVERRIDDEN by the name and every override is PRINTED as
+`KNOB: old -> new` (they are alternatives, not layers — to keep a hand-set knob,
+clear `METRIC_TASK`). The name + `spec_sha8` are written to
+`<SAVE>/metric_task.json`; the resolved protocol itself is in `iter_<it>.stats`
+as before (`protocol_dict`). The 2nd-stage scripts pass `--loss_only`, which
+refuses PPL and key-token names: both call `evaluator.eval(..., 'loss')` and
+neither they nor `utils/awq_pool`'s worker is handed a key-token archive, so
+those names are refused with the reason rather than approximated (measure them
+with correlation.py / post_search.py). Custom-loader tasks
+(`kind=needle_*`/`gsm8k_unpad_pp`) are rejected as in post_search, and a task
+that scores a window with NO prefill (e.g. `gov_jsd_lt128`) is tagged `_lt<N>`
+and gets `--last_tokens` passed, which the legacy path ties to
+`--prefill_prompt`. A **group** owns the
 data side (datasets / n_sample / seqlen / min_seqlen / last_tokens / use_key_token
 / optional `sides` — everything the pre-masked FP-teacher `dense_logits` depend
 on); a **task** owns

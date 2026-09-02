@@ -129,8 +129,30 @@ STRIDE=32
 PREFILL_PROMPT=True
 LAST_TOKENS=128
 
+# ── Named calibration metric (the ONE registry, utils/metric_specs.py) ─────
+# METRIC_TASK=<name> takes the measurement protocol from the registry -- the same names
+# correlation.py --metrics, post_search.py --metric_tasks and search.sh's own
+# METRIC_TASK resolve -- so a 2nd-stage archive states which registered metric it optimised, and is
+# comparable with the 1st-stage archives and the correlation table by construction
+# instead of by retyping DATASET/STRIDE/LAST_TOKENS identically in every script.
+# The resolution happens in the SHELL: second_search_new.py takes raw knobs and knows nothing about
+# metric names, so this one lookup feeds both the arg list and the SAVE-dir tags. A
+# knob set by hand above is OVERRIDDEN by the name and the override is printed -- the
+# two are alternatives, not layers. Name + spec hash -> <SAVE>/metric_task.json.
+# This entry point measures a LOSS objective with no key-token weighting, so PPL and
+# key-token metrics are refused (--loss_only) -- use correlation.py / post_search.py for
+# those. Empty = the hand-set knobs above (unchanged legacy behaviour).
+# `python -m utils.metric_specs` lists every valid name.
+METRIC_TASK=""
+# METRIC_TASK=wt2_jsd_pp128_s32_chat      # == the hand-set knobs above
+source "$(dirname "${BASH_SOURCE[0]}")/metric_task.sh"
+metric_task_apply "${METRIC_TASK}" "${MODEL_NAME}" "" --loss_only
+
 SINK_TAG=""; [ ${ATTN_SINK} -ne 0 ] && SINK_TAG="_sk${ATTN_SINK}"
 PP_TAG="";   [ "${PREFILL_PROMPT}" == "True" ] && PP_TAG="_pp${LAST_TOKENS}"
+# registry tasks that score a window with NO prefill/answer split (e.g.
+# gov_jsd_lt128): not _pp, but the window still belongs in the dir name.
+[ "${PREFILL_PROMPT}" != "True" ] && [ -n "${METRIC_TASK}" ] && [ ${LAST_TOKENS} -gt 0 ] && PP_TAG="_lt${LAST_TOKENS}"
 
 # One layout, parameterised by the answer window: chat: puts the assistant
 # header at seqlen - LAST_TOKENS, so the scored tail is generated in assistant
@@ -207,6 +229,16 @@ if [ ${STRIDE} -gt 0 ]; then
 fi
 if [ ${PREFILL_PROMPT} == 'True' ]; then
     ARGS+=" --prefill_prompt --last_tokens ${LAST_TOKENS} "
+elif [ -n "${METRIC_TASK}" ] && [ ${LAST_TOKENS} -gt 0 ]; then
+    # see PP_TAG: a scored window with no prefill. The legacy path ties --last_tokens to
+    # --prefill_prompt, so this is added only under METRIC_TASK.
+    ARGS+=" --last_tokens ${LAST_TOKENS} "
+fi
+if [ -n "${METRIC_TASK}" ]; then
+    # --score is not part of this script's legacy arg list (it only ever ran the default
+    # 'last'), so it is passed explicitly when a name is what set it.
+    ARGS+=" --score ${SCORE} "
+    metric_task_stamp "${SAVE}"
 fi
 [ -n "${RESUME}" ] && ARGS+=" --resume ${RESUME}"
 
