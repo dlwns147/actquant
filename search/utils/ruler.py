@@ -40,10 +40,22 @@ def default_per_example_path(result_path, seed=0):
 
     A few hundred rows, so callers write it by default; an explicit
     --ruler_per_example_path overrides. '' in → '' out (no result path means
-    nowhere to put it)."""
+    nowhere to put it).
+
+    NOTE: os.path.splitext CANNOT be used here. post_search's RULER path embeds
+    the memory band (…_memory_5219753033.260_5272212862.740_…_arch0), so
+    splitext treats '.740_…_arch0' as the extension and returns a truncated
+    root — which silently DROPPED the per_arch_path '_arch<idx>' suffix and made
+    every arch of an `-n > 1` run overwrite the same dump (only the last
+    survived). Strip a real .json/.jsonl suffix instead, nothing else."""
     if not result_path:
         return ''
-    return f'{os.path.splitext(result_path)[0]}_per_example_s{int(seed)}.jsonl'
+    root = result_path
+    for _ext in ('.jsonl', '.json'):
+        if root.endswith(_ext):
+            root = root[:-len(_ext)]
+            break
+    return f'{root}_per_example_s{int(seed)}.jsonl'
 
 
 def eval_ruler(model,
@@ -117,6 +129,19 @@ def eval_ruler(model,
 
     # Reproducibility: set seed before dataset creation and generation
     set_seed(seed)
+    # set_seed() reaches random / np.random / torch, but cwe_utils holds its OWN
+    # module-level `RNG = random.Random(42)` that is created at IMPORT and then
+    # advanced by every get_example() call. Across processes that is harmless
+    # (re-import → fresh 42), but a SECOND eval_ruler call in the SAME process
+    # (post_search -n > 1) resumed it mid-stream and handed that arch a
+    # DIFFERENT ruler_cwe prompt set than the first arch — an unpaired
+    # comparison masquerading as a paired one. Restore the exact post-import
+    # state: sorted WORDS, RNG re-seeded to 42, then the same import-time
+    # shuffle. (Verified by _prompt_set_sha: identical across archs after this.)
+    from .ruler_utils import cwe_utils as _cwe
+    _cwe.WORDS.sort()
+    _cwe.RNG.seed(42)
+    _cwe.RNG.shuffle(_cwe.WORDS)
 
     # Batched generation needs LEFT padding (generated tokens are sliced off with
     # the shared prompt length below); this tokenizer instance is dedicated to the

@@ -17,6 +17,12 @@ from .module import get_op_by_name, get_op_name, set_op_by_name, is_owq
 # __all__ = ["auto_scale_block", "apply_scale"]
 
 
+def _scale_group(layers):
+    """'qkv' | 'o' | 'gateup' | 'down' from the first linear a scale group targets."""
+    first = next(iter(layers)).split('.')[-1]
+    return {'q_proj': 'qkv', 'o_proj': 'o', 'gate_proj': 'gateup', 'down_proj': 'down'}[first]
+
+
 @torch.no_grad()
 def get_weight_scale(weight, q_group_size=-1):
     org_shape = weight.shape
@@ -120,7 +126,11 @@ def scale_gelu_fc(gelu, fc, scales):
 
 
 @torch.no_grad()
-def auto_scale_block(module, module_kwargs, q_config, input_feat, do_owq, module_bit=None, outlier=None):
+def auto_scale_block(module, module_kwargs, q_config, input_feat, do_owq, module_bit=None, outlier=None,
+                     groups=None):
+    # groups: optional subset of {'qkv','o','gateup','down'} to search (None = all, the
+    # original behaviour). Used by quant/awq_table.py, which needs each group's scale
+    # for every bit combination of THAT group only; the search itself is unchanged.
     from .quantizer import pseudo_quantize_tensor
 
     def w_quantize_func(p, bit=None):
@@ -212,6 +222,8 @@ def auto_scale_block(module, module_kwargs, q_config, input_feat, do_owq, module
 
 
     def _auto_get_scale(prev_op, layers, inp, module2inspect=None, kwargs={}, module_bit=None, do_owq=False, outlier=None):
+        if groups is not None and _scale_group(layers) not in groups:
+            return None
         # module2inspect: if given, we will check the output diff of this module instead of layers
         if module2inspect is None:
             assert len(layers) == 1
@@ -448,7 +460,7 @@ def auto_scale_block(module, module_kwargs, q_config, input_feat, do_owq, module
     else:
         raise NotImplementedError(f"{type(module)} not supported yet!")
 
-    return scales_list
+    return [s for s in scales_list if s is not None]
 
 
 def apply_scale(module, scales_list, input_feat_dict=None):

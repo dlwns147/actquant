@@ -1051,6 +1051,8 @@ def build_parser_new():
 
 def main(args):
     set_seed(args.seed)
+    from model.kv_rotation import setup_from_args
+    setup_from_args(args)
     config = json.load(open(args.config))[args.model_name]
     FrontSearch(config, args).search()
 

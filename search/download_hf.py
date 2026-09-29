@@ -18,6 +18,7 @@ def main(args):
         "tokenizer*",
         "*.model",
         "*.tiktoken",
+        "*.jinja",       # chat_template.jinja (gpt-oss/granite/Qwen3-Next 는 별도 파일로 배포)
     ]
     ignore_patterns = [
         "original/*",

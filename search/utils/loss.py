@@ -28,6 +28,44 @@ class JSD(nn.Module):
         return 0.5 * (self.kl(m, p.log_softmax(-1)) + self.kl(m, q.log_softmax(-1)))
 
 
+class MarginLoss(nn.Module):
+    """How much the candidate erodes the TEACHER's preference between its own top-2
+    tokens:  mean over scored positions of  relu( m_teacher - m_student ), where
+    m = log p(top1) - log p(top2) and both margins are read on the TEACHER's top-2
+    pair. 0 when the candidate keeps at least the teacher's gap; grows as the pair
+    closes and keeps growing once it flips.
+
+    Motivation (findings 33/38): RULER samples are decided at a few near-tied tokens
+    where the right token sits at rank 2, and this is the only per-token reduction of
+    the same logits that beat JSD on BOTH models and BOTH answer protocols. Same
+    forward pass and teacher logits as JSD; LOWER IS BETTER (== JSD).
+    """
+    SHARPEN = 0.25   # loss_func='smargin' (finding 89)
+
+    def __init__(self, reduction='batchmean', sharpen=0.0):
+        """sharpen > 0 also charges sharpen * relu(m_student - m_teacher): the candidate
+        WIDENING the teacher's gap. Plain margin forgives it, and low-bit W configs do
+        exactly that (finding 89: signed gap change rises as W bits fall, rho -0.95), so
+        the plain loss loses its W-bit resolution above ~3.4 bits and the W-axis stage-1
+        front truncates. 0.25 restores it (held-out rho vs W bits -0.69 -> -0.98) at no
+        in-box W/KV cost."""
+        super(MarginLoss, self).__init__()
+        self.reduction = reduction
+        self.sharpen = sharpen
+
+    def forward(self, p: torch.tensor, q: torch.tensor):
+        # p = candidate logits, q = FP16 teacher logits, both [T, vocab]
+        lq = q.float().log_softmax(-1)
+        lp = p.float().log_softmax(-1)
+        top2 = lq.topk(2, dim=-1).indices
+        m_teacher = lq.gather(-1, top2[:, :1]).squeeze(-1) - lq.gather(-1, top2[:, 1:2]).squeeze(-1)
+        m_student = lp.gather(-1, top2[:, :1]).squeeze(-1) - lp.gather(-1, top2[:, 1:2]).squeeze(-1)
+        loss = torch.clamp(m_teacher - m_student, min=0)
+        if self.sharpen:
+            loss = loss + self.sharpen * torch.clamp(m_student - m_teacher, min=0)
+        return loss.mean() if self.reduction in ('batchmean', 'mean') else loss
+
+
 class ForwardKL(nn.Module):
     """Directional forward KL( teacher ‖ student ) = KL(FP16 ‖ candidate).
     eval_loss calls forward(p=candidate_logits, q=FP16_logits) -> teacher is q.

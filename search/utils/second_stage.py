@@ -898,3 +898,44 @@ class ArchFeatures:
                  self.k_lgs[Xr[:, self.nl]].mean(1),   self.v_lgs[Xr[:, self.nl + 1]].mean(1),
                  self.k_pr[Xr[:, self.nl + 2]].mean(1), self.v_pr[Xr[:, self.nl + 3]].mean(1)]
         return np.column_stack(cols + [self.comp.batch(X, ['wbits', 'eff_kvbits'])])
+
+
+class LevelSwitchMutation(Mutation):
+    """EvoPress-style LEVEL-SWITCH mutation (arXiv 2410.14649; findings 105-106): offspring stay
+    next to the parent. Per individual, `moves` switches: pick one genome ROW (one W linear type
+    across layers, or the K / V option row, or the K / V pruning row), lower one layer's quality
+    rank by one and raise another layer's by one -- same row, so the comp is (W exactly, KV
+    approximately) preserved. With prob p_drift also move one random gene one quality step (a
+    neighbouring comp). Ranks follow QUALITY, not the option index: KV options sorted by
+    (bits, -group size); pruning rows reversed (more pruning = lower quality)."""
+    def __init__(self, ss, xu, moves=2, p_drift=0.2):
+        super().__init__()
+        self.nb = ss.n_block; self.nr = ss.n_linear + 4; self.xu = np.asarray(xu, int)
+        self.moves, self.p_drift = int(moves), float(p_drift)
+        kq = sorted(range(len(ss.k_option)), key=lambda i: (ss.k_option[i][0], -ss.k_option[i][1]))
+        vq = sorted(range(len(ss.v_option)), key=lambda i: (ss.v_option[i][0], -ss.v_option[i][1]))
+        npk = len(ss.k_pruning_dim_option); npv = len(ss.v_pruning_dim_option)
+        self.rank2idx = []                          # per row: quality rank -> option index
+        for r in range(ss.n_linear):
+            self.rank2idx.append(list(range(int(self.xu[r * self.nb]) + 1)))
+        self.rank2idx += [kq, vq, list(range(npk - 1, -1, -1)), list(range(npv - 1, -1, -1))]
+        self.idx2rank = [{ix: rk for rk, ix in enumerate(m)} for m in self.rank2idx]
+
+    def _do(self, problem, X, **kw):
+        X = np.clip(np.round(X), 0, self.xu).astype(int).copy()
+        for i in range(len(X)):
+            g = X[i].reshape(self.nr, self.nb)
+            for _ in range(np.random.randint(1, self.moves + 1)):
+                r = np.random.randint(self.nr); m = self.rank2idx[r]; inv = self.idx2rank[r]
+                rk = np.array([inv.get(int(v), 0) for v in g[r]])
+                dn = np.where(rk > 0)[0]; up = np.where(rk < len(m) - 1)[0]
+                if len(dn) and len(up):
+                    a, b = np.random.choice(dn), np.random.choice(up)
+                    if a != b:
+                        g[r, a] = m[rk[a] - 1]; g[r, b] = m[rk[b] + 1]
+            if np.random.random() < self.p_drift:
+                r = np.random.randint(self.nr); c = np.random.randint(self.nb); m = self.rank2idx[r]
+                rk = self.idx2rank[r].get(int(g[r, c]), 0) + np.random.choice([-1, 1])
+                g[r, c] = m[int(np.clip(rk, 0, len(m) - 1))]
+            X[i] = g.ravel()
+        return X

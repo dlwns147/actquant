@@ -791,3 +791,68 @@ def get_loader(name, n_sample=128, train=True, seed=0, seqlen=2048, min_seqlen=0
             return get_gov_report(seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, split='test', min_seqlen=min_seqlen, cache_dir=cache_dir)
         if name.startswith('longbench:'):
             return get_longbench_ppl(name.split(':', 1)[1], seed=seed, n_sample=n_sample, batch_size=batch_size, seqlen=seqlen, tokenizer=tokenizer, min_seqlen=min_seqlen, cache_dir=cache_dir)
+
+
+# ── copy structure of a scored window (finding 38) ──────────────────────────
+# Which scored tokens are REPEATS of something earlier in the same sequence, and
+# how far back. Arch-independent (it only depends on the corpus + layout), so one
+# pass serves every arch's per-token dump; correlation.py writes it the first time
+# a group is built and tests/dump_group_tokens.py can produce it standalone.
+def copy_structure(loader, last_tokens, ignore_index=-100):
+    """-> dict of arrays over the loader's scored positions, in loader order:
+    doc, pos (index inside the scored window), token_id, is_copy (the token
+    occurred earlier in this sequence), dist (tokens back to that occurrence,
+    0 = first occurrence), in_answer (the previous occurrence is itself inside
+    the scored window)."""
+    import numpy as np
+    doc, pos, tok, cp, dist, inans = [], [], [], [], [], []
+    d = 0
+    for inputs, _attn, labels in loader:
+        for s in range(inputs.shape[0]):
+            ids = inputs[s].tolist()
+            lab = labels[s][1:].tolist()
+            n = len(lab)
+            start = max(0, n - last_tokens) if last_tokens else 0
+            scored = [j for j in range(start, n) if lab[j] != ignore_index]
+            first_scored = (scored[0] + 1) if scored else len(ids)
+            seen = {}
+            for p, t in enumerate(ids):
+                seen.setdefault(t, []).append(p)
+            for k, j in enumerate(scored):
+                p = j + 1                       # position of the predicted token
+                prev = [q for q in seen[ids[p]] if q < p]
+                doc.append(d); pos.append(k); tok.append(ids[p])
+                cp.append(1 if prev else 0)
+                dist.append(p - prev[-1] if prev else 0)
+                inans.append(1 if (prev and prev[-1] >= first_scored) else 0)
+            d += 1
+    return dict(doc=np.array(doc, np.int32), pos=np.array(pos, np.int32),
+                token_id=np.array(tok, np.int64), is_copy=np.array(cp, np.int8),
+                dist=np.array(dist, np.int32), in_answer=np.array(inans, np.int8))
+
+
+def token_ref_path(model_name, group, out_dir='save/token_ref'):
+    import os
+    return os.path.join(out_dir, f'{model_name}_{group}.npz')
+
+
+def write_token_ref(model_name, group, dataset, loader, last_tokens, out_dir='save/token_ref'):
+    """Write (once) the copy structure of one (group, dataset). Returns the path, or
+    None when it already exists. Atomic: temp file + rename, so concurrent jobs on the
+    same pool cannot produce a half-written file."""
+    import os
+    import numpy as np
+    path = token_ref_path(model_name, group, out_dir)
+    if os.path.exists(path):
+        return None
+    r = copy_structure(loader, last_tokens)
+    os.makedirs(out_dir, exist_ok=True)
+    # np.savez_compressed APPENDS .npz unless the name already ends in it, so the
+    # temp name must carry the suffix or the rename below looks for the wrong file.
+    tmp = f'{path}.{os.getpid()}.tmp.npz'
+    np.savez_compressed(tmp, **{f'{dataset}|{k}': v for k, v in r.items()})
+    os.replace(tmp, path)
+    print(f"[token_ref] {group}/{dataset}: {int(r['doc'].max()) + 1} sequences, "
+          f"{len(r['doc'])} scored positions, copy {r['is_copy'].mean() * 100:.1f}% "
+          f"-> {path}")
+    return path

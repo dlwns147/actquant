@@ -94,6 +94,12 @@ class LlamaEvaluator:
                  # each method's own default (AWQ pileval, GPTQ/QEFT c4).
                  w_calib=None,
                  w_act_order=None,
+                 # w_method 'awq_table': dir of a quant/awq_table.py table. The deployed AWQ
+                 # weights for any arch are rebuilt in ~1.6 s from it (findings 69-71).
+                 awq_table=None,
+                 # chosen-document subset of the loss-side loader (finding 74(d)); indices
+                 # into the n_sample documents, None = all.
+                 doc_ids=None,
                  **kwargs):
         
         # model_id = os.path.join(model_path, model_name)
@@ -147,7 +153,16 @@ class LlamaEvaluator:
             self.test_loaders = (precomputed_test_loaders
                                  if precomputed_test_loaders is not None else {})
         else:
-            self.train_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=loss_proto['n_sample'], batch_size=loss_proto['batch_size'], train=True, seed=seed, seqlen=loss_proto['seqlen'], min_seqlen=loss_proto['min_seqlen'], answer_tokens=_split)) for dataset in loss_proto['datasets']}
+            def _docs(loader):
+                if not doc_ids:
+                    return loader
+                from torch.utils.data import DataLoader, Subset
+                n = len(loader.dataset)
+                assert all(0 <= i < n for i in doc_ids), f'doc_ids {doc_ids} out of range for {n} docs'
+                print(f'[doc_ids] loss-side loader restricted to {len(doc_ids)} of {n} documents: {list(doc_ids)}')
+                return DataLoader(Subset(loader.dataset, list(doc_ids)), batch_size=loader.batch_size,
+                                  shuffle=False, drop_last=False)
+            self.train_loaders = {dataset: accelerator.prepare(_docs(get_loader(dataset, model=model_id, n_sample=loss_proto['n_sample'], batch_size=loss_proto['batch_size'], train=True, seed=seed, seqlen=loss_proto['seqlen'], min_seqlen=loss_proto['min_seqlen'], answer_tokens=_split))) for dataset in loss_proto['datasets']}
             self.test_loaders = {dataset: accelerator.prepare(get_loader(dataset, model=model_id, n_sample=ppl_proto['n_sample'], batch_size=ppl_proto['batch_size'], train=False, seed=seed, seqlen=ppl_proto['seqlen'], min_seqlen=ppl_proto['min_seqlen'])) for dataset in ppl_proto['datasets']}
             if loss_proto != ppl_proto:
                 accelerator.print(
@@ -195,7 +210,7 @@ class LlamaEvaluator:
         # Only spin up the FP teacher for work that is NOT already injected:
         # outlier fp16-channels (always needs it), key tokens, dense_logits.
         need_keytok = use_key_token and precomputed_key_token_list is None
-        need_dense = (loss_func in ['jsd', 'kld', 'topk', 'forward_kl']) and precomputed_dense_logits is None
+        need_dense = (loss_func in ['jsd', 'kld', 'topk', 'forward_kl', 'margin', 'smargin']) and precomputed_dense_logits is None
         if need_dense or need_keytok or outlier is not None:
             # model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', device_map=device_map, low_cpu_mem_usage=True)
             model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
@@ -328,7 +343,7 @@ class LlamaEvaluator:
                                                     compute_dtype=_compute_dtype)
                                      for p in quant_model_paths]
         
-        elif 'fp16' in method['w']:
+        elif 'fp16' in method['w'] or 'awq_table' in method['w']:
             # self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype='auto', low_cpu_mem_usage=True, device_map=device_map, cache_dir=cache_dir)
             self.model = get_hfmodel(model_id, dtype=dtype, device_map=device_map)
             
@@ -349,6 +364,16 @@ class LlamaEvaluator:
                 
         elif not any(m in method['w'] for m in ('awq', 'gptq', 'qeft', 'awq_qeft')):
             raise NotImplementedError(method['w'])
+
+        self.awq_tm = None
+        if 'awq_table' in method['w']:
+            # FP16 model above (+ KV cache swap) is the master; every sample() restores it
+            # and applies the looked-up AWQ scales/clips with the unchanged apply_awq.
+            assert awq_table, "w_method 'awq_table' needs awq_table=<table dir>"
+            from quant.awq_table import AWQTableModel
+            self.awq_tm = AWQTableModel(self.model, awq_table,
+                                        {'zero_point': True, 'q_group_size': group_size['w']},
+                                        clip_asym=True)
 
         # if 'layer_prune' in method and self.model is not None:
         #     self.model = block_replace(self.model)
@@ -437,6 +462,9 @@ class LlamaEvaluator:
                             insert_fp16_channel_hqq(ln, od[n_out] if isinstance(od, dict) else od)
                         else:
                             remove_fp16_channel_hqq(ln)
+
+        elif self.awq_tm is not None:
+            self.awq_tm.build(q_arch['w'])
 
         elif any(m in self.method['w'] for m in ('awq', 'gptq', 'qeft', 'awq_qeft')):
             # awq_qeft must be matched before the bare 'awq'/'qeft' branches
@@ -551,7 +579,7 @@ class LlamaEvaluator:
         last_tokens = self.last_tokens if last_tokens is _INHERIT else last_tokens
         score = self.score if score is _INHERIT else score
         _check_score(score)
-        needs_dense = self.loss_func in ['jsd', 'kld', 'topk', 'forward_kl']
+        needs_dense = self.loss_func in ['jsd', 'kld', 'topk', 'forward_kl', 'margin', 'smargin']
         # dense_logits were pre-masked to the evaluator's SCORING window by
         # get_logits(); eval_loss compares them element-wise against the
         # student's masked logits, so a different window silently misaligns.

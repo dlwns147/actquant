@@ -52,6 +52,8 @@ class Search:
         self.method = {'w': kwargs.pop('w_method', ['fp16']), 'kv': kwargs.pop('kv_method', 'kivi')}
         self.dtype = process_dtype(kwargs.pop('dtype', 'auto'))
         self.quant_model_paths = kwargs.pop('quant_model_paths', [])
+        self.awq_table = kwargs.pop('awq_table', None)   # --w_method awq_table (findings 69-71)
+        self.doc_ids = kwargs.pop('doc_ids', None) or None   # chosen documents (finding 74(d))
 
         model_path = kwargs.pop('model_path', 'meta-llama')
         model_name = kwargs.pop('model_name', 'Llama-2-7b-hf')
@@ -191,6 +193,8 @@ class Search:
             alpha=self.alpha,
             beta=self.beta,
             key_token_path=self.key_token_path,
+            awq_table=self.awq_table,
+            doc_ids=self.doc_ids,
         )
         self.search_space = LlamaSearchSpace(
             bits=self.bits,
@@ -217,6 +221,20 @@ class Search:
         self.mut_prob = kwargs.pop('mut_prob', 0.1)
         self.crossover_prob = kwargs.pop('crossover_prob', 0.9)
         self.save_iter = kwargs.pop('save_iter', 1)
+        # early stop (single comp_obj only): stop when the archive front, sampled on a fixed
+        # comp grid, improved by less than `early_stop_tol` (mean relative loss drop) over the
+        # last `early_stop_window` iterations. 0 = off. Measured on the Llama W axis
+        # (tests/bench_selection_regret.py finding 88): 0.02/20 stops at iter ~100 of 200 with
+        # the front within ~1 % of iter 150, well under the ~8 % held-out document noise.
+        self.early_stop_tol = kwargs.pop('early_stop_tol', 0.0)
+        # coverage reservation (single comp_obj): a Pareto front on a FLAT objective keeps only the
+        # lowest-comp member of the flat range (a higher-comp arch with no lower loss is dominated),
+        # so the candidates never go there -- the stage-1 truncation of findings 83-92. Reserve
+        # cov_frac of every round for the cov_bins comp bins with the fewest archive members, each
+        # filled by a comp-CONSTRAINED surrogate search (best predicted arch inside the bin).
+        self.cov_frac = kwargs.pop('cov_frac', 0.0)
+        self.cov_bins = kwargs.pop('cov_bins', 10)
+        self.early_stop_window = kwargs.pop('early_stop_window', 20)
         accelerator.wait_for_everyone()
         
     def search(self, accelerator):
@@ -321,7 +339,7 @@ class Search:
                     if self.debug:
                         import matplotlib.pyplot as plt
                         n_obj = len(self.comp_obj)
-                        comp_np = np.array(complexity)
+                        comp_np = np.array(complexity).reshape(-1, n_obj)   # (0, n_obj) on an empty round
                         fig, axes = plt.subplots(nrows=1, ncols=n_obj, figsize=(5 * n_obj, 5))
                         if not isinstance(axes, np.ndarray):
                             axes = [axes]
@@ -354,7 +372,16 @@ class Search:
                         axes[0].set_ylabel('f1')
                         fig.tight_layout() 
                         plt.savefig(os.path.join(self.save_path, 'iter_{}.png'.format(it)))
+            stop = [False]
+            if accelerator.is_main_process and self.early_stop_tol > 0 and len(self.comp_obj) == 1 \
+                    and it % self.save_iter == 0:
+                stop[0] = self._early_stop(archive, it, accelerator)
+            if self.early_stop_tol > 0:
+                from accelerate.utils import broadcast_object_list
+                broadcast_object_list(stop)
             accelerator.wait_for_everyone()
+            if stop[0]:
+                break
 
         if accelerator.is_main_process:
             total_time_elapsed = time() - total_start
@@ -491,6 +518,9 @@ class Search:
         self.accelerator.print(f'not_duplicate : {sum(not_duplicate)}')
 
         pop = res_pop[not_duplicate]
+        n_cov = int(round(self.cov_frac * K)) if (self.cov_frac > 0 and len(self.comp_obj) == 1) else 0
+        cov_X = self._coverage_candidates(archive, predictor, n_cov) if n_cov else []
+        K = K - len(cov_X)
         if sum(not_duplicate) >= K:
             # Anchor the subset-spacing score to the achievable comp_obj endpoints
             # so edge (esp. right-end) candidates are kept rather than pruned away
@@ -499,12 +529,49 @@ class Search:
             indices = self._subset_selection(pop, F[front, 1:], K, self.subset_pop_size, endpoints)
             pop = pop[indices]
 
+        # 2026-09-24: every NSGA2 offspring can already be in the archive (seen on the AWQ-table
+        # KV axis at iter ~90: not_duplicate 0 -> np.delete on an empty array crashed the run).
+        # Return an empty round instead; the loop evaluates nothing and moves on.
+        if len(pop) == 0:
+            return [], np.zeros((0, 1))
+
+        X = pop.get("X")
+        if len(cov_X):
+            X = np.vstack([X, np.asarray(cov_X)]) if len(X) else np.asarray(cov_X)
         candidates = []
-        for x in pop.get("X"):
+        for x in X:
             candidates.append(self.search_space.decode(x))
 
         # decode integer bit-string to config and also return predicted top1_err
-        return candidates, predictor.predict(self.search_space.decode_encode_predictor(pop.get("X")))
+        return candidates, predictor.predict(self.search_space.decode_encode_predictor(X))
+
+    def _coverage_candidates(self, archive, predictor, n):
+        """n candidates, one per least-sampled comp bin, each the best-PREDICTED arch found by a
+        short NSGA2 constrained to that bin (seeded with the archive members nearest to it)."""
+        c = np.array([x[2] for x in archive])
+        edges = np.linspace(c.min(), c.max(), self.cov_bins + 1)
+        cnt = np.histogram(c, bins=edges)[0]
+        seen = {tuple(x) for x in self._encode_archive(archive, self.search_space.encode, '_enc_cache').tolist()}
+        enc = self._encode_archive(archive, self.search_space.encode, '_enc_cache')
+        out = []
+        for b in np.argsort(cnt, kind='stable')[:n]:
+            lo, hi = edges[b], edges[b + 1]
+            near = np.argsort(np.abs(c - 0.5 * (lo + hi)))[:max(20, self.ga_pop_size // 4)]
+            prob = AuxiliarySingleLevelProblemThink(self.search_space, predictor, self.config, self.comp_obj, [hi], [lo],
+                                                    self.group_size, self.n_token, self.attn_sink)
+            meth = NSGA2(pop_size=max(40, self.ga_pop_size // 4), sampling=enc[near],
+                         crossover=BinomialCrossover(prob=self.crossover_prob, n_offsprings=1),
+                         mutation=IntMutation(prob=self.mut_prob), eliminate_duplicates=True)
+            r = minimize(prob, meth, termination=('n_gen', 10), verbose=False)
+            P = r.pop; Fv = P.get('F'); Gv = P.get('G')
+            ok = np.all(Gv <= 0, axis=1) if Gv is not None else np.ones(len(P), bool)
+            for i in np.argsort(Fv[:, 0]):
+                x = P[i].get('X')
+                if ok[i] and tuple(x.tolist()) not in seen:
+                    out.append(x); seen.add(tuple(x.tolist())); break
+        self.accelerator.print(f'[coverage] {len(out)}/{n} candidates for the least-sampled comp bins '
+                               f'(counts {cnt.tolist()})')
+        return out
 
     def _subset_endpoints(self):
         """Both edges per comp_obj as a (2, n_comp_obj) array [lo_row, hi_row].
@@ -624,6 +691,27 @@ class Search:
         new_pop = Population.new(X=np.array(new_rows))
         Evaluator().eval(problem, new_pop)
         return Population.merge(pop, new_pop)
+
+    def _early_stop(self, archive, it, accelerator):
+        """True when the front's mean relative improvement over the last early_stop_window
+        iterations is below early_stop_tol. Grid = 20 points over the archive's comp range
+        (2nd percentile .. max), fixed at first use so every iteration is compared alike."""
+        w = np.array([x[2] for x in archive]); y = np.array([x[1] for x in archive])
+        if not hasattr(self, '_es_grid'):
+            self._es_grid, self._es_hist = np.linspace(np.percentile(w, 2), w.max(), 20), {}
+        self._es_hist[it] = np.array([y[w <= g].min() if (w <= g).any() else np.nan for g in self._es_grid])
+        past = [k for k in self._es_hist if k <= it - self.early_stop_window]
+        if not past:
+            return False
+        a, b = self._es_hist[max(past)], self._es_hist[it]
+        ok = np.isfinite(a) & np.isfinite(b) & (a > 0)
+        gain = float(np.mean((a[ok] - b[ok]) / a[ok])) if ok.any() else 0.0
+        accelerator.print(f'[early_stop] iter {it}: front gain over {it - max(past)} iters = {gain * 100:.2f}% '
+                          f'(tol {self.early_stop_tol * 100:.1f}%)')
+        if gain < self.early_stop_tol:
+            accelerator.print(f'[early_stop] STOP at iter {it} (iter_{it}.stats is the final archive)')
+            return True
+        return False
 
     def _front_coverage(self, archive):
         """Per-comp_obj fraction of the achievable objective range spanned by
@@ -758,8 +846,12 @@ class SubsetProblem(Problem):
         out["F"] = f
         out["G"] = g
 
+from model.kv_rotation import add_args as _kvrot_args, setup_from_args as _kvrot_setup
+
+
 def main(args):
     set_seed(args.seed)
+    _kvrot_setup(args)
 
     with open(args.config, 'r') as f:
         config = json.load(f)[args.model_name]
@@ -804,8 +896,13 @@ if __name__ == '__main__':
     parser.add_argument('--quant_model_paths', type=str, nargs='+', default=[],
                         help='')
     
-    parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'],
+    parser.add_argument('--w_method', type=str, nargs='+', default=[], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq', 'awq_table'],
                         help='')
+    parser.add_argument('--doc_ids', type=int, nargs='*', default=[],
+                        help='keep only these of the n_sample calibration documents (finding 74(d))')
+    parser.add_argument('--awq_table', type=str, default=None,
+                        help='table dir for --w_method awq_table (quant/awq_table.py): score with the '
+                             'DEPLOYED AWQ weights at HQQ cost (findings 69-71)')
     parser.add_argument('--kv_method', type=str, nargs='+', default=['kivi'], choices=['fp16', 'hqq', 'kivi', 'think'],
                         help='')
     
@@ -918,6 +1015,12 @@ if __name__ == '__main__':
     parser.add_argument('--only_outlier_bits', action='store_true', help='')
     parser.add_argument('--sensitivity_result_path', type=str, default='',
                         help='')
+    parser.add_argument('--cov_frac', type=float, default=0.0,
+                        help='fraction of each round reserved for the least-sampled comp bins (single comp_obj); 0 = off')
+    parser.add_argument('--cov_bins', type=int, default=10)
+    parser.add_argument('--early_stop_tol', type=float, default=0.0,
+                        help='stop when the front improved < tol (mean relative) over --early_stop_window iters; 0 = off')
+    parser.add_argument('--early_stop_window', type=int, default=20)
     parser.add_argument('--save_iter', type=int, default=1, 
                         help='')
     parser.add_argument('--sensitivity_threshold', type=int, default=2,
@@ -951,5 +1054,6 @@ if __name__ == '__main__':
     
     parser.add_argument('--packing', action='store_true', help='Only use key tokens for loss calculation (Long PPL/JSD)')
     
+    _kvrot_args(parser)
     cfgs = parser.parse_args()
     main(cfgs)

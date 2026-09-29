@@ -45,5 +45,9 @@ metric_tag_from_knobs() {
     [ -n "$4" ] && tag="${tag}_n$4"
     [ -n "$5" ] && tag="${tag}q$5"
     [ -n "$6" ] && [ "$6" != "0" ] && tag="${tag}m$6"
+    # 2026-09-24: a chosen-document subset (DOC_IDS, set by metric_task.sh) is part of the
+    # measurement, so it is part of the tag: _d12-2-29-27. Read from the caller's shell so
+    # every existing call site (search / second_search* / iter stage1_expr) picks it up.
+    [ -n "${DOC_IDS:-}" ] && tag="${tag}_d$(echo ${DOC_IDS} | tr ' ' '-')"
     echo "${tag}"
 }

@@ -33,7 +33,7 @@ from utils.select import subset_select
 from utils.second_stage import (
     encoding_xu, nw_split, load_block_pools, load_band_blocks, subset_select_moo, pareto_first_front,
     gene_weights, freeze_mask, block_segments, derive_options, derive_qeft,
-    FrontierProductSampling, AxisBlockCrossover, KnowledgeMutation, JointAuxProblem, JointComp,
+    FrontierProductSampling, AxisBlockCrossover, KnowledgeMutation, LevelSwitchMutation, JointAuxProblem, JointComp,
     ArchFeatures, BandTable, grid_side, stair_seed, calc_hv, front_coverage, save_viz)
 
 
@@ -163,6 +163,7 @@ class SecondSearch:
         # Main process then builds NO local evaluator (workers own model + teacher logits).
         self.pool = None
         if getattr(args, 'eval_workers', 0) > 0:
+            assert not getattr(args, 'doc_ids', None), '--doc_ids is not passed to the AWQ eval pool (use awq_table)'
             assert self.accelerator.num_processes == 1, \
                 '--eval_workers requires num_processes=1 (pool owns the GPUs)'
             from utils.awq_pool import AWQEvalPool
@@ -219,7 +220,9 @@ class SecondSearch:
             residual_length=args.residual_length, attn_sink=args.attn_sink,
             k_quant_scheme=args.k_quant_scheme, v_quant_scheme=args.v_quant_scheme,
             loss_func=args.loss_func, last_tokens=args.last_tokens,
-            score=getattr(args, 'score', 'last'))
+            score=getattr(args, 'score', 'last'),
+            awq_table=getattr(args, 'awq_table', None),
+            doc_ids=getattr(args, 'doc_ids', None) or None)
 
     # ───────────────── evaluation (real JSD via LlamaEvaluator.eval) ─────────────────
     def _evaluate(self, archs):
@@ -598,7 +601,9 @@ class SecondSearch:
         problem = JointAuxProblem(self.ss, predictor, self.active, self.xu, self.comp_obj,
                                   self.comp_obj_min, self.comp_obj_max, self.n_token, self.attn_sink,
                                   comp=self._comp)
-        mut = KnowledgeMutation(self.w, self.xu, self.Wg, self.KVg, self.nw, self.segments,
+        mut = LevelSwitchMutation(self.ss, self.xu, moves=self.args.ls_moves, p_drift=self.args.ls_drift) \
+            if getattr(self.args, 'mutation', 'knowledge') == 'levelswitch' else \
+            KnowledgeMutation(self.w, self.xu, self.Wg, self.KVg, self.nw, self.segments,
                                 p_val=self.args.mut_p_val, p_mod=self.args.mut_p_mod,
                                 band_table=self.band_table, comp=self._comp, comp_obj=self.comp_obj,
                                 l0_repair=self.args.l0_repair,
@@ -1010,8 +1015,12 @@ class SecondSearch:
         self.accelerator.print(f"[results] {os.path.join(self.save_path, self.result_file)}")
 
 
+from model.kv_rotation import add_args as _kvrot_args, setup_from_args as _kvrot_setup
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="2nd-stage joint W×eff_kvbits NAS (HQQ, NSGA-III, LlamaSearchSpace)")
+    _kvrot_args(p)
     p.add_argument('--config', default='config/llama.json'); p.add_argument('--model_name', default='Llama-3.1-8B-Instruct')
     p.add_argument('--w_expr', required=True, help='1st-stage W-axis archive dir or iter_N.stats')
     p.add_argument('--eff_kv_expr', required=True, help='1st-stage eff_kvbits archive dir or iter_N.stats')
@@ -1139,6 +1148,10 @@ def build_parser():
     # freshness are AUTO (BandTable change-point edges / stair_seed seen-retry).
     p.add_argument('--mut_p_val', type=float, default=0.5, help='prob a mutated cell takes a 1st-stage value (else ±1)')
     p.add_argument('--mut_p_mod', type=float, default=0.15, help='prob/indiv of a 1st-stage module-transplant')
+    # 2026-09-27 (findings 105-106): mutation-only ablation of the NSGA stage 2
+    p.add_argument('--mutation', default='knowledge', choices=['knowledge', 'levelswitch'])
+    p.add_argument('--ls_moves', type=int, default=2, help='levelswitch: max switches per individual')
+    p.add_argument('--ls_drift', type=float, default=0.2, help='levelswitch: prob of a one-step drift')
     # search-space options are AUTO-DERIVED from the 1st-stage archives (derive_options).
     # --w_bits is kept as a consistency CHECK against the HQQ bank list (not a control);
     # the W group size is the only free space knob here.
@@ -1168,6 +1181,11 @@ def build_parser():
     # hqq-mode model/quant args (mirror search.py / evaluator.py)
     p.add_argument('--gpu_id', default='0'); p.add_argument('--model_path', default='/SSD/huggingface/meta-llama')
     p.add_argument('--dtype', default='bfloat16'); p.add_argument('--w_method', nargs='+', default=['hqq'])
+    p.add_argument('--doc_ids', type=int, nargs='*', default=[],
+                   help='keep only these of the n_sample calibration documents (finding 74(d))')
+    p.add_argument('--awq_table', default=None,
+                   help="table dir for --w_method awq_table (quant/awq_table.py): score archs "
+                        "with the DEPLOYED AWQ weights at HQQ cost (findings 69-71)")
     p.add_argument('--kv_method', nargs='+', default=['kivi', 'think']); p.add_argument('--quant_model_paths', nargs='+', default=[])
     p.add_argument('--outlier_path', default='', help='QEFT-on-HQQ: extract_outidx.py multi-rank outlier dict {key:{n_out:[idx]}}; required when the W archive used n_outlier>0 (auto-detected from the archive)')
     p.add_argument('--residual_length', type=int, default=128); p.add_argument('--k_quant_scheme', default='channel')
@@ -1186,6 +1204,7 @@ def build_parser():
 
 def main(args):
     set_seed(args.seed)
+    _kvrot_setup(args)
     config = json.load(open(args.config))[args.model_name]
     SecondSearch(config, args).search()
 

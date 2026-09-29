@@ -260,6 +260,9 @@ class BaselineJointSearch(Search):
         print(f"[results] {os.path.join(self.save_path, self.result_file)}")
 
 
+from model.kv_rotation import add_args as _kvrot_args, setup_from_args as _kvrot_setup
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         description="Single-stage joint (loss × wbits × eff_kvbits) NSGA-III NAS baseline")
@@ -325,7 +328,11 @@ def build_parser():
     p.add_argument('--model_name', type=str, default='Llama-3.1-8B-Instruct')
     p.add_argument('--dtype', type=str, default='bfloat16',
                    choices=['float16', 'float', 'fp16', 'bfloat16', 'bfloat', 'bf16', 'auto'])
-    p.add_argument('--w_method', type=str, nargs='+', default=['hqq'], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'])
+    p.add_argument('--w_method', type=str, nargs='+', default=['hqq'], choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq', 'awq_table'])
+    # 2026-09-26: the NSGA3 baseline scored with the SAME quantizer/documents as the two-stage
+    # pipeline (user: baselines = AWQ table + KV rotation). Consumed by search.Search.__init__.
+    p.add_argument('--awq_table', type=str, default=None, help='table dir for --w_method awq_table')
+    p.add_argument('--doc_ids', type=int, nargs='*', default=[], help='restrict the loss documents')
     p.add_argument('--kv_method', type=str, nargs='+', default=['kivi', 'think'], choices=['fp16', 'hqq', 'kivi', 'think'])
     p.add_argument('--quant_model_paths', type=str, nargs='+', default=[], help='HQQ dirs, one per --w_bits')
     p.add_argument('--w_bits', type=int, nargs='+', default=[2, 3, 4])
@@ -376,6 +383,7 @@ def build_parser():
     p.add_argument('--verbosity', type=str, default='FATAL')
     p.add_argument('--sensitivity_result_path', type=str, default='')
     p.add_argument('--sensitivity_threshold', type=int, default=2)
+    _kvrot_args(p)
     return p
 
 
@@ -392,6 +400,7 @@ def main(args):
         "one --quant_model_paths entry is required per --w_bits value"
 
     set_seed(args.seed)
+    _kvrot_setup(args)
     with open(args.config, 'r') as f:
         config = json.load(f)[args.model_name]
     accelerator, device_map = init_accelerator(args.gpu_id, config)

@@ -44,6 +44,8 @@ def _worker_main(gpu_id, wid, task_q, result_q, cfg, recycle_after):
         _f = open(os.path.join(log_dir, f'worker{wid}_gpu{gpu_id}.log'), 'a', buffering=1)
         os.dup2(_f.fileno(), 1); os.dup2(_f.fileno(), 2)
     import json
+    from model.kv_rotation import enable_from_env
+    enable_from_env()      # spawn loses the parent's fake_quant re-binding
     from evaluator import LlamaEvaluator
     from utils.func import init_accelerator, set_seed, process_dtype, clean_up
     set_seed(cfg['seed'])

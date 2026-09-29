@@ -30,6 +30,20 @@
 metric_task_apply() {
     local name=$1 model=$2 ktbase=${3:-key_token} extra=${4:-}
     [ -z "${name}" ] && return 0
+    # METRIC_TASK=auto:<correlation pool dir> — the per-model objective chosen BEFORE
+    # search by `python -m utils.bench_calib --recommend <pool>` from that model's own
+    # labelled campaign (front + band regret, held-out). Resolved here, once, into a
+    # plain registry name, so everything below — knobs, SAVE-dir tags, the stamp — sees
+    # the real metric and never the string "auto". Fails loudly if the recommendation
+    # is missing, belongs to another model, or its registry definition has changed.
+    if [[ "${name}" == auto:* ]]; then
+        local pool=${name#auto:} resolved
+        resolved=$(python -m utils.bench_calib --resolve "${pool}" --model_name "${model}") || exit 1
+        echo "[metric_task] ${name} -> ${resolved}"
+        METRIC_TASK_SOURCE="${name}"
+        METRIC_TASK="${resolved}"
+        name="${resolved}"
+    fi
     local knobs
     knobs=$(python -m utils.metric_specs --shell "${name}" --model_name "${model}" \
                    --key_token_path "${ktbase}" ${extra}) || exit 1
@@ -66,6 +80,6 @@ metric_task_stamp() {
     local save=$1
     [ -z "${METRIC_TASK}" ] && return 0
     mkdir -p "${save}"
-    printf '{"metric_task": "%s", "spec": "%s", "resolved_by": "scripts/metric_task.sh"}\n' \
-        "${METRIC_TASK}" "${METRIC_SPEC}" > "${save}/metric_task.json"
+    printf '{"metric_task": "%s", "spec": "%s", "source": "%s", "resolved_by": "scripts/metric_task.sh"}\n' \
+        "${METRIC_TASK}" "${METRIC_SPEC}" "${METRIC_TASK_SOURCE:-explicit}" > "${save}/metric_task.json"
 }

@@ -115,7 +115,20 @@ resolves the name into that script's own knobs
 (`DATASET/USE_CHAT_TEMPLATE/N_SAMPLE/SEQLEN/MIN_SEQLEN/METRIC/LOSS_FUNC/STRIDE/
 PREFILL_PROMPT/LAST_TOKENS/SCORE/USE_KEY_TOKEN` + the key-token protocol, whose
 `kt_eval-<evaluator>_tgt-<model>` archive root is DERIVED from the name and
-verified before any GPU work) via `python -m utils.metric_specs --shell <name>`.
+verified before any GPU work) via `python -m utils.metric_specs --shell <name>`. **`METRIC_TASK=auto:<correlation pool>`** picks the
+objective per model before search: run `python -m utils.bench_calib --recommend
+save/correlation/<pool> [--chat_only]` once after that model's correlation_eval (it
+scores every search-legal name by held-out front + band RULER regret and writes
+`save/metric_recommend/<pool>.json` — not inside the pool, which Docker leaves
+root-owned), then `metric_task.sh` resolves `auto:` to the plain name, refusing a
+recommendation made for another model or for a since-edited registry definition.
+The stamp records `"source": "auto:<pool>"`. See tests/bench_selection_regret.py
+findings 26-29. **`kind='token_stats'` tasks** (`*_tok_*`, correlation.py only)
+measure their JSD twin and also write per-token diagnostics
+(`utils/eval.TOKEN_STAT_FIELDS`: jsd, KL, student/teacher CE, teacher margin +
+entropy, student margin on the teacher's top-2, flip, top-5 TV) to
+`<measure dir>/token_stats/<name>/<idx>.npz`, so metric variants are scored
+offline without another GPU pass (finding 37).
 **The resolution is shell-only by design: `search.py` / `second_search*.py` take
 raw knobs and know nothing about metric names.** One lookup then feeds BOTH the
 arg list and the SAVE-dir tags, so the measurement and the directory name cannot

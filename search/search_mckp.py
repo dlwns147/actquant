@@ -234,6 +234,8 @@ def assemble_product(envs, mods_per_axis, ref_arch, base):
 
 def main():
     args = build_parser().parse_args()
+    from model.kv_rotation import setup_from_args
+    setup_from_args(args)
     # capture before Search (it pops keys out of the kwargs dict we pass)
     save_dir, front_points, dp_res = args.save, args.mckp_front_points, args.dp_res
     set_seed(args.seed)
@@ -287,8 +289,22 @@ def main():
     accelerator.print(f"[search_mckp] measuring {1 + len(index)} archs "
                       f"(1 ref + {len(index)} marginals)…")
     t0 = _t()
-    metrics, _ = engine._evaluate(archs=[ref_arch] + [a for *_, a in index],
-                                  accelerator=accelerator)
+    if args.marginals_from:
+        # 2026-09-26: reuse the marginals an earlier run already MEASURED (same model / protocol /
+        # module list, asserted below) -- e.g. predict-mode run -> measured-front run, no re-eval.
+        src = json.load(open(args.marginals_from))
+        flat = [x for ax in src['marginals'] for mod in ax['modules'] for x in mod['d']]
+        assert [ax['axis'] for ax in src['marginals']] == list(axes), 'axis mismatch'
+        assert len(flat) == len(index), f'marginal count {len(flat)} != {len(index)}'
+        for ax_src, mods in zip(src['marginals'], mods_per_axis):
+            for ms, mod in zip(ax_src['modules'], mods):
+                assert json.dumps([ms['loc'], ms['options']]) == json.dumps([mod['loc'], mod['options']]), 'module mismatch'
+        base = float(src['base_jsd'])
+        metrics = [base] + [base + x for x in flat]
+        accelerator.print(f"[search_mckp] reused {len(flat)} marginals from {args.marginals_from}")
+    else:
+        metrics, _ = engine._evaluate(archs=[ref_arch] + [a for *_, a in index],
+                                      accelerator=accelerator)
     accelerator.print(f"[search_mckp] marginal measurement done ({_t()-t0:.1f}s)")
     base = metrics[0]
     for (ai, m, j, _a), mval in zip(index, metrics[1:]):
@@ -390,6 +406,8 @@ def main():
 def build_parser():
     # mirrors search.py's parser (subset needed by Search) + MCKP knobs
     p = argparse.ArgumentParser()
+    from model.kv_rotation import add_args
+    add_args(p)
     p.add_argument('--save', type=str, default='save/mckp')
     p.add_argument('--gpu_id', type=str, default='0')
     p.add_argument('--model_path', type=str, default='')
@@ -397,6 +415,11 @@ def build_parser():
     p.add_argument('--dtype', type=str, default='auto')
     p.add_argument('--quant_model_paths', type=str, nargs='+', default=[])
     p.add_argument('--w_method', type=str, nargs='+', default=[])
+    # 2026-09-26: MCKP baseline scored with the pipeline's quantizer (exact AWQ table); consumed by Search
+    p.add_argument('--awq_table', type=str, default=None, help='table dir for --w_method awq_table')
+    p.add_argument('--marginals_from', type=str, default='',
+                   help='iter_mckp.stats of an earlier run: reuse its measured marginals')
+    p.add_argument('--doc_ids', type=int, nargs='*', default=[], help='restrict the loss documents')
     p.add_argument('--kv_method', type=str, nargs='+', default=['kivi'])
     p.add_argument('--w_bits', type=int, nargs='+', default=[])
     p.add_argument('--k_bits', type=int, nargs='+', default=[2, 4])

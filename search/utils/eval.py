@@ -7,7 +7,7 @@ import gc
 import torch
 import torch.nn as nn
 from .data import *
-from .loss import JSD, TopK, ForwardKL
+from .loss import JSD, TopK, ForwardKL, MarginLoss
 from .func import clean_up
 
 
@@ -316,8 +316,53 @@ def get_logits(model, loader, key_token_list=None, last_tokens=None, ignore_inde
     return dense_logits_list
 
 
+TOKEN_STAT_FIELDS = ('jsd', 'kl_pq', 'ce_q', 'ce_p', 'p_top1', 'p_margin', 'p_entropy',
+                     'q_margin_on_p', 'flip', 'tv_top5')
+
+
 @torch.no_grad()
-def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, ignore_index=-100, prefill_prompt=False, score=SCORE_LAST):
+def token_stats_seq(q_logits, p_logits, labels, eps=1e-7):
+    """Per-token diagnostics of student q vs FP teacher p on the scored positions
+    (rows already masked, [T, vocab]). `jsd` is the exact per-row term of JSD()
+    (its batchmean is the mean of this column); the rest are cheap views of the
+    same pair so metric VARIANTS can be computed offline without another forward:
+      kl_pq          KL(teacher || student)
+      ce_q / ce_p    NLL of the reference token under student / teacher
+      p_top1         teacher top-1 probability
+      p_margin       teacher log-prob gap top1 - top2 (small = a fork)
+      p_entropy      teacher entropy (nats)
+      q_margin_on_p  student log-prob gap between the TEACHER's top1 and top2
+      flip           1 if the student's argmax differs from the teacher's
+      tv_top5        sum |p - q| over the teacher's top-5 tokens
+    Returns a float32 CPU array [T, len(TOKEN_STAT_FIELDS)]."""
+    # jsd: JSD.forward's exact ops in the logits' own dtypes (the teacher is often
+    # fp16), with the vocab sum kept per row instead of batch-averaged
+    _m = (0.5 * (q_logits.softmax(-1) + p_logits.softmax(-1))).clamp_min(eps).log()
+    jsd = 0.5 * (nn.functional.kl_div(_m, q_logits.log_softmax(-1), reduction='none', log_target=True).sum(-1)
+                 + nn.functional.kl_div(_m, p_logits.log_softmax(-1), reduction='none', log_target=True).sum(-1))
+    jsd = jsd.float()
+    del _m
+    lq = q_logits.float().log_softmax(-1)
+    lp = p_logits.float().log_softmax(-1)
+    pq, pp = lq.exp(), lp.exp()
+    kl_pq = (pp * (lp - lq)).sum(-1)
+    lab = labels.long().unsqueeze(-1)
+    ce_q = -lq.gather(-1, lab).squeeze(-1)
+    ce_p = -lp.gather(-1, lab).squeeze(-1)
+    top5_v, top5_i = lp.topk(5, dim=-1)
+    p_margin = top5_v[:, 0] - top5_v[:, 1]
+    p_entropy = -(pp * lp).sum(-1)
+    q_margin_on_p = lq.gather(-1, top5_i[:, :1]).squeeze(-1) - lq.gather(-1, top5_i[:, 1:2]).squeeze(-1)
+    flip = (lq.argmax(-1) != top5_i[:, 0]).float()
+    tv_top5 = (pp.gather(-1, top5_i) - pq.gather(-1, top5_i)).abs().sum(-1)
+    out = torch.stack([jsd, kl_pq, ce_q, ce_p, top5_v[:, 0].exp(), p_margin, p_entropy,
+                       q_margin_on_p, flip, tv_top5], dim=-1)
+    del lq, lp, pq, pp
+    return out.cpu().numpy()
+
+
+@torch.no_grad()
+def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, ignore_index=-100, prefill_prompt=False, score=SCORE_LAST, token_stats=None):
     """
     Evaluate loss on a model using a data loader.
 
@@ -341,13 +386,18 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
                 of `last_tokens` if `stride <= 0`). This matches real-decode KV
                 cache evolution far more closely than chunking the whole sequence.
         ignore_index: Index to ignore in loss calculation
+        token_stats: Optional list. With loss_func='jsd', one
+                `token_stats_seq` array per scored sequence is appended (in loader
+                order) — a diagnostic side output; the returned loss is unchanged.
 
     Returns:
         Average loss value
     """
     _check_score(score)
-    if loss_func == 'jsd':
-        assert dense_logits_list is not None, "dense_logits_list must be provided for jsd"
+    if loss_func in ('jsd', 'margin', 'smargin'):
+        assert dense_logits_list is not None, f"dense_logits_list must be provided for {loss_func}"
+    if token_stats is not None and loss_func != 'jsd':
+        raise ValueError(f"token_stats needs loss_func='jsd' (teacher logits), got {loss_func!r}")
     if key_token_list is not None:
         assert len(loader) == len(key_token_list)
 
@@ -469,6 +519,17 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
                 # Compute JSD on selected tokens
                 loss_fct = JSD()
                 loss = loss_fct(seq_shift_logits[mask], dense_logits_seq)
+                if token_stats is not None:
+                    token_stats.append(token_stats_seq(seq_shift_logits[mask], dense_logits_seq,
+                                                       seq_shift_labels[mask]))
+
+            elif loss_func in ('margin', 'smargin'):
+                # teacher-margin erosion (utils/loss.MarginLoss); same dense-logits path.
+                # smargin also charges gap WIDENING (finding 89)
+                dense_logits_seq = _dense_seq(dense_logits_list, batch_idx,
+                                              seq_idx, seq_shift_logits)
+                loss_fct = MarginLoss(sharpen=MarginLoss.SHARPEN if loss_func == 'smargin' else 0.0)
+                loss = loss_fct(seq_shift_logits[mask], dense_logits_seq)
 
             elif loss_func == 'forward_kl':
                 # directional KL(FP16 teacher ‖ candidate); same dense-logits path as jsd
@@ -519,7 +580,7 @@ def eval_loss(model, accelerator, loader, seqlen=2048, loss_func='cross_entropy'
     return loss_sum.item()
 
 
-def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, prefill_prompt=False, score=SCORE_LAST, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None):
+def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_entropy', dense_logits_list=None, key_token_list=None, stride=0, last_tokens=None, prefill_prompt=False, score=SCORE_LAST, tokenizer=None, limit=None, batch_size=None, num_fewshot=None, verbosity='INFO', task_manager=None, task_dict=None, token_stats=None):
     """
     Evaluate metric on a model using a data loader.
     
@@ -559,7 +620,7 @@ def eval_metric(model, accelerator, metric, loader, seqlen, loss_func='cross_ent
                         last_tokens=last_tokens, prefill_prompt=prefill_prompt,
                         score=score)
     elif metric == 'loss':
-        return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list, stride=stride, last_tokens=last_tokens, prefill_prompt=prefill_prompt, score=score)
+        return eval_loss(model, accelerator, loader, seqlen=seqlen, loss_func=loss_func, dense_logits_list=dense_logits_list, key_token_list=key_token_list, stride=stride, last_tokens=last_tokens, prefill_prompt=prefill_prompt, score=score, token_stats=token_stats)
     elif 'gsm8k' in metric:
         return eval_zeroshot(model, tokenizer, task_list=[metric], limit=limit, batch_size=batch_size, num_fewshot=num_fewshot, verbosity=verbosity, task_manager=task_manager, task_dict=task_dict)
     else:

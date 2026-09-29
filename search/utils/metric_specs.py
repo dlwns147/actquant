@@ -174,6 +174,151 @@ GROUPS = {
         loss_func='jsd', use_key_token=False, last_tokens=128,
         trunc_len=256, sliding_window=64, alpha=1, beta=-1,
     ),
+    # ── seqlen 16384 = THE DEPLOYMENT LENGTH (RULER / post_search --n_token) ──
+    # Every other gov_report group tops out at 8192. tests/bench_selection_regret
+    # finding 16 measured that a metric's in-box DIRECTION on the
+    # (wbits, eff_kvbits) plane rotates toward RULER's +50 deg as the
+    # calibration seqlen grows (sl2048 37 deg -> sl4096 38 -> sl8192 44) and as
+    # the answer window grows (pp128_s32 43 -> pp512_s128 56), and that the
+    # angle is what predicts selection regret (corr -0.69). Both knobs lengthen
+    # the span decoded against a QUANTIZED KV cache, so 16384 is the untested
+    # end of the ladder — and the length the benchmark actually runs at.
+    # Capacity (measured, recorded at LB_ppl_sl8192): gov_report test has 100
+    # docs >= 16384 tokens, so n_sample <= 100 here (the JSD groups need 8).
+    # dense_logits are masked to last_tokens, so they cost the SAME as B_pp /
+    # B_lt128 (1.05 GB / 0.26 GB) — only the forward doubles.
+    'B_pp_sl16384': dict(  # gov_report — answer-phase JSD @16384, window 512
+        datasets=['gov_report'], n_sample=8, seqlen=16384, min_seqlen=16384,
+        loss_func='jsd', use_key_token=False, last_tokens=512,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_sl16384': dict(  # gov_report — @16384, window 128 (LENGTH control
+        # for B_pp_sl16384: same documents and length, only the window differs,
+        # so the two isolate the window knob at the deployment length).
+        datasets=['gov_report'], n_sample=8, seqlen=16384, min_seqlen=16384,
+        loss_func='jsd', use_key_token=False, last_tokens=128,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    # ── LongBench long-DOCUMENT JSD (2026-09-14) ─────────────────────────
+    # The PPL twins are already the best proxies measured on Llama
+    # (nqa_ppl_sl16384_pp512_s128 = 0.82 regret, the single best of 95), but PPL
+    # names are refused by --loss_only so they cannot be a SEARCH objective.
+    # These are the JSD versions: same corpus, same answer-phase protocol,
+    # search-legal. get_loader dispatches 'longbench:<subset>' on BOTH sides
+    # (utils/data.py) so a train side + FP-teacher pass is available.
+    # n_sample=8 like B_pp, so dense_logits are 8 x 512 x vocab = 1.05 GB and
+    # the cost is 8 x seqlen forward tokens (66k @8192 = 6.9 s/arch).
+    # narrativeqa is in NEITHER benchmark list -> no contamination caveat, and
+    # its `context` is ONE coherent document (unlike wikitext2's concatenation).
+    'NQA_pp': dict(
+        datasets=['longbench:narrativeqa'], n_sample=8,
+        seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=512,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'NQA_pp_sl16384': dict(
+        datasets=['longbench:narrativeqa'], n_sample=8,
+        seqlen=16384, min_seqlen=16384,
+        loss_func='jsd', use_key_token=False, last_tokens=512,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    # qmsum: LongBench GRADES it, so it is contaminated as a LongBench proxy —
+    # but it is NOT a RULER corpus, so for the RULER target it is clean.
+    'QMS_pp': dict(
+        datasets=['longbench:qmsum'], n_sample=8,
+        seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=512,
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    # ── CHAT groups for the front-regret sweep (2026-09-14, finding 28) ────
+    # Chat-only per the deployment decision. Front regret (the search-phase
+    # objective) favours metrics with BOTH high global and local tau; the two
+    # front winners were gov_jsd_pp128_s32_chat (Llama) and
+    # gov_jsd_pp512_s128_sl16384 (Qwen). These put the deployment length and the
+    # narrativeqa corpus under the chat template. Same shape as B_pp_chat /
+    # B_lt128_chat (n8, sides=('train',)); dense_logits 1.05 / 0.26 GB.
+    'B_pp_chat_sl16384': dict(
+        datasets=['chat:gov_report'], n_sample=8, seqlen=16384, min_seqlen=16384,
+        loss_func='jsd', use_key_token=False, last_tokens=512, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    # ── 2026-09-24: SHORTER-context twins of B_lt128_chat, to test whether the search
+    # proxy can be made ~2-4x cheaper (prefill cost ~ context length) without losing
+    # in-box agreement with RULER. Same answer window/stride; n8 and label-free n32.
+    'B_lt128_chat_sl2048': dict(
+        datasets=['chat:gov_report'], n_sample=8, seqlen=2048, min_seqlen=2048,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_chat_sl4096': dict(
+        datasets=['chat:gov_report'], n_sample=8, seqlen=4096, min_seqlen=4096,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_chat_sl2048_n32': dict(
+        datasets=['chat:gov_report'], n_sample=32, seqlen=2048, min_seqlen=2048,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_chat_sl4096_n32': dict(
+        datasets=['chat:gov_report'], n_sample=32, seqlen=4096, min_seqlen=4096,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_chat_sl16384': dict(
+        datasets=['chat:gov_report'], n_sample=8, seqlen=16384, min_seqlen=16384,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'NQA_pp_chat': dict(
+        datasets=['chat:longbench:narrativeqa'], n_sample=8,
+        seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=512, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'NQA_lt128_chat': dict(
+        datasets=['chat:longbench:narrativeqa'], n_sample=8,
+        seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    # ── LOSS x n_sample factorial (2026-09-15, finding 32) ─────────────────
+    # Question: finding 31's "PPL beats JSD" — is it the loss, or n_sample / the data?
+    # All 7 matched pairs were n=128, but on wikitext2 PPL reads the TEST split and
+    # JSD the TRAIN split, and a parser bug paired wt2-JSD with c4-PPL. The clean test
+    # holds EVERYTHING but the loss fixed: a cross_entropy LOSS task on the SAME group
+    # as its JSD twin (identical documents, split, n and protocol; CE ignores the
+    # teacher logits). CE ranks archs like PPL (monotone), and unlike PPL it passes
+    # --loss_only, so it can be a search objective. n in {8,32,128}; the n=8 documents
+    # are a prefix of the n=32/128 sets (same seed/shuffle/floor). Teacher logits:
+    # 32x128 = 1.05 GB, 128x128 = 4.2 GB, CPU-parked.
+    # ── chosen-document subsets (finding 46): n_sample=32 reproduces the 32-doc
+    # order the token dumps were built on; doc_ids keeps the chosen ones. Llama's
+    # choice (greedy in-box tau on the pool; docs 12 and 2 are picked in 38/40 and
+    # 33/40 half-pool draws, the rest are unstable). NOT search-legal until
+    # --doc_ids exists in the search scripts; measure with correlation.py.
+    'B_lt128_chat_d4L': dict(
+        datasets=['chat:gov_report'], n_sample=32, seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        doc_ids=[12, 2, 29, 27],
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_chat_d2L': dict(
+        datasets=['chat:gov_report'], n_sample=32, seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        doc_ids=[12, 2],
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_chat_n32': dict(
+        datasets=['chat:gov_report'], n_sample=32, seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'B_lt128_chat_n128': dict(
+        datasets=['chat:gov_report'], n_sample=128, seqlen=8192, min_seqlen=8192,
+        loss_func='jsd', use_key_token=False, last_tokens=128, sides=('train',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
     'D': dict(  # gsm8k — short answer-only loss, JSD
         datasets=['gsm8k'], n_sample=8, seqlen=2048, min_seqlen=0,
         loss_func='jsd', use_key_token=False, last_tokens=None,
@@ -382,6 +527,29 @@ GROUPS = {
     # vs qmsum 52 / gov_report 100 — so it would be a single-corpus outlier.
     # It is executable if ever wanted: measured peak 24.6 GB with the FP16
     # model, ~4.3 GB over the 8192 run.)
+    # 16384 tier — PPL at the deployment length. n_sample=64, not
+    # LONG_DOC_N_SAMPLE: gov_report has only 100 test docs >= 16384 and
+    # narrativeqa 139, so 128 is a hard loader error. 64 x 16384 = 1.05M scored
+    # tokens = exactly the same budget as the 8192 tier's 128 x 8192, so these
+    # cost what gov_ppl / nqa_ppl already cost. PPL groups store no FP-teacher
+    # logits (loss_func cross_entropy + sides=('test',)), which is what makes
+    # the deployment length affordable at all; measured peak with the FP16
+    # model is 24.6 GB (recorded at LB_ppl_sl2048).
+    # qmsum is NOT included: only 52 of its docs clear 16384.
+    'E_ppl_sl16384': dict(
+        datasets=['gov_report'], n_sample=64,
+        seqlen=16384, min_seqlen=16384,
+        loss_func='cross_entropy', use_key_token=False, last_tokens=None,
+        sides=('test',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
+    'LB_ppl_sl16384': dict(
+        datasets=['longbench:narrativeqa'], n_sample=64,
+        seqlen=16384, min_seqlen=16384,
+        loss_func='cross_entropy', use_key_token=False, last_tokens=None,
+        sides=('test',),
+        trunc_len=256, sliding_window=64, alpha=1, beta=-1,
+    ),
     'E_ppl_sl2048': dict(
         datasets=['gov_report'], n_sample=LONG_DOC_N_SAMPLE,
         seqlen=2048, min_seqlen=2048,
@@ -487,6 +655,37 @@ METRIC_TASKS = [
         # real cache path, so KV quantization is actually exercised).
         dict(metric='ppl',  loss_func='cross_entropy',
              stride=512, prefill_prompt=False, last_tokens=None)),
+    # ── decode-DEPTH sweep past 512 (free: PPL groups have no teacher pass,
+    # so these reuse E_ppl's loaders and cost ONE extra forward each). The
+    # angle is monotone in the window (19/27/33/56 deg over pp32/128/512) and
+    # nothing in the registry went past 512 — this says whether it saturates.
+    ('gov_ppl_pp1024_s256', 'E_ppl', 'gov_report',
+        dict(metric='ppl', loss_func='cross_entropy',
+             stride=256, prefill_prompt=True, last_tokens=1024)),
+    ('gov_ppl_pp2048_s512', 'E_ppl', 'gov_report',
+        dict(metric='ppl', loss_func='cross_entropy',
+             stride=512, prefill_prompt=True, last_tokens=2048)),
+    # ── deployment-length (16384) PPL ──
+    ('gov_ppl_sl16384',   'E_ppl_sl16384', 'gov_report',
+        dict(metric='ppl', loss_func='cross_entropy',
+             stride=0, prefill_prompt=False, last_tokens=None)),
+    ('gov_ppl_sl16384_pp512_s128', 'E_ppl_sl16384', 'gov_report',
+        # the PPL twin of gov_jsd_pp512_s128_sl16384, and the 16384 version of
+        # gov_ppl_pp512_s128 — the metric the leave-one-box-out CV already
+        # picks 50/51 times as the single best proxy.
+        dict(metric='ppl', loss_func='cross_entropy',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('gov_ppl_sl16384_pp1024_s256', 'E_ppl_sl16384', 'gov_report',
+        dict(metric='ppl', loss_func='cross_entropy',
+             stride=256, prefill_prompt=True, last_tokens=1024)),
+    ('nqa_ppl_sl16384',   'LB_ppl_sl16384', 'longbench:narrativeqa',
+        # narrativeqa is in NEITHER benchmark list (no contamination caveat)
+        # and its `context` is one coherent document.
+        dict(metric='ppl', loss_func='cross_entropy',
+             stride=0, prefill_prompt=False, last_tokens=None)),
+    ('nqa_ppl_sl16384_pp512_s128', 'LB_ppl_sl16384', 'longbench:narrativeqa',
+        dict(metric='ppl', loss_func='cross_entropy',
+             stride=128, prefill_prompt=True, last_tokens=512)),
     ('nqa_ppl',           'LB_ppl_sl8192', 'longbench:narrativeqa',
         # LongBench narrativeqa (novels / screenplays) @ 8192, single forward.
         dict(metric='ppl',  loss_func='cross_entropy',
@@ -587,6 +786,43 @@ METRIC_TASKS = [
         # collide with the lt512 needle_jsd cache.
         dict(kind='needle_jsd',
              stride=32, prefill_prompt=True, last_tokens=128)),
+    # 2026-09-28 (finding 122): LONG + HARD needle proxies at the RULER length. The legacy
+    # needle_* names run niah_multikey_2 at 2048 tokens (run-level --needle_* args), where every
+    # config retrieves -> in-box tau ~0.1 on the rotated Qwen pool. The configs the 8K gov
+    # objective mis-ranks differ on UUID/number retrieval at 16K (multikey_3, multivalue,
+    # single_3), so these score the teacher-forced ANSWER of a 5-task NIAH mix at 16384 under
+    # the chat template, from a generator seed (7) disjoint from the RULER seeds used for
+    # evaluation (0) and pool labels (1). The haystack essays are RULER's own -> flagged as
+    # ruler:* in the contamination report. `needle_*` keys override the run args per metric.
+    ('needle_mix_smargin_pp64_s16_chat_sl16384', 'A', None,
+        dict(kind='needle_jsd', loss_func='smargin', stride=16, prefill_prompt=True, last_tokens=64,
+             needle_tasks=('niah_single_3', 'niah_multikey_2', 'niah_multikey_3', 'niah_multivalue',
+                           'niah_multiquery'),
+             needle_seqlen=16384, needle_n_sample=8, needle_seed=7, needle_chat=True)),
+    ('needle_mix_jsd_pp64_s16_chat_sl16384', 'A', None,
+        dict(kind='needle_jsd', loss_func='jsd', stride=16, prefill_prompt=True, last_tokens=64,
+             needle_tasks=('niah_single_3', 'niah_multikey_2', 'niah_multikey_3', 'niah_multivalue',
+                           'niah_multiquery'),
+             needle_seqlen=16384, needle_n_sample=8, needle_seed=7, needle_chat=True)),
+    # jsd value of the same prompts + per-token dump per PROMPT (token_stats/<name>/<idx>.npz with
+    # the task of every prompt), so task subsets / fewer prompts / smargin can be scored OFFLINE
+    # when choosing a cheaper search objective; the sl8192 twin tests half the prefill cost.
+    ('needle_mix_tok_pp64_s16_chat_sl16384', 'A', None,
+        dict(kind='needle_jsd', loss_func='jsd', stride=16, prefill_prompt=True, last_tokens=64,
+             needle_tasks=('niah_single_3', 'niah_multikey_2', 'niah_multikey_3', 'niah_multivalue',
+                           'niah_multiquery'),
+             needle_seqlen=16384, needle_n_sample=8, needle_seed=7, needle_chat=True, needle_dump=True)),
+    ('needle_mix_tok_pp64_s16_chat_sl8192', 'A', None,
+        dict(kind='needle_jsd', loss_func='jsd', stride=16, prefill_prompt=True, last_tokens=64,
+             needle_tasks=('niah_single_3', 'niah_multikey_2', 'niah_multikey_3', 'niah_multivalue',
+                           'niah_multiquery'),
+             needle_seqlen=8192, needle_n_sample=8, needle_seed=7, needle_chat=True, needle_dump=True)),
+    # the GOLD answer's NLL (not teacher-relative): the FP teacher itself misses some items
+    ('needle_mix_nll_pp64_s16_chat_sl16384', 'A', None,
+        dict(kind='needle_nll', stride=16, prefill_prompt=True, last_tokens=64,
+             needle_tasks=('niah_single_3', 'niah_multikey_2', 'niah_multikey_3', 'niah_multivalue',
+                           'niah_multiquery'),
+             needle_seqlen=16384, needle_n_sample=8, needle_seed=7, needle_chat=True)),
     ('needle_nll_pp32_s8', 'A', None,
         # Tightest needle answer window: prefill, then 32 tokens in 8-chunks.
         dict(kind='needle_nll',
@@ -653,6 +889,206 @@ METRIC_TASKS = [
         # default (16x the documents ⇒ 16x the cost + a 4.2 GB teacher set).
         dict(metric='loss', loss_func='jsd',
              stride=32, prefill_prompt=True, last_tokens=128)),
+    # ── deployment-length (16384) answer-phase JSD — finding 16's proposal ──
+    ('gov_jsd_pp512_s128_sl16384', 'B_pp_sl16384', 'gov_report',
+        # BOTH rotating knobs at their maximum, at the length RULER runs at.
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp128_s32_sl16384', 'B_lt128_sl16384', 'gov_report',
+        # The window control at 16384 (extends the sl2048/4096/8192 ladder).
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    # ── STRIDE SWEEP at a FIXED 512-token answer window (2026-09-13) ──
+    # Tests the mechanism behind finding 17b/20: eval_loss feeds the answer span
+    # in chunks of `stride`, and KIVI keeps the newest residual_length=128 tokens
+    # in FP. So stride < 128 leaves the chunk's own recent context UNQUANTIZED
+    # (at stride 32 the FP buffer covers the last 4 chunks) and hides KV error,
+    # while stride >= 128 evicts the previous chunk before it is scored.
+    # PREDICTION: regret improves 32 -> 128 then FLATTENS past 128 (a kink at
+    # stride == residual_length), rather than improving monotonically.
+    # These reuse groups A_pp / B_pp, so they add NO FP-teacher pass — one extra
+    # forward each. s32 and s128 already exist; this adds 64 / 256 / 512.
+    ('wt2_jsd_pp512_s64',  'A_pp', 'wikitext2',
+        dict(metric='loss', loss_func='jsd',
+             stride=64, prefill_prompt=True, last_tokens=512)),
+    ('wt2_jsd_pp512_s256', 'A_pp', 'wikitext2',
+        dict(metric='loss', loss_func='jsd',
+             stride=256, prefill_prompt=True, last_tokens=512)),
+    ('wt2_jsd_pp512_s512', 'A_pp', 'wikitext2',
+        dict(metric='loss', loss_func='jsd',
+             stride=512, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp512_s64',  'B_pp', 'gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=64, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp512_s256', 'B_pp', 'gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=256, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp512_s512', 'B_pp', 'gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=512, prefill_prompt=True, last_tokens=512)),
+    ('nqa_jsd_pp512_s128', 'NQA_pp', 'longbench:narrativeqa',
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('nqa_jsd_pp512_s128_sl16384', 'NQA_pp_sl16384', 'longbench:narrativeqa',
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('qmsum_jsd_pp512_s128', 'QMS_pp', 'longbench:qmsum',
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    # ── CHAT front-regret sweep (2026-09-14, finding 28) ──
+    ('gov_jsd_pp512_s128_chat_sl16384', 'B_pp_chat_sl16384', 'chat:gov_report',
+        # Qwen's front winner (gov_jsd_pp512_s128_sl16384) under the chat template.
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp128_s32_chat_sl16384', 'B_lt128_chat_sl16384', 'chat:gov_report',
+        # Llama's front winner (gov_jsd_pp128_s32_chat) at the deployment length.
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    # 2026-09-28 (finding 122): Qwen's search objective (gov_smargin_pp512_s128_chat) and its
+    # margin twin at the RULER length. Under rotation the 8K teacher distance over-prices KV
+    # damage on Qwen (findings 112/119); on the unrotated pool the 16K jsd twin already beat
+    # the 8K one in-box (regret 0.89 vs 1.43). Same group as the jsd twin, no extra teacher pass.
+    ('gov_smargin_pp512_s128_chat_sl16384', 'B_pp_chat_sl16384', 'chat:gov_report',
+        dict(metric='loss', loss_func='smargin',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('gov_margin_pp512_s128_chat_sl16384', 'B_pp_chat_sl16384', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('nqa_jsd_pp512_s128_chat', 'NQA_pp_chat', 'chat:longbench:narrativeqa',
+        # narrativeqa won Qwen band AND front (raw); its chat twin.
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    # 2026-09-29 (finding 135): the search objective's loss on a SECOND long-document corpus (stories, not
+    # government reports) -- does another document type price W bits more like RULER (131/134)?
+    ('nqa_smargin_pp512_s128_chat', 'NQA_pp_chat', 'chat:longbench:narrativeqa',
+        dict(metric='loss', loss_func='smargin',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('nqa_jsd_pp128_s32_chat', 'NQA_lt128_chat', 'chat:longbench:narrativeqa',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_jsd_pp512_s64_chat', 'B_pp_chat', 'chat:gov_report',
+        # stride ladder under chat (reuses B_pp_chat's teacher): does chat move the optimum?
+        dict(metric='loss', loss_func='jsd',
+             stride=64, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp512_s256_chat', 'B_pp_chat', 'chat:gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=256, prefill_prompt=True, last_tokens=512)),
+    ('gov_jsd_pp128_s64_chat', 'B_lt128_chat', 'chat:gov_report',
+        # stride at the 128 window Llama's front winner uses (reuses B_lt128_chat).
+        dict(metric='loss', loss_func='jsd',
+             stride=64, prefill_prompt=True, last_tokens=128)),
+    ('gov_jsd_pp128_s128_chat', 'B_lt128_chat', 'chat:gov_report',
+        # one 128-token chunk: the whole answer scored after a single cache eviction.
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=128)),
+    # ── LOSS x n factorial (finding 32): CE twins share their JSD twin's group ──
+    ('gov_jsd_pp128_s128_chat_n32', 'B_lt128_chat_n32', 'chat:gov_report',
+        # n ladder for Qwen's recommended protocol (n8 = gov_jsd_pp128_s128_chat)
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=128)),
+    ('gov_jsd_pp128_s128_chat_n128', 'B_lt128_chat_n128', 'chat:gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=128)),
+    ('gov_ce_pp128_s128_chat', 'B_lt128_chat', 'chat:gov_report',
+        # SAME documents as gov_jsd_pp128_s128_chat; only the loss differs
+        dict(metric='loss', loss_func='cross_entropy',
+             stride=128, prefill_prompt=True, last_tokens=128)),
+    ('gov_ce_pp128_s128_chat_n32', 'B_lt128_chat_n32', 'chat:gov_report',
+        dict(metric='loss', loss_func='cross_entropy',
+             stride=128, prefill_prompt=True, last_tokens=128)),
+    ('gov_ce_pp128_s128_chat_n128', 'B_lt128_chat_n128', 'chat:gov_report',
+        dict(metric='loss', loss_func='cross_entropy',
+             stride=128, prefill_prompt=True, last_tokens=128)),
+    ('gov_ce_pp128_s32_chat', 'B_lt128_chat', 'chat:gov_report',
+        # CE twin of Llama's recommended gov_jsd_pp128_s32_chat
+        dict(metric='loss', loss_func='cross_entropy',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    # ── teacher-margin erosion (finding 38): relu(teacher top1-top2 gap - the
+    # candidate's gap on the SAME pair), the only per-token reduction that beat JSD
+    # on both models AND both answer protocols. Shares its JSD twin's group (no extra
+    # FP-teacher pass), same forward cost, and is search-legal (metric='loss').
+    ('gov_margin_pp128_s32_chat', 'B_lt128_chat', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    # 2026-09-26 (finding 89): margin + 0.25 * relu(gap WIDENING). Plain margin forgives the
+    # candidate sharpening the teacher's top-2 gap, which low-bit W does, so it loses W-bit
+    # resolution above ~3.4 bits (the W-axis front truncates, finding 87). Same group, cost.
+    ('gov_smargin_pp128_s32_chat', 'B_lt128_chat', 'chat:gov_report',
+        dict(metric='loss', loss_func='smargin',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_smargin_pp128_s32_chat_n32', 'B_lt128_chat_n32', 'chat:gov_report',
+        dict(metric='loss', loss_func='smargin',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    # Qwen's protocol twin (its recommended margin is gov_margin_pp512_s128_chat, finding 44)
+    ('gov_smargin_pp512_s128_chat', 'B_pp_chat', 'chat:gov_report',
+        dict(metric='loss', loss_func='smargin',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    # 2026-09-24: shorter-context twins (cost test, see the B_lt128_chat_sl* groups)
+    ('gov_margin_pp128_s32_chat_sl2048', 'B_lt128_chat_sl2048', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin', stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_margin_pp128_s32_chat_sl4096', 'B_lt128_chat_sl4096', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin', stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_margin_pp128_s32_chat_sl2048_n32', 'B_lt128_chat_sl2048_n32', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin', stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_margin_pp128_s32_chat_sl4096_n32', 'B_lt128_chat_sl4096_n32', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin', stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_margin_pp128_s128_chat', 'B_lt128_chat', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin',
+             stride=128, prefill_prompt=True, last_tokens=128)),
+    ('gov_margin_pp128_s32_chat_n32', 'B_lt128_chat_n32', 'chat:gov_report',
+        # same protocol as the token dump -> cross-checks the offline computation
+        dict(metric='loss', loss_func='margin',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_margin_pp128_s128_chat_n32', 'B_lt128_chat_n32', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin',
+             stride=128, prefill_prompt=True, last_tokens=128)),
+    ('gov_margin_pp512_s128_chat', 'B_pp_chat', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('wt2_margin_pp512_s128_chat', 'A_pp_chat', 'chat:wikitext2',
+        dict(metric='loss', loss_func='margin',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    # ── chosen-document metrics (finding 46), Llama's protocol; JSD twins for the
+    # same documents so the loss and the document choice can be separated.
+    ('gov_margin_pp128_s32_chat_d4L', 'B_lt128_chat_d4L', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_jsd_pp128_s32_chat_d4L', 'B_lt128_chat_d4L', 'chat:gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_margin_pp128_s32_chat_d2L', 'B_lt128_chat_d2L', 'chat:gov_report',
+        dict(metric='loss', loss_func='margin',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_jsd_pp128_s32_chat_d2L', 'B_lt128_chat_d2L', 'chat:gov_report',
+        dict(metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    # ── per-token diagnostics (finding 37): kind='token_stats' = the JSD of its twin
+    # (same group + protocol, so the stored VALUE must equal the twin's) PLUS a
+    # per-token array <measure dir>/token_stats/<name>/<idx>.npz (utils.eval.
+    # TOKEN_STAT_FIELDS) from which fork-weighted / top-k / flip / CE-vs-JSD /
+    # per-document variants are computed offline without another GPU pass. `kind`
+    # keeps them out of search (task_knobs) and post_search, like the other
+    # correlation-only tasks.
+    ('gov_tok_pp128_s128_chat_n32', 'B_lt128_chat_n32', 'chat:gov_report',
+        dict(kind='token_stats', metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=128)),
+    ('gov_tok_pp128_s32_chat_n32', 'B_lt128_chat_n32', 'chat:gov_report',
+        dict(kind='token_stats', metric='loss', loss_func='jsd',
+             stride=32, prefill_prompt=True, last_tokens=128)),
+    ('gov_tok_pp512_s128_chat', 'B_pp_chat', 'chat:gov_report',
+        dict(kind='token_stats', metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('wt2_tok_pp512_s128_chat', 'A_pp_chat', 'chat:wikitext2',
+        dict(kind='token_stats', metric='loss', loss_func='jsd',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('wt2_ce_pp512_s128_chat', 'A_pp_chat', 'chat:wikitext2',
+        # chat twin: SAME documents as wt2_jsd_pp512_s128_chat, only the loss differs
+        dict(metric='loss', loss_func='cross_entropy',
+             stride=128, prefill_prompt=True, last_tokens=512)),
+    ('wt2_ce_pp512_s128', 'A_pp', 'wikitext2',
+        # SAME train-split docs as wt2_jsd_pp512_s128 -> separates the loss from the test/train split that confounds wt2_ppl_pp512_s128
+        dict(metric='loss', loss_func='cross_entropy',
+             stride=128, prefill_prompt=True, last_tokens=512)),
     ('gov_jsd_pp32_s8',   'B_lt32', 'gov_report',
         # 8k prefill + last-32 answer window scored in 8-token chunks (the
         # gov_report twin of wt2_jsd_pp32_s8; Group B_lt32 pre-masks dense).
@@ -966,6 +1402,9 @@ def task_knobs(name, *, key_token_path='', target_model=None,
             f"generates its own prompts inside correlation.py and has no "
             f"--dataset + protocol form. Measure it with correlation.py.")
     spec = GROUPS[g]
+    # 2026-09-24: document subsets ARE search-legal now (evaluator/search.py/second_search.py
+    # take --doc_ids; the wrappers get DOC_IDS below and tag the SAVE dir). Held-out
+    # validation of the chosen set: bench_selection_regret finding 74(d).
     # `require` = what the CALLER can honour, checked HERE — before the key-token block
     # below asks for an archive — so an entry point with no key-token plumbing says
     # exactly that instead of demanding a path it would refuse to use anyway.
@@ -999,6 +1438,7 @@ def task_knobs(name, *, key_token_path='', target_model=None,
         alpha=int(spec.get('alpha', 2)),
         beta=int(spec.get('beta', -2)),
         key_token_path='',
+        doc_ids=[int(i) for i in (spec.get('doc_ids') or [])],
     )
     if out['use_key_token']:
         if not (key_token_path and target_model):
@@ -1052,7 +1492,6 @@ def groups_for(tasks, key_token_path='', target_model=None):
     return out
 
 
-DIVERGENCE_LOSSES = ('jsd', 'kld', 'topk', 'forward_kl')
 
 
 def needs_dense(eval_kwargs):
@@ -1112,14 +1551,30 @@ def precompute_groups(accelerator, model_id, group_items, *, seed=0, dtype='auto
             print(f"[metric_specs] group '{g}': document selection pinned to "
                   f"data_seed={data_seed} (run --seed {seed} not used here)")
 
+        def _subset(loader, spec=spec):
+            # `doc_ids` (finding 43/46): keep only these documents, by index in the
+            # loader's own order, so a metric can name a CHOSEN subset of the n_sample
+            # documents without changing which documents n_sample denotes.
+            ids = spec.get('doc_ids')
+            if not ids or loader is None:
+                return loader
+            from torch.utils.data import DataLoader, Subset
+            n = len(loader.dataset)
+            bad = [i for i in ids if i < 0 or i >= n]
+            if bad:
+                raise SystemExit(f"[metric_specs] doc_ids {bad} out of range for a "
+                                 f"{n}-document loader (n_sample={spec['n_sample']})")
+            return DataLoader(Subset(loader.dataset, list(ids)), batch_size=loader.batch_size,
+                              shuffle=False, drop_last=False)
+
         def _loaders(train, spec=spec, data_seed=data_seed):
-            return {d: accelerator.prepare(get_loader(
+            return {d: accelerator.prepare(_subset(get_loader(
                         d, model=model_id, n_sample=spec['n_sample'],
                         batch_size=batch_size, train=train, seed=data_seed,
                         seqlen=spec['seqlen'], min_seqlen=spec['min_seqlen'],
                         # a chat: corpus with an answer window splits the DOCUMENT, so its span is a
                         # GROUP property (it changes the data, not just the forward)
-                        answer_tokens=spec['last_tokens']))
+                        answer_tokens=spec['last_tokens'])))
                     for d in spec['datasets']}
         # `sides` (optional) restricts which loader sides are built: 'loss'
         # metrics read train_loaders, 'ppl' reads test_loaders, so a PPL-only
@@ -1272,7 +1727,12 @@ def move_dense_to_cpu(evaluator):
               f"GPU free={free/1e9:.2f}GB / {total/1e9:.2f}GB")
 
 
-def run_task(args, accelerator, evaluator, dataset, eval_kwargs):
+# Losses that consume FP-teacher logits (run_task hands them to eval_metric, and
+# needs_dense decides whether a group needs the teacher pass at all).
+DIVERGENCE_LOSSES = ('jsd', 'kld', 'topk', 'forward_kl', 'margin', 'smargin')
+
+
+def run_task(args, accelerator, evaluator, dataset, eval_kwargs, token_stats=None):
     """Measure ONE task on an already-prepared evaluator + model.
 
     Bypasses LlamaEvaluator.eval() (which loops over every loader on that side)
@@ -1291,7 +1751,7 @@ def run_task(args, accelerator, evaluator, dataset, eval_kwargs):
     loader = (evaluator.test_loaders[dataset] if eval_kwargs['metric'] == 'ppl'
               else evaluator.train_loaders[dataset])
     dense_logits = (evaluator.dense_logits.get(dataset)
-                    if eval_kwargs.get('loss_func') in ('jsd', 'kld', 'topk', 'forward_kl')
+                    if eval_kwargs.get('loss_func') in DIVERGENCE_LOSSES
                     else None)
     key_token_list = (evaluator.key_token_list.get(dataset)
                       if evaluator.use_key_token else None)
@@ -1304,7 +1764,7 @@ def run_task(args, accelerator, evaluator, dataset, eval_kwargs):
         last_tokens=eval_kwargs.get('last_tokens'),
         prefill_prompt=bool(eval_kwargs.get('prefill_prompt')),
         score=eval_kwargs.get('score', 'last'),
-        tokenizer=evaluator.tokenizer)
+        tokenizer=evaluator.tokenizer, token_stats=token_stats)
 
 
 # ── measurement protocol, for embedding in an archive ───────────────────────
@@ -1316,14 +1776,17 @@ def run_task(args, accelerator, evaluator, dataset, eval_kwargs):
 PROTOCOL_KEYS = ('dataset', 'datasets', 'n_sample', 'seqlen', 'min_seqlen',
                  'data_batch_size', 'metric', 'loss_func', 'stride',
                  'prefill_prompt', 'last_tokens', 'score', 'use_key_token',
-                 'attn_sink', 'residual_length')
+                 'attn_sink', 'residual_length', 'doc_ids')
 
 
 def protocol_dict(args):
     """Measurement-protocol subset of `args` (a dict or a Namespace), skipping
     keys the caller doesn't have."""
     get = args.get if hasattr(args, 'get') else (lambda k, d=None: getattr(args, k, d))
-    return {k: get(k) for k in PROTOCOL_KEYS if get(k) is not None}
+    # empty doc_ids (= all documents) is left out so pre-2026-09-24 archives, which never
+    # carried the key, keep comparing equal to an all-documents run.
+    return {k: get(k) for k in PROTOCOL_KEYS
+            if get(k) is not None and not (k == 'doc_ids' and not get(k))}
 
 
 # ── CLI: name → knobs, for shells that must name the same metric ────────────
@@ -1392,6 +1855,8 @@ if __name__ == '__main__':
         # downstream would derive it)
         ('KEY_TOKEN_PATH', _k['key_token_path']),
         ('METRIC_SPEC', _k['metric_spec']),
+        # chosen-document subset (space-separated indices into the n_sample loader; '' = all)
+        ('DOC_IDS', ' '.join(str(i) for i in _k['doc_ids'])),
     ]
     for _n, _v in _sh:
         if isinstance(_v, bool):

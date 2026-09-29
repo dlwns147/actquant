@@ -181,6 +181,7 @@ def _quant_meta(args):
                 residual_length=args.residual_length, attn_sink=args.attn_sink,
                 k_quant_scheme=args.k_quant_scheme,
                 v_quant_scheme=args.v_quant_scheme, seed=args.seed,
+                kv_rotate=bool(getattr(args, 'kv_rotate', False)),
                 save_dir=args.save)
 
 
@@ -349,14 +350,15 @@ def run_benchmarks(args, model, model_id, arch=None, idx=None, n_archs=1):
 def select_joint(args, ctx):
     """Final selection from a second_search joint iter_<it>.stats archive.
 
-    The 2nd-stage search already emits fully-assembled JOINT archs with a
-    measured JSD (archive entry = [arch, loss, *comp]), so NONE of the per-axis
+    The 2nd-stage search emits fully-assembled JOINT archs with an archive
+    loss (entry = [arch, loss, *comp]; MCKP may store predictions), so no per-axis
     combination / surrogate machinery is needed here. We just:
       * recompute every --comp_obj from the arch via get_net_info (robust — no
         assumption about the stored comp-column order / which objectives the
         search optimized), so the budget box can be ANY comp_obj;
       * keep the archs inside [comp_obj_min, comp_obj_max];
-      * rank by the ALREADY-MEASURED loss (ascending) and take the best -n.
+      * rank by archive loss (ascending), optionally measure --rerank_metric
+        on its unique top-K, and take the best -n by the resulting loss.
     Returns (ps, I, pf, sel_mode) shaped for run_final (pf is (n,1) = loss;
     benchmarks run with K=0 → the per-axis-metric print is empty).
     """
@@ -394,6 +396,15 @@ def select_joint(args, ctx):
     feas = np.ones(len(archs), bool)
     for i, o in enumerate(args.comp_obj):
         feas &= (comp[:, i] >= args.comp_obj_min[i]) & (comp[:, i] <= args.comp_obj_max[i])
+    if not feas.any() and getattr(args, 'budget_as_cap', False):
+        # 2026-09-24 (finding 83): the archive can stop short of a budget because the
+        # stage-1 front saturates (extra bits no longer lower the loss). Treat the budget
+        # as a CAP: the best measured arch that fits under comp_obj_max.
+        feas = np.ones(len(archs), bool)
+        for i, o in enumerate(args.comp_obj):
+            feas &= comp[:, i] <= args.comp_obj_max[i]
+        print(f"[post_search] budget box empty -> --budget_as_cap: {int(feas.sum())} archs under the cap "
+              f"(max {comp[feas, 0].max() if feas.any() else float('nan'):.4g})", flush=True)
     if not feas.any():
         msg = ["[post_search] no arch in the joint stats satisfies the COMP_OBJ "
                "range — 0 candidates after filtering."]
@@ -403,12 +414,14 @@ def select_joint(args, ctx):
                        f"[{args.comp_obj_min[i]:.4g}, {args.comp_obj_max[i]:.4g}]")
         msg.append("Widen --comp_obj_min/--comp_obj_max into the achievable range.")
         raise SystemExit("\n".join(msg))
-    # LCO/finite guard: never select an arch without a real measured loss (defensive —
-    # future predicted/virtual candidates must carry a measured anchor to be selectable).
+    # Reject failed archive values. MCKP predictions are labelled explicitly below.
     feas &= np.isfinite(loss)
+    if not feas.any():
+        raise SystemExit('[post_search] no finite archive loss inside the budget box')
     idx = np.where(feas)[0]
-    idx = idx[np.argsort(loss[idx], kind='stable')]      # measured-best first
-    sel_mode = f'joint-stats measured-best'
+    idx = idx[np.argsort(loss[idx], kind='stable')]      # archive-loss order
+    predicted = sf.get('front_eval') == 'predict'
+    sel_mode = 'joint-stats predicted-best' if predicted else 'joint-stats measured-best'
     # ── benchmark-calibrated tie-break (utils/bench_calib.py) ──
     # Re-ranks ONLY measured-loss near-ties (hybrid guard) by a benchmark
     # ranker trained on --bench_calib_dir. target='both' switches only when
@@ -461,7 +474,12 @@ def select_joint(args, ctx):
             print(f'[bench-calib] guard={guard:.4g} leaves a single contender '
                   f'→ measured-best kept')
     n_keep = max(1, int(args.n))
-    # the stored loss already IS the measurement → take the (re-ranked) best -n.
+    if getattr(args, 'rerank_metric', ''):
+        idx, measured = _rerank_joint(args, ctx, archs, loss, idx, sf)
+        loss = loss.copy()
+        loss[idx] = measured
+        sel_mode = f'joint-stats measured-rerank[{args.rerank_metric}]'
+    # Take the best by archive loss, or by measured B when reranking is enabled.
     sel = idx[:n_keep]
     ps = [archs[j] for j in sel]
     pf = loss[sel].reshape(-1, 1)
@@ -470,10 +488,85 @@ def select_joint(args, ctx):
     for i, o in enumerate(args.comp_obj):
         print(f"[post_search] {o}: in-box [{args.comp_obj_min[i]:.4g},"
               f"{args.comp_obj_max[i]:.4g}] → best arch {int(sel[0])} "
-              f"{o}={comp[sel[0], i]:.4g} JSD={loss[sel[0]]:.5f}")
+              f"{o}={comp[sel[0], i]:.4g} loss={loss[sel[0]]:.5f}")
     print(f"[post_search] --second_expr {args.second_expr}: {len(archive)} archs, "
           f"{int(feas.sum())} in-box → {sel_mode}")
     return ps, I, pf, sel_mode
+
+
+def check_rerank_args(args):
+    """Reject ambiguous selection rules before loading models or teacher logits."""
+    if not getattr(args, 'rerank_metric', ''):
+        return
+    if not args.second_expr:
+        raise SystemExit('--rerank_metric requires --second_expr')
+    if args.bench_calib_dir:
+        raise SystemExit('--rerank_metric cannot be combined with --bench_calib_dir')
+    if args.rerank_topk < max(1, args.n):
+        raise SystemExit('--rerank_topk must be positive and at least -n')
+    # Named final metrics permit sharing the same teacher pass and evaluator.
+    if not args.metric_tasks:
+        raise SystemExit('--rerank_metric requires named --metric_tasks for final evaluation')
+    tasks = resolve_tasks([args.rerank_metric])
+    if len(tasks) != 1:
+        raise SystemExit('--rerank_metric accepts exactly one metric')
+    task, = tasks
+    _, _, ds, kw = task
+    if ds is None or kw.get('kind') or kw.get('metric') != 'loss':
+        raise SystemExit('--rerank_metric must be a standard named loss metric')
+
+
+def _rerank_joint(args, ctx, archs, archive_loss, order, sf):
+    """Measure B on unique top-K by A; benchmark only the final measured winners."""
+    shortlist, seen = [], set()
+    for j in order:
+        key = json.dumps(archs[j], sort_keys=True, separators=(',', ':'))
+        if key not in seen:
+            seen.add(key)
+            shortlist.append(int(j))
+        if len(shortlist) == args.rerank_topk:
+            break
+    started = time()
+    evaluator, tasks, _, precomp = _prepare_metric_evaluator(args, ctx)
+    key, group, ds, kw = next(t for t in tasks if t[0] == args.rerank_metric)
+    setup_seconds = time() - started
+    rows = []
+    for j in shortlist:
+        t0 = time()
+        apply_group(evaluator, precomp[group])
+        model = evaluator.sample(archs[j])
+        value = run_task(args, ctx.accelerator, evaluator, ds, kw)
+        value = float(value.item() if hasattr(value, 'item') else value)
+        elapsed = time() - t0
+        rows.append(dict(archive_idx=j, arch=arch_sha8(archs[j]),
+                         archive_loss=float(archive_loss[j]),
+                         value=value if np.isfinite(value) else None,
+                         seconds=elapsed))
+        print(f'[rerank] arch{j} {key}={value:.6f} ({elapsed:.2f}s incl. build)')
+        if any(m in args.w_method for m in ('awq', 'gptq', 'qeft', 'awq_qeft')):
+            del model, evaluator.model
+            clean_up()
+    valid = [r for r in rows if r['value'] is not None]
+    valid.sort(key=lambda r: r['value'])  # stable: A order breaks exact B ties
+    report = dict(metric=key, spec=spec_sha8(key), second_expr=args.second_expr,
+                  archive_protocol=sf.get('protocol'),
+                  archive_loss_kind=('predicted' if sf.get('front_eval') == 'predict'
+                                     else 'measured'),
+                  budget=dict(zip(args.comp_obj,
+                                  zip(args.comp_obj_min, args.comp_obj_max))),
+                  requested_topk=args.rerank_topk, measured=len(rows),
+                  setup_seconds=setup_seconds, total_seconds=time() - started,
+                  seconds_per_arch=sum(r['seconds'] for r in rows) / len(rows),
+                  candidates=rows,
+                  selected_archive_indices=[r['archive_idx'] for r in valid[:max(1, args.n)]])
+    if args.save and ctx.accelerator.is_main_process:
+        os.makedirs(args.save, exist_ok=True)
+        with open(os.path.join(args.save, 'rerank.json'), 'w') as f:
+            json.dump(report, f, indent=2, allow_nan=False)
+    if len(valid) < max(1, args.n):
+        raise SystemExit('[rerank] too few finite measured losses for -n; see rerank.json')
+    return (np.array([r['archive_idx'] for r in valid], dtype=int),
+            np.array([r['value'] for r in valid]))
 
 
 def _has_data(args):
@@ -500,11 +593,10 @@ def check_metric_data(args):
                 f"/_stride/_prefill_prompt/_last_tokens.")
 
 
-def run_final(args, ctx, ps, I, pf, K):
-    """Shared backend: build the evaluator, then evaluate + benchmark the
-    selected archs. `ps[idx]` yields an arch dict, `pf[idx, 0]` its
-    predicted/measured metric. K = number of per-axis metric pairs in pf
-    (0 for the joint-stats path → no per-axis print)."""
+def _prepare_metric_evaluator(args, ctx):
+    """Share calibration loaders, teacher logits and evaluator across selection/eval."""
+    if getattr(ctx, '_metric_evaluation', None) is not None:
+        return ctx._metric_evaluation
     model_id = f'{args.model_path}/{args.model_name}'
     if 'hqq' not in args.w_method:
         args.quant_model_paths = []
@@ -513,7 +605,10 @@ def run_final(args, ctx, ps, I, pf, K):
     # serves every arch below). The teacher is freed before the quant model is
     # built. The first group's data is injected into the evaluator so its
     # __init__ skips both the loader build and a second teacher pass.
-    tasks = resolve_tasks(args.metric_tasks) if args.metric_tasks else []
+    names = list(args.metric_tasks)
+    if getattr(args, 'rerank_metric', '') and args.rerank_metric not in names:
+        names.append(args.rerank_metric)
+    tasks = resolve_tasks(names) if names else []
     for key, _g, ds, kw in tasks:
         if kw.get('kind') or ds is None:
             raise SystemExit(
@@ -562,6 +657,20 @@ def run_final(args, ctx, ps, I, pf, K):
         precomputed_test_loaders=inj.get('test_loaders'),
         precomputed_dense_logits=inj.get('dense_logits'),
         precomputed_key_token_list=inj.get('key_token_list'))
+
+    ctx._metric_evaluation = evaluator, tasks, group_items, precomp
+    return ctx._metric_evaluation
+
+
+def run_final(args, ctx, ps, I, pf, K):
+    """Shared backend: build the evaluator, then evaluate + benchmark the
+    selected archs. `ps[idx]` yields an arch dict, `pf[idx, 0]` its
+    predicted/measured metric. K = number of per-axis metric pairs in pf
+    (0 for the joint-stats path → no per-axis print)."""
+    model_id = f'{args.model_path}/{args.model_name}'
+    evaluator, all_tasks, group_items, precomp = _prepare_metric_evaluator(args, ctx)
+    final_keys = {t[0] for t in resolve_tasks(args.metric_tasks)}
+    tasks = [t for t in all_tasks if t[0] in final_keys]
 
     # long-format rows persisted to --save/--results_csv_file: one row per
     # (arch, metric, dataset) so ALL metrics land in a file, not just stdout.
@@ -655,6 +764,9 @@ def run_final(args, ctx, ps, I, pf, K):
                            metric=list(args.metric or []),
                            loss_func=args.loss_func,
                            knob_protocol=protocol_dict(args),
+                           selection_rerank=dict(metric=args.rerank_metric,
+                                                 topk=args.rerank_topk)
+                           if args.rerank_metric else None,
                            specs={k: spec_sha8(k)
                                   for k in (args.metric_tasks or [])
                                   if k in METRIC_KEYS},
@@ -668,6 +780,9 @@ def run_final(args, ctx, ps, I, pf, K):
 
 def main(args):
     print(args)
+    from model.kv_rotation import setup_from_args
+    setup_from_args(args)
+    check_rerank_args(args)
     ctx = init_run(args)
     if maybe_generate_testcases(args):
         return
@@ -888,6 +1003,11 @@ def build_parser():
     p.add_argument('--residual_length', type=int, default=128)
     p.add_argument('--attn_sink', type=int, default=0,
                    help='Keep first S KV tokens in FP (KVSink). 0=off. Match the search-time value.')
+    from model.kv_rotation import add_args as _kvrot_args
+    _kvrot_args(p)   # --kv_rotate default ON since 2026-09-23; --no-kv_rotate to disable
+    p.add_argument('--budget_as_cap', action='store_true',
+                   help='if no archive arch falls inside the budget box, take the best one under '
+                        'comp_obj_max (the budget as a cap; finding 83)')
     p.add_argument('--k_quant_scheme', type=str, choices=['channel', 'token'])
     p.add_argument('--v_quant_scheme', type=str, choices=['channel', 'token'])
     p.add_argument('--outlier_path', type=str, default='')
@@ -989,6 +1109,11 @@ def build_parser():
     p.add_argument('--second_expr', type=str, default='',
                    help='second_search iter_<it>.stats: select+benchmark its '
                         'assembled joint archs directly (no per-axis combine).')
+    p.add_argument('--rerank_metric', default='',
+                   help='Opt-in: measure this named loss on the in-budget top-K '
+                        'by archive loss, then select by its measured value.')
+    p.add_argument('--rerank_topk', type=int, default=5,
+                   help='Shortlist size per budget for --rerank_metric (default 5).')
     p.add_argument('--second_include_candidates', action='store_true',
                    help="(with --second_expr) also include the stats' "
                         "'candidates' list, not just 'archive'.")

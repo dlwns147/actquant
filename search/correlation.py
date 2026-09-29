@@ -223,7 +223,8 @@ from utils.metric_specs import (GROUPS, METRIC_TASKS, METRIC_KEYS, BENCH_KEYS,
 _CONFIG_KEYS = ('model_name', 'dtype', 'w_method', 'kv_method', 'w_bits',
                 'k_bits', 'v_bits', 'w_group_size', 'k_group_size',
                 'v_group_size', 'residual_length', 'attn_sink',
-                'k_quant_scheme', 'v_quant_scheme', 'seed')
+                'k_quant_scheme', 'v_quant_scheme', 'seed', 'kv_rotate',
+                'kv_rotate_parts', 'kv_rotate_basis')
 
 
 def measurement_config(args):
@@ -300,6 +301,8 @@ def _metric_corpus(metric, needle_task=''):
     if str(kw.get('kind', '')).startswith('needle'):
         # needle_* prompts come from RULER's own niah generators, so they
         # collide with a RULER task of the SAME name (and length/seed).
+        if kw.get('needle_tasks'):
+            return f"ruler:{kw['needle_tasks'][0]}"
         return f'ruler:{needle_task}' if needle_task else None
     return None
 
@@ -841,7 +844,7 @@ def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
                      trunc_len, sliding_window, alpha, beta,
                      last_tokens=None, precomputed=None, sides=None,
                      data_seed=None, key_token_eval=None, key_token_suffix=None,
-                     key_token_on_sample=None):
+                     key_token_on_sample=None, doc_ids=None):
     """One LlamaEvaluator with the requested data-side config. `last_tokens`
     here is set on the evaluator at init so dense_logits gets pre-masked to
     the last N positions — must match the eval_loss last_tokens used at
@@ -857,6 +860,7 @@ def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
       `key_token_eval`       which model judged the key tokens (names the archive)
       `key_token_suffix`     archive layout (_raw / _chat-a<N>)
       `key_token_on_sample`  archive computed on the chat sample, not the document
+      `doc_ids`              chosen-document subset, applied by precompute_groups
     tests/test_metric_specs.py asserts this signature covers every GROUP key, so
     adding a group field without adding it here fails a test rather than a run."""
     model_id = f'{args.model_path}/{args.model_name}'
@@ -884,12 +888,25 @@ def _build_evaluator(args, ctx, *, datasets, n_sample, seqlen, min_seqlen,
         precomputed_train_loaders=(precomputed or {}).get('train_loaders'),
         precomputed_test_loaders=(precomputed or {}).get('test_loaders'),
         precomputed_dense_logits=(precomputed or {}).get('dense_logits'),
-        precomputed_key_token_list=(precomputed or {}).get('key_token_list'))
+        precomputed_key_token_list=(precomputed or {}).get('key_token_list'),
+        awq_table=getattr(args, 'awq_table', None))
     _move_all_dense_logits_to_cpu(evaluator)
     return evaluator
 
 
-def _build_needle_loader(args, model_id, device):
+def _needle_params(args, ov=None):
+    """Effective needle protocol: the run-level --needle_* args, overridden per
+    METRIC by `needle_*` keys in its task spec (2026-09-28, finding 122: a long,
+    hard needle proxy at the RULER length needs its own task mix / length / seed
+    while the legacy needle_* names keep reading the run args unchanged)."""
+    ov = ov or {}
+    tasks = ov.get('needle_tasks') or (args.needle_task,)
+    return dict(tasks=tuple(tasks), seqlen=int(ov.get('needle_seqlen', args.needle_seqlen)),
+                n=int(ov.get('needle_n_sample', args.needle_n_sample)),
+                seed=int(ov.get('needle_seed', args.seed)), chat=bool(ov.get('needle_chat', False)))
+
+
+def _build_needle_loader(args, model_id, device, ov=None):
     """Materialise NIAH prompts as a list of (input_ids, attention_mask,
     labels) batches matching the utils.data loader contract:
       - input_ids = tokenized(prompt + ' ' + answer), batch=1
@@ -905,33 +922,51 @@ def _build_needle_loader(args, model_id, device):
     from utils.ruler_utils import niah_utils as _niah
     import random as _random
 
-    if not hasattr(_niah, args.needle_task):
-        raise SystemExit(
-            f"[needle_nll] unknown --needle_task '{args.needle_task}'. "
-            f"Valid: niah_single_1/2/3, niah_multikey_1/2/3.")
+    P = _needle_params(args, ov)
+    for _t in P['tasks']:
+        if not hasattr(_niah, _t):
+            raise SystemExit(
+                f"[needle_nll] unknown needle task '{_t}'. "
+                f"Valid: niah_single_1/2/3, niah_multikey_1/2/3, niah_multivalue, niah_multiquery.")
     tokenizer = get_tokenizer(model_id)
     # niah's generate_input_output only seeds the needles SHUFFLE; magic-
     # number / word / depth picks use the *global* random module which has
     # been advanced by LlamaEvaluator init by now. Re-seed so every arch
     # in a sweep sees IDENTICAL needle prompts.
-    _random.seed(int(args.seed))
-    np.random.seed(int(args.seed))
+    _random.seed(P['seed'])
+    np.random.seed(P['seed'])
     t0 = time()
-    data = getattr(_niah, args.needle_task)(
-        model=model_id,
-        max_seq_lengths=[int(args.needle_seqlen)],
-        num_samples=int(args.needle_n_sample))['test']
-    print(f"[needle_nll] generated {len(data)} {args.needle_task} prompts "
-          f"in {time() - t0:.1f}s (seed={args.seed})")
+    data = []
+    for _t in P['tasks']:
+        data += list(getattr(_niah, _t)(
+            model=model_id,
+            max_seq_lengths=[P['seqlen']],
+            num_samples=P['n'])['test'])
+    print(f"[needle_nll] generated {len(data)} {'+'.join(P['tasks'])} prompts "
+          f"in {time() - t0:.1f}s (seed={P['seed']}, seqlen={P['seqlen']}, chat={P['chat']})")
 
     batches = []
     for ex in data:
-        prompt = ex['input'] + ' ' + ex['gen_prefix']
-        answer = ex['outputs'][0] if isinstance(ex['outputs'], list) else ex['outputs']
-        enc_prompt = tokenizer(prompt, return_tensors='pt',
-                               add_special_tokens=True).input_ids
-        enc_full = tokenizer(prompt + ' ' + answer, return_tensors='pt',
-                             add_special_tokens=True).input_ids
+        # multi-answer tasks (multivalue / multiquery) are graded on ALL references,
+        # so the teacher-forced answer is all of them (legacy single-task names keep
+        # outputs[0], byte-identical to before).
+        outs = ex['outputs'] if isinstance(ex['outputs'], list) else [ex['outputs']]
+        answer = ', '.join(outs) if ov and ov.get('needle_tasks') else outs[0]
+        if P['chat']:
+            # RULER's chat path (utils/ruler.py): user turn = input, assistant turn
+            # started and continued with the answer prefix; template carries BOS.
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": ex['input']}], tokenize=False,
+                add_generation_prompt=True) + ex['gen_prefix']
+            enc_prompt = tokenizer(prompt, return_tensors='pt', add_special_tokens=False).input_ids
+            enc_full = tokenizer(prompt + ' ' + answer, return_tensors='pt',
+                                 add_special_tokens=False).input_ids
+        else:
+            prompt = ex['input'] + ' ' + ex['gen_prefix']
+            enc_prompt = tokenizer(prompt, return_tensors='pt',
+                                   add_special_tokens=True).input_ids
+            enc_full = tokenizer(prompt + ' ' + answer, return_tensors='pt',
+                                 add_special_tokens=True).input_ids
         if enc_full.shape[1] <= enc_prompt.shape[1]:
             continue
         labels = enc_full.clone()
@@ -952,7 +987,7 @@ def _build_needle_loader(args, model_id, device):
 
 
 def _run_needle_nll(args, ctx, evaluator, model_id, *,
-                    stride=0, prefill_prompt=False, last_tokens=None):
+                    stride=0, prefill_prompt=False, last_tokens=None, ov=None):
     """Cheap NIAH cross-entropy NLL via utils.eval.eval_loss. The loader
     yields (input_ids, attention_mask, labels) with labels=-100 on prompt
     tokens, so eval_loss's get_loss_mask naturally restricts CE to the
@@ -963,13 +998,13 @@ def _run_needle_nll(args, ctx, evaluator, model_id, *,
     untouched, so needle_nll_s512 / needle_nll_pp512_s128 reuse this path
     by varying these args.
     """
-    loader = _build_needle_loader(args, model_id, evaluator.model.device)
+    loader = _build_needle_loader(args, model_id, evaluator.model.device, ov)
     if len(loader) == 0:
         raise RuntimeError("[needle_nll] no usable NIAH prompts after tokenisation")
     use_cache = stride > 0 or prefill_prompt
     configure_model_cache(args, evaluator.model, use_cache=use_cache)
     return eval_loss(model=evaluator.model, accelerator=ctx.accelerator,
-                     loader=loader, seqlen=int(args.needle_seqlen),
+                     loader=loader, seqlen=_needle_params(args, ov)['seqlen'],
                      loss_func='cross_entropy', dense_logits_list=None,
                      key_token_list=None, stride=stride,
                      last_tokens=last_tokens, prefill_prompt=prefill_prompt)
@@ -981,17 +1016,18 @@ def _run_needle_nll(args, ctx, evaluator, model_id, *,
 _NEEDLE_DENSE_CACHE = {}
 
 
-def _needle_dense_cache_path(args, last_tokens):
+def _needle_dense_cache_path(args, last_tokens, ov=None):
     model_basename = os.path.basename(args.model_name.rstrip('/'))
-    key = (f"{model_basename}_{args.needle_task}_{args.needle_seqlen}_"
-           f"{args.needle_n_sample}_seed{args.seed}_lt{last_tokens}")
+    P = _needle_params(args, ov)
+    key = (f"{model_basename}_{'+'.join(P['tasks'])}_{P['seqlen']}_"
+           f"{P['n']}_seed{P['seed']}_lt{last_tokens}" + ('_chat' if P['chat'] else ''))
     save_dir = args.save or '.'
     cache_dir = os.path.join(save_dir, '_cache')
     os.makedirs(cache_dir, exist_ok=True)
     return os.path.join(cache_dir, f'needle_dense_{key}.pt'), key
 
 
-def _get_needle_dense_logits(args, ctx, model_id, device, last_tokens=512):
+def _get_needle_dense_logits(args, ctx, model_id, device, last_tokens=512, ov=None):
     """Lazy compute + cache FP teacher dense_logits on the (deterministic)
     needle prompts. Cached in-memory per process AND on disk so re-runs
     across archs (each a fresh process) don't rebuild it.
@@ -999,7 +1035,7 @@ def _get_needle_dense_logits(args, ctx, model_id, device, last_tokens=512):
     Returns a _LazyGpuList (CPU-backed, per-position upload to `device` on
     use) — drop-in for evaluator.dense_logits[dataset] in eval_loss.
     """
-    cache_path, key = _needle_dense_cache_path(args, last_tokens)
+    cache_path, key = _needle_dense_cache_path(args, last_tokens, ov)
     if key in _NEEDLE_DENSE_CACHE:
         return _LazyGpuList(_NEEDLE_DENSE_CACHE[key], device)
     if os.path.exists(cache_path):
@@ -1012,12 +1048,11 @@ def _get_needle_dense_logits(args, ctx, model_id, device, last_tokens=512):
     from utils.func import get_hfmodel
     from utils.eval import get_logits
     print(f"[needle_jsd] FP teacher logits cache miss — computing one-time "
-          f"(task={args.needle_task}, n={args.needle_n_sample}, "
-          f"seqlen={args.needle_seqlen}, seed={args.seed})…")
+          f"({_needle_params(args, ov)})…")
     t0 = time()
     fp_model = get_hfmodel(model_id, dtype=ctx.dtype, device_map=ctx.device_map)
     fp_model.eval()
-    needle_loader = _build_needle_loader(args, model_id, fp_model.device)
+    needle_loader = _build_needle_loader(args, model_id, fp_model.device, ov)
     if len(needle_loader) == 0:
         del fp_model
         clean_up()
@@ -1039,24 +1074,41 @@ def _get_needle_dense_logits(args, ctx, model_id, device, last_tokens=512):
 
 
 def _run_needle_jsd(args, ctx, evaluator, model_id, *,
-                    stride=0, prefill_prompt=False, last_tokens=512):
+                    stride=0, prefill_prompt=False, last_tokens=512, loss_func='jsd', ov=None,
+                    dump_to=None):
     """JSD variant of needle eval. Mirrors _run_needle_nll but uses cached
     FP-teacher dense_logits + loss_func='jsd'. The needle prompts are
     seed-deterministic, so the same dense_logits applies to every arch.
     """
-    loader = _build_needle_loader(args, model_id, evaluator.model.device)
+    loader = _build_needle_loader(args, model_id, evaluator.model.device, ov)
     if len(loader) == 0:
         raise RuntimeError("[needle_jsd] no usable NIAH prompts after tokenisation")
+    P = _needle_params(args, ov)
     dense_logits = _get_needle_dense_logits(
         args, ctx, model_id, evaluator.model.device,
-        last_tokens=last_tokens if last_tokens is not None else int(args.needle_seqlen))
+        last_tokens=last_tokens if last_tokens is not None else P['seqlen'], ov=ov)
     use_cache = stride > 0 or prefill_prompt
     configure_model_cache(args, evaluator.model, use_cache=use_cache)
-    return eval_loss(model=evaluator.model, accelerator=ctx.accelerator,
-                     loader=loader, seqlen=int(args.needle_seqlen),
-                     loss_func='jsd', dense_logits_list=dense_logits,
+    # `needle_dump` (finding 122): per-token diagnostics per PROMPT, so task subsets / prompt
+    # counts can be scored offline (cost reduction) without another GPU pass. jsd only.
+    stats = [] if (ov and ov.get('needle_dump') and dump_to) else None
+    # the teacher-distance family (jsd / margin / smargin) all read the cached dense logits
+    value = eval_loss(model=evaluator.model, accelerator=ctx.accelerator,
+                     loader=loader, seqlen=P['seqlen'],
+                     loss_func=loss_func, dense_logits_list=dense_logits,
                      key_token_list=None, stride=stride,
-                     last_tokens=last_tokens, prefill_prompt=prefill_prompt)
+                     last_tokens=last_tokens, prefill_prompt=prefill_prompt,
+                     token_stats=stats)
+    if stats is not None:
+        from utils.eval import TOKEN_STAT_FIELDS
+        arr = np.concatenate(stats, 0)
+        doc = np.concatenate([np.full(len(a), k, np.int32) for k, a in enumerate(stats)])
+        pos = np.concatenate([np.arange(len(a), dtype=np.int32) for a in stats])
+        os.makedirs(os.path.dirname(dump_to), exist_ok=True)
+        np.savez_compressed(dump_to, stats=arr, doc=doc, pos=pos, fields=np.array(TOKEN_STAT_FIELDS),
+                            tasks=np.array(P['tasks']), n_per_task=P['n'])
+        print(f"[needle_jsd] dumped {arr.shape[0]} answer tokens from {len(stats)} prompts -> {dump_to}")
+    return value
 
 
 def _build_gsm8k_unpadded_loader(evaluator, device):
@@ -1115,6 +1167,36 @@ def _run_gsm8k_unpad_pp(args, ctx, evaluator, *,
                      loss_func='jsd', dense_logits_list=dense_logits,
                      key_token_list=None, stride=stride,
                      last_tokens=last_tokens, prefill_prompt=prefill_prompt)
+
+
+def _run_token_stats(args, ctx, evaluator, dataset, eval_kwargs, key, result_path):
+    """kind='token_stats': the plain JSD task on the same group/protocol, plus the
+    per-token diagnostics written next to result_<idx>.json as
+    token_stats/<key>/<idx>.npz  (stats [T, F] float32, doc [T], pos [T], fields).
+    `pos` is the index inside the scored window, so the stride phase is pos % stride.
+    Refuses to return a value its own token array disagrees with."""
+    from utils.eval import TOKEN_STAT_FIELDS
+    kw = {k: v for k, v in eval_kwargs.items() if k != 'kind'}
+    stats = []
+    value = run_task(args, ctx.accelerator, evaluator, dataset, kw, token_stats=stats)
+    if isinstance(value, torch.Tensor):
+        value = value.item()
+    arr = np.concatenate(stats, 0)
+    doc = np.concatenate([np.full(len(a), i, np.int32) for i, a in enumerate(stats)])
+    pos = np.concatenate([np.arange(len(a), dtype=np.int32) for a in stats])
+    tok_mean = float(arr[:, TOKEN_STAT_FIELDS.index('jsd')].astype(np.float64).mean())
+    # 2026-09-28: 1e-3 tripped at 1.08e-3 on a rotated-Qwen config (bf16 batch-mean vs float64
+    # per-token mean); a masking / alignment bug shows up at >> 1 %, so 5e-3 still guards it.
+    if abs(tok_mean - value) > 5e-3 * max(abs(value), 1e-3):
+        raise RuntimeError(f"[token_stats] {key}: mean per-token jsd {tok_mean:.6g} != "
+                           f"returned loss {value:.6g}")
+    out = os.path.join(os.path.dirname(result_path), 'token_stats', key)
+    os.makedirs(out, exist_ok=True)
+    np.savez_compressed(os.path.join(out, f'{args.idx}.npz'), stats=arr, doc=doc, pos=pos,
+                        fields=np.array(TOKEN_STAT_FIELDS))
+    print(f"[correlation/eval]   token_stats {key}: {arr.shape[0]} tokens x "
+          f"{arr.shape[1]} fields from {len(stats)} sequences -> {out}/{args.idx}.npz")
+    return value
 
 
 def _run_calibration_task(args, ctx, evaluator, dataset, eval_kwargs):
@@ -1257,6 +1339,17 @@ def _run_benchmark_block(args, model, model_id, which, arch=None, idx=None):
 # Eval mode — evaluate one arch (by --idx) on the requested metrics
 # ════════════════════════════════════════════════════════════════════════════
 def cmd_eval(args):
+    if getattr(args, 'kv_rotate', False):
+        from model.kv_rotation import enable_kv_rotation, self_test
+        self_test()
+        enable_kv_rotation(parts=getattr(args, 'kv_rotate_parts', 'kv'),
+                           basis_name=getattr(args, 'kv_rotate_basis', 'hadamard'))
+        legacy_root = (glob.glob(os.path.join(args.save or '.', 'result_*.json'))
+                       and not getattr(args, 'measure_dir', ''))
+        if legacy_root:
+            raise SystemExit('[kv_rotate] this pool keeps its results at the save-dir ROOT; '
+                             'a rotated run would overwrite unrotated values. Pass '
+                             '--measure_dir <save>/m_rot (or similar).')
     ctx = _build_ctx(args)
     archs_csv = (args.archs_csv
                  or os.path.join(args.save or '.', 'archs.csv'))
@@ -1481,6 +1574,17 @@ def cmd_eval(args):
               f"n_sample={spec['n_sample']} seqlen={spec['seqlen']} "
               f"use_key_token={spec['use_key_token']} ===")
         evaluator = _build_evaluator(args, ctx, precomputed=payload, **spec)
+        # Copy structure of this group's scored window (finding 38): arch-independent,
+        # so the FIRST job that builds the group writes it and every later job skips it.
+        # Costs one python pass over the documents already in memory.
+        try:
+            from utils.data import write_token_ref
+            for _ds in spec['datasets']:
+                _ldr = evaluator.train_loaders.get(_ds)
+                if _ldr is not None:
+                    write_token_ref(args.model_name, g, _ds, _ldr, spec.get('last_tokens'))
+        except Exception as _e:                                 # noqa: BLE001
+            print(f"[token_ref] skipped for group {g}: {_e!r}")
         model = _sample_or_reuse(evaluator, arch)
 
         for key, group, dataset, eval_kwargs in pending_calib:
@@ -1490,24 +1594,31 @@ def cmd_eval(args):
             t0 = time()
             try:
                 kind = eval_kwargs.get('kind')
+                _nov = {k: v for k, v in eval_kwargs.items() if k.startswith('needle_')} or None
                 if kind == 'needle_nll':
                     value = _run_needle_nll(
                         args, ctx, evaluator, model_id,
                         stride=eval_kwargs.get('stride', 0),
                         prefill_prompt=eval_kwargs.get('prefill_prompt', False),
-                        last_tokens=eval_kwargs.get('last_tokens'))
+                        last_tokens=eval_kwargs.get('last_tokens'), ov=_nov)
                 elif kind == 'needle_jsd':
                     value = _run_needle_jsd(
                         args, ctx, evaluator, model_id,
                         stride=eval_kwargs.get('stride', 0),
                         prefill_prompt=eval_kwargs.get('prefill_prompt', False),
-                        last_tokens=eval_kwargs.get('last_tokens', 512))
+                        last_tokens=eval_kwargs.get('last_tokens', 512),
+                        loss_func=eval_kwargs.get('loss_func', 'jsd'), ov=_nov,
+                        dump_to=os.path.join(os.path.dirname(result_path), 'token_stats', key,
+                                             f'{args.idx}.npz'))
                 elif kind == 'gsm8k_unpad_pp':
                     value = _run_gsm8k_unpad_pp(
                         args, ctx, evaluator,
                         stride=eval_kwargs.get('stride', 128),
                         prefill_prompt=eval_kwargs.get('prefill_prompt', True),
                         last_tokens=eval_kwargs.get('last_tokens', 512))
+                elif kind == 'token_stats':
+                    value = _run_token_stats(args, ctx, evaluator, dataset,
+                                             eval_kwargs, key, result_path)
                 else:
                     value = _run_calibration_task(args, ctx, evaluator,
                                                   dataset, eval_kwargs)
@@ -1867,7 +1978,10 @@ def build_parser():
     p.add_argument('--seed', type=int, default=0)
     # quant methods / bits
     p.add_argument('--w_method', type=str, nargs='+', default=[],
-                   choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq'])
+                   choices=['fp16', 'awq', 'gptq', 'qeft', 'hqq', 'awq_table'])
+    p.add_argument('--awq_table', type=str, default=None,
+                   help='table dir for --w_method awq_table: the deployed AWQ weights rebuilt '
+                        'exactly in ~1.6 s instead of run_awq (findings 69-71)')
     p.add_argument('--kv_method', type=str, nargs='+', default=['kivi'],
                    choices=['fp16', 'hqq', 'kivi', 'think'],
                    help="space-separated list (e.g. 'kivi think' enables "
@@ -2027,6 +2141,24 @@ def build_parser():
                    help='(eval) run LongBench benchmark.')
     p.add_argument('--longbench_e', action='store_true',
                    help='(eval) run LongBench-E benchmark.')
+    p.add_argument('--kv_rotate', action='store_true',
+                   help='(eval) quantise K/V in a Hadamard-rotated head_dim basis '
+                        '(model/kv_rotation.py). A global eval-time primitive like '
+                        '--attn_sink: part of the measurement config, so rotated numbers '
+                        'land in their own m_<sha>/ folder — or pass --measure_dir '
+                        'explicitly on a legacy (root-level) pool, which would otherwise '
+                        'keep writing to the root.')
+    p.add_argument('--kv_rotate_parts', choices=['kv', 'k', 'v'], default='kv',
+                   help='(eval, with --kv_rotate) which tensor to rotate. Ablation for '
+                        'WHICH tensor the primitive fixes; keys carry the outlier '
+                        'channels (KVQuant / RotateKV). MUST be a flag, not an env var: '
+                        'the eval runs inside docker and only -e vars cross that boundary '
+                        '(2026-09-23, six runs silently fell back to kv).')
+    p.add_argument('--kv_rotate_basis', choices=['hadamard', 'random'], default='hadamard',
+                   help='(eval, with --kv_rotate) rotation basis. random = seeded random\n'
+                        'orthogonal, the control for whether the BASIS matters or any\n'
+                        'energy-spreading rotation works (decides whether an OSCAR-style\n'
+                        'data-driven basis is worth building).')
     p.add_argument('--force', action='store_true',
                    help='(eval) re-measure everything requested even though '
                         'result_<idx>.json already has a value — `--metrics all`, '
